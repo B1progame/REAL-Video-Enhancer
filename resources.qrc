@@ -1,0 +1,21 @@
+<RCC>
+  <qresource prefix="icons">
+    <file>icons/logo-v3.svg</file>
+    <file>icons/check.svg</file>
+    <file>icons/check-square.svg</file>
+    <file>icons/coffee.svg</file>
+    <file>icons/cpu.svg</file>
+    <file>icons/arrow-up.svg</file>
+    <file>icons/arrow-down.svg</file>
+    <file>icons/download.svg</file>
+    <file>icons/github.svg</file>
+    <file>icons/home.svg</file>
+    <file>icons/info.svg</file>
+    <file>icons/pause-circle.svg</file>
+    <file>icons/play-circle.svg</file>
+    <file>icons/settings.svg</file>
+    <file>icons/plus-circle.svg</file>
+    <file>icons/trash-2.svg</file>
+    <file>icons/x-circle.svg</file>
+  </qresource>
+</RCC>

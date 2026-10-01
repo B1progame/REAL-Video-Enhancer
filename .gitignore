@@ -1,0 +1,26 @@
+Screenshots/
+github/
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Dev files
+build
+dist
+venv
+.venv/
+/bin/
+/python/
+/custom_models/
+/models/
+/temp/
+/.pytest_cache/
+**/.pytest_cache/
+/settings.txt
+/log.txt
+*.log
+*.pth
+*.pt
+*.onnx
+*.engine
