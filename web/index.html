@@ -1,0 +1,888 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>REAL Video Enhancer Web UI</title>
+    <link rel="icon" type="image/svg+xml" href="logo-v2.svg?v=20260402b" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css?v=20260402b" />
+  </head>
+  <body class="booting">
+    <div class="bg-layer"></div>
+    <div class="noise-overlay"></div>
+    <div class="aurora aurora-a"></div>
+    <div class="aurora aurora-b"></div>
+    <div class="aurora aurora-c"></div>
+    <div id="particles" class="particles" aria-hidden="true"></div>
+    <div id="cursorGlow" class="cursor-glow" aria-hidden="true"></div>
+    <div id="etaToasts" class="eta-toasts" aria-live="polite" aria-atomic="false"></div>
+    <div id="startupScreen" class="startup-screen" aria-live="polite" aria-label="Starting web UI">
+      <div class="startup-shell glass">
+        <div class="startup-copy">
+          <span class="startup-eyebrow">Backend Warmup</span>
+          <h1>B1progame RVE Web UI</h1>
+          <p id="startupStatus" class="startup-status">Preparing startup scene...</p>
+          <p id="startupDetail" class="startup-detail">Initializing browser shell and backend bridge</p>
+        </div>
+        <div class="startup-scene">
+          <canvas id="startupWireframeCanvas" class="startup-wireframe-canvas" aria-label="Startup wireframe loader"></canvas>
+          <svg id="startupWireframeSvg" class="startup-wireframe-svg" viewBox="0 0 320 320" aria-hidden="true"></svg>
+        </div>
+        <div id="startupInstallPanel" class="startup-install-panel">
+          <div class="startup-install-head">
+            <span>Runtime Setup Log</span>
+            <span id="startupInstallState">Waiting</span>
+          </div>
+          <pre id="startupInstallLog" class="startup-install-log">Waiting for runtime checks...</pre>
+        </div>
+        <div class="startup-progress-block">
+          <div class="startup-progress-track">
+            <span id="startupProgressFill" class="startup-progress-fill"></span>
+          </div>
+          <div class="startup-progress-meta">
+            <span id="startupProgressLabel">0%</span>
+            <span id="startupEtaLabel">Estimating backend setup time...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="app-shell">
+      <aside class="left-rail glass">
+        <div class="logo">RVE</div>
+        <button class="nav-btn active" data-page="home" title="Home">Home</button>
+        <button class="nav-btn" data-page="process" title="Process">Process</button>
+        <button class="nav-btn" data-page="download" title="Download">Download</button>
+        <button class="nav-btn" data-page="runtime" title="Runtime">Runtime</button>
+        <button class="nav-btn" data-page="python" title="Python">Python</button>
+        <button class="nav-btn" data-page="settings" title="Settings">Settings</button>
+        <button class="nav-btn danger nav-quit-btn" id="quitAppBtn" title="Quit">Quit</button>
+      </aside>
+
+      <main class="content-wrap">
+        <section class="page active" id="page-home">
+          <header class="topbar glass">
+            <h1>REAL Video Enhancer</h1>
+            <div class="topbar-actions">
+              <span class="sub">Browser Port of Default Desktop Layout</span>
+              <button class="btn" id="boostVisuals">Boost Visuals</button>
+            </div>
+          </header>
+
+          <section class="feature-ribbon">
+            <article class="feature-card glass pulse">
+              <h3>GPU Load</h3>
+              <strong id="gpuLoad">41%</strong>
+              <div class="meter"><span id="gpuMeter" style="width: 41%"></span></div>
+            </article>
+            <article class="feature-card glass pulse" style="--d: 0.2s">
+              <h3>Throughput</h3>
+              <strong id="throughput">78 FPS</strong>
+              <div class="meter"><span id="fpsMeter" style="width: 78%"></span></div>
+            </article>
+            <article class="feature-card glass pulse" style="--d: 0.35s">
+              <h3>Pipeline Health</h3>
+              <strong id="health">Optimal</strong>
+              <div class="meter"><span style="width: 92%"></span></div>
+            </article>
+          </section>
+
+          <div class="home-grid">
+            <article class="panel glass">
+              <h2>Change Log</h2>
+              <textarea readonly class="logbox">- Added web-first navigation shell
+- Added process tabs (General, Encoder Options, Render Queue, Advanced, Logs)
+- Added settings tabs matching desktop structure
+- Added queue preview and control actions</textarea>
+            </article>
+
+            <article class="panel glass">
+              <h2>System Info</h2>
+              <textarea id="systemInfoBox" readonly class="logbox">OS: Windows
+GPU: Auto detect
+RAM: 32GB
+Backend: Auto
+Version: Web Preview</textarea>
+            </article>
+          </div>
+        </section>
+
+        <section class="page" id="page-process">
+            <header class="topbar glass compact">
+              <h1>Process</h1>
+              <div class="status-strip">
+                <span id="etaText">ETA: --</span>
+                <span id="fpsText">Gen FPS: --</span>
+                <span id="gpuText">GPU: --</span>
+                <span id="statusText">STATUS: Ready</span>
+              </div>
+            </header>
+
+          <div class="process-layout">
+            <section class="panel glass preview-pane">
+              <div class="preview-title-row">
+                <h2>Preview</h2>
+                <label class="inline-toggle preview-toggle">
+                  <span>Preview</span>
+                  <input id="processPreviewEnabled" type="checkbox" checked />
+                </label>
+              </div>
+              <div id="livePreviewBox" class="preview-box" role="button" tabindex="0" aria-label="Open enlarged preview">
+                <img id="livePreviewVideo" class="preview-video" alt="Live preview frame" />
+                <span id="livePreviewLabel" class="preview-label">Live Preview - Idle</span>
+              </div>
+              <div class="preview-meta-card">
+                <div class="preview-meta-row"><span>FPS</span><strong id="previewInfoFps">--</strong></div>
+                <div class="preview-meta-row"><span>Resolution</span><strong id="previewInfoResolution">--</strong></div>
+                <div class="preview-meta-row"><span>Frames</span><strong id="previewInfoFrames">--</strong></div>
+                <div class="preview-meta-row"><span>Bitrate</span><strong id="previewInfoBitrate">--</strong></div>
+                <div class="preview-meta-row"><span>Encoder</span><strong id="previewInfoEncoder">--</strong></div>
+                <div class="preview-meta-row"><span>Container</span><strong id="previewInfoContainer">--</strong></div>
+                <div class="preview-meta-row"><span>Color Space</span><strong id="previewInfoColorSpace">--</strong></div>
+                <div class="preview-meta-row"><span>Pixel Format</span><strong id="previewInfoPixelFormat">--</strong></div>
+              </div>
+              <div class="preview-bottom-bar">
+                <div class="preview-quick-actions">
+                  <button class="preview-mini-btn" id="previewPauseBtn" type="button" aria-label="Pause render">||</button>
+                  <button class="preview-mini-btn danger" id="previewStopBtn" type="button" aria-label="Stop render">X</button>
+                </div>
+                <div class="preview-progress-track" aria-label="Render progress">
+                  <span id="previewProgressFill" class="preview-progress-fill"></span>
+                </div>
+                <span id="previewProgressText" class="preview-progress-text">0%</span>
+                <span id="previewProgressDetail" class="preview-progress-detail" aria-live="polite"></span>
+              </div>
+            </section>
+
+            <section class="panel glass process-controls">
+              <div class="tabs" data-tabs="process-tabs">
+                <button class="tab active" data-tab="general">General</button>
+                <button class="tab" data-tab="encoder">Encoder Options</button>
+                <button class="tab" data-tab="queue">Render Queue</button>
+                <button class="tab" data-tab="advanced">Advanced</button>
+                <button class="tab" data-tab="logs">Logs</button>
+              </div>
+
+              <div class="tab-panels">
+                <div class="tab-panel active" id="tab-general">
+                  <div class="form-grid two">
+                    <button class="btn" id="selectInputVideoBtn">Input Video</button>
+                    <button class="btn" id="batchSelectBtn">Batch Select</button>
+                    <button class="btn" id="selectOutputFolderBtn">Select Output Folder</button>
+                    <button class="btn" id="openOutputFolderBtn">Open Output Folder</button>
+                  </div>
+
+                  <div class="form-grid two">
+                    <label>Input Path
+                      <input id="inputPathField" type="text" value="No file selected" readonly />
+                    </label>
+                    <label>Output Path
+                      <input id="outputPathField" type="text" value="No folder selected" readonly />
+                    </label>
+                  </div>
+
+                  <div class="quick-stats">
+                    <div class="stat-card"><span>Resolution</span><strong id="videoRes">-</strong></div>
+                    <div class="stat-card"><span>Duration</span><strong id="videoDuration">-</strong></div>
+                    <div class="stat-card"><span>Frames</span><strong id="videoFrames">-</strong></div>
+                    <div class="stat-card"><span>Output FPS</span><strong id="outputFps">-</strong></div>
+                  </div>
+
+                  <div class="form-grid two">
+                    <label>Backend
+                      <select id="backendSelect"></select>
+                    </label>
+                    <label>Render Profile
+                      <select id="renderProfile">
+                        <option>Balanced</option>
+                        <option>Quality First</option>
+                        <option>Speed First</option>
+                        <option>Animation Focus</option>
+                        <option>Realistic Focus</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <div class="toggle-grid modern">
+                    <label class="switch-row"><span>Interpolate</span><input id="toggleInterpolate" type="checkbox" checked /></label>
+                    <label class="switch-row"><span>Upscale</span><input id="toggleUpscale" type="checkbox" checked /></label>
+                    <label class="switch-row"><span>SloMo Mode</span><input id="toggleSloMo" type="checkbox" /></label>
+                    <label class="switch-row"><span>Decompress</span><input id="toggleDecompress" type="checkbox" /></label>
+                    <label class="switch-row"><span>Denoise</span><input id="toggleDenoise" type="checkbox" /></label>
+                    <label class="switch-row"><span>Deblur</span><input id="toggleDeblur" type="checkbox" /></label>
+                  </div>
+
+                  <section class="module-stack">
+                    <article id="moduleInterpolate" class="option-module show">
+                      <div class="module-head">
+                        <h3>Interpolation</h3>
+                        <span class="chip">Frame Generation</span>
+                      </div>
+                      <div class="form-grid two">
+                        <label>Interpolate Model
+                          <select id="interpolateModel"></select>
+                        </label>
+                        <label>Interpolation Multiplier
+                          <input id="interpolateFactor" type="number" value="2" min="2" max="8" />
+                        </label>
+                        <label>Interpolation Method
+                          <select id="interpolateMethod">
+                            <option>Optical Flow (Default)</option>
+                            <option>Motion Vectors</option>
+                            <option>Hybrid Adaptive</option>
+                          </select>
+                        </label>
+                        <label>Scene Change Threshold
+                          <input id="interpolateSceneThreshold" type="range" min="1" max="100" value="36" />
+                        </label>
+                      </div>
+                    </article>
+
+                    <article id="moduleUpscale" class="option-module show">
+                      <div class="module-head">
+                        <h3>Upscaling</h3>
+                        <span class="chip">Detail Recovery</span>
+                      </div>
+                      <div class="form-grid two">
+                        <label>Upscale Model
+                          <select id="upscaleModel"></select>
+                        </label>
+                        <label>Upscale Scale
+                          <input id="upscaleScale" type="number" value="2" min="1" max="8" />
+                        </label>
+                        <label>Sharpening
+                          <input id="upscaleSharpening" type="range" min="0" max="100" value="24" />
+                        </label>
+                        <label>Texture Boost
+                          <input id="upscaleTextureBoost" type="range" min="0" max="100" value="18" />
+                        </label>
+                      </div>
+                    </article>
+
+                    <article id="moduleSloMo" class="option-module">
+                      <div class="module-head">
+                        <h3>SloMo</h3>
+                        <span class="chip">Motion Stylization</span>
+                      </div>
+                      <div class="form-grid two">
+                        <label>Playback Target
+                          <select id="sloMoTarget">
+                            <option>0.50x</option>
+                            <option>0.25x</option>
+                            <option>0.10x</option>
+                          </select>
+                        </label>
+                        <label>Frame Blend Amount
+                          <input id="sloMoBlend" type="range" min="0" max="100" value="62" />
+                        </label>
+                        <label>Motion Stabilization
+                          <select id="sloMoStabilize">
+                            <option>Balanced</option>
+                            <option>Strong</option>
+                            <option>Off</option>
+                          </select>
+                        </label>
+                        <label>Hold Last Frame
+                          <input id="sloMoHoldFrame" type="checkbox" />
+                        </label>
+                      </div>
+                    </article>
+
+                    <article id="moduleDecompress" class="option-module">
+                      <div class="module-head">
+                        <h3>Decompression</h3>
+                        <span class="chip">Artifact Cleanup</span>
+                      </div>
+                      <div class="form-grid two">
+                        <label>Decompress Model
+                          <select id="decompressModel"></select>
+                        </label>
+                        <label>Compression Bias
+                          <select id="compressionBias">
+                            <option>High/Medium Source</option>
+                            <option>Medium/Low Source</option>
+                            <option>Low Source</option>
+                          </select>
+                        </label>
+                        <label>Artifact Cleanup Strength
+                          <input id="decompressStrength" type="range" min="1" max="10" value="6" />
+                        </label>
+                        <label>Banding Reduction
+                          <select id="decompressBanding">
+                            <option>Balanced</option>
+                            <option>Aggressive</option>
+                            <option>Off</option>
+                          </select>
+                        </label>
+                      </div>
+                    </article>
+
+                    <article id="moduleDenoise" class="option-module">
+                      <div class="module-head">
+                        <h3>Denoise</h3>
+                        <span class="chip">Noise Reduction</span>
+                      </div>
+                      <div class="form-grid two">
+                        <label>Denoise Model
+                          <select id="denoiseModel"></select>
+                        </label>
+                        <label>Strength
+                          <input id="denoiseStrength" type="range" min="1" max="10" value="5" />
+                        </label>
+                        <label>Temporal Stabilization
+                          <select id="denoiseTemporal">
+                            <option>Medium</option>
+                            <option>Strong</option>
+                            <option>Off</option>
+                          </select>
+                        </label>
+                        <label>Keep Film Grain
+                          <input id="denoiseFilmGrain" type="checkbox" checked />
+                        </label>
+                      </div>
+                    </article>
+
+                    <article id="moduleDeblur" class="option-module">
+                      <div class="module-head">
+                        <h3>Deblur</h3>
+                        <span class="chip">Motion Recovery</span>
+                      </div>
+                      <div class="form-grid two">
+                        <label>Deblur Model
+                          <select id="deblurModel"></select>
+                        </label>
+                        <label>Motion Sensitivity
+                          <input id="deblurStrength" type="range" min="1" max="10" value="6" />
+                        </label>
+                        <label>Edge Recovery
+                          <input id="deblurEdgeRecovery" type="range" min="0" max="100" value="38" />
+                        </label>
+                        <label>Ghosting Guard
+                          <select id="deblurGhostingGuard">
+                            <option>Auto</option>
+                            <option>Conservative</option>
+                            <option>Aggressive</option>
+                          </select>
+                        </label>
+                      </div>
+                    </article>
+                  </section>
+
+                  <button id="addQueue" class="btn btn-accent">Add to Render Queue</button>
+                </div>
+
+                <div class="tab-panel" id="tab-encoder">
+                  <div class="form-grid two">
+                    <label>Video Encoder
+                      <select id="videoEncoder">
+                        <option>libx264</option>
+                        <option>libx265</option>
+                        <option>vp9</option>
+                        <option>av1</option>
+                        <option>prores</option>
+                        <option>ffv1</option>
+                        <option>utvideo</option>
+                        <option>x264_nvenc</option>
+                        <option>x265_nvenc</option>
+                        <option>av1_nvenc</option>
+                      </select>
+                    </label>
+                    <label>Video Encoder Speed
+                      <select id="videoEncoderSpeed">
+                        <option>placebo</option>
+                        <option>slow</option>
+                        <option selected>medium</option>
+                        <option>fast</option>
+                        <option>fastest</option>
+                      </select>
+                    </label>
+                    <label>Video Quality Preset
+                      <select id="videoQualityPreset">
+                        <option>Low</option>
+                        <option>Medium</option>
+                        <option selected>High</option>
+                        <option>Very High</option>
+                        <option>Ultra</option>
+                        <option>Lossless</option>
+                      </select>
+                    </label>
+                    <label>Video Quality (CRF)
+                      <input id="videoCrf" type="number" value="16" min="0" max="51" />
+                    </label>
+                    <label>Video Container
+                      <select id="videoContainer">
+                        <option>mkv</option>
+                        <option>mp4</option>
+                        <option>mov</option>
+                        <option>webm</option>
+                        <option>avi</option>
+                      </select>
+                    </label>
+                    <label>Video Pixel Format
+                      <select id="videoPixelFormat">
+                        <option>yuv420p</option>
+                        <option>yuv422p</option>
+                        <option>yuv444p</option>
+                        <option>yuv420p10le</option>
+                        <option>yuv422p10le</option>
+                        <option>yuv444p10le</option>
+                      </select>
+                    </label>
+                    <label>Audio Encoder
+                      <select id="audioEncoder">
+                        <option>aac</option>
+                        <option>libmp3lame</option>
+                        <option>opus</option>
+                        <option>copy_audio</option>
+                      </select>
+                    </label>
+                    <label>Audio Bitrate
+                      <select id="audioBitrate">
+                        <option>96k</option>
+                        <option>128k</option>
+                        <option selected>192k</option>
+                        <option>256k</option>
+                        <option>320k</option>
+                      </select>
+                    </label>
+                    <label>Subtitle Encoder
+                      <select id="subtitleEncoder">
+                        <option selected>copy_subtitle</option>
+                        <option>srt</option>
+                        <option>ass</option>
+                        <option>webvtt</option>
+                      </select>
+                    </label>
+                    <label>Tune
+                      <select id="videoTune">
+                        <option>none</option>
+                        <option>film</option>
+                        <option>animation</option>
+                        <option>grain</option>
+                        <option>fastdecode</option>
+                        <option>zerolatency</option>
+                      </select>
+                    </label>
+                    <label>Keyframe Interval
+                      <input id="keyframeInterval" type="number" min="1" max="300" value="48" />
+                    </label>
+                  </div>
+                  <textarea id="encoderPreview" class="logbox" readonly>Encoder command preview shows here.</textarea>
+                </div>
+
+                <div class="tab-panel" id="tab-queue">
+                  <div class="queue-layout">
+                    <ul id="renderQueue" class="queue-list"></ul>
+                    <div class="queue-actions">
+                      <button class="btn" id="queueRemove">Remove</button>
+                      <button class="btn" id="queueUp">Move Up</button>
+                      <button class="btn" id="queueDown">Move Down</button>
+                    </div>
+                  </div>
+                  <h3>Finished Output Files</h3>
+                  <ul class="queue-list small" id="outputFiles"></ul>
+                </div>
+
+                <div class="tab-panel" id="tab-advanced">
+                  <div class="toggle-grid">
+                    <label><input id="advBenchmarkMode" type="checkbox" /> Benchmark Mode</label>
+                    <label><input id="advTiling" type="checkbox" /> Tiling</label>
+                    <label><input id="advDynamicScaledFlowMirror" type="checkbox" /> Dynamic Scaled Flow</label>
+                    <label><input id="advEnsembleMirror" type="checkbox" /> Ensemble</label>
+                  </div>
+                  <div class="form-grid two">
+                    <label>Tile Size <input id="advTileSize" type="number" value="256" min="0" /></label>
+                    <label>TensorRT Optimization Level <input id="advTensorRTOptMirror" type="number" value="3" min="1" max="5" /></label>
+                  </div>
+                </div>
+
+                <div class="tab-panel" id="tab-logs">
+                  <textarea class="logbox" id="engineLog" readonly placeholder="Engine logs will appear here..."></textarea>
+                </div>
+              </div>
+
+              <div class="render-controls">
+                <button class="btn btn-accent" id="startRender">Start</button>
+                <button class="btn" id="pauseRender">Pause</button>
+                <button class="btn danger" id="killRender">Stop</button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="page" id="page-download">
+          <header class="topbar glass compact"><h1>Download</h1></header>
+          <article class="panel glass">
+            <h2>Backend & Models</h2>
+            <div class="form-grid two">
+              <button class="btn" id="installRecommended">Install Recommended</button>
+              <button class="btn" id="refreshBackends">Refresh Installed Backends</button>
+              <button class="btn" id="downloadInterpolationModels">Download Interpolation Models</button>
+              <button class="btn" id="downloadUpscaleModels">Download Upscale Models</button>
+              <button class="btn" id="downloadAllModels">Download All Models</button>
+            </div>
+            <textarea id="downloadLog" class="logbox" readonly>Download manager output...</textarea>
+          </article>
+        </section>
+
+        <section class="page" id="page-runtime">
+          <header class="topbar glass compact">
+            <h1>Runtime Setup</h1>
+            <div class="status-strip">
+              <span id="runtimeStatusBadge">STATUS: Idle</span>
+              <span id="runtimeStageText">Stage: Waiting</span>
+              <span id="runtimeEtaText">ETA: --</span>
+              <span id="runtimeRecommendation">Target: Detecting...</span>
+            </div>
+          </header>
+
+          <section class="feature-ribbon runtime-ribbon">
+            <article class="feature-card glass pulse">
+              <h3>Backend Bundle</h3>
+              <strong id="runtimeBackendReady">Checking</strong>
+              <div class="meter"><span id="runtimeBackendMeter" style="width: 10%"></span></div>
+            </article>
+            <article class="feature-card glass pulse" style="--d: 0.18s">
+              <h3>Python Runtime</h3>
+              <strong id="runtimePythonReady">Checking</strong>
+              <div class="meter"><span id="runtimePythonMeter" style="width: 10%"></span></div>
+            </article>
+            <article class="feature-card glass pulse" style="--d: 0.32s">
+              <h3>ffmpeg</h3>
+              <strong id="runtimeFfmpegReady">Checking</strong>
+              <div class="meter"><span id="runtimeFfmpegMeter" style="width: 10%"></span></div>
+            </article>
+          </section>
+
+          <div class="runtime-grid">
+            <article class="panel glass runtime-main-panel">
+              <div class="runtime-section-head">
+                <div>
+                  <h2>Recommended Setup Flow</h2>
+                  <p id="runtimeDetailText" class="runtime-copy">Checking what needs to be downloaded before the renderer can start.</p>
+                </div>
+                <span id="runtimeProgressLabel" class="runtime-progress-pill">0%</span>
+              </div>
+              <div class="runtime-progress-track">
+                <span id="runtimeProgressFill" class="runtime-progress-fill"></span>
+              </div>
+              <div class="runtime-meta-grid">
+                <div class="runtime-meta-card">
+                  <span>Recommended Backend</span>
+                  <strong id="runtimeRecommendationLabel">Detecting...</strong>
+                  <p id="runtimeRecommendationReason">Looking at the current machine to decide between CUDA/MPS and NCNN.</p>
+                </div>
+                <div class="runtime-meta-card">
+                  <span>Active Backends</span>
+                  <strong id="runtimeBackendsText">None detected yet</strong>
+                  <p id="runtimeProbeHint">The backend probe result updates after each install step.</p>
+                </div>
+              </div>
+              <div class="form-grid two runtime-actions">
+                <button class="btn btn-accent" id="runtimeStartBtn">Run Recommended Setup</button>
+                <button class="btn" id="runtimeRefreshBtn">Refresh Runtime Status</button>
+                <button class="btn" id="runtimeOpenFolderBtn">Open Runtime Folder</button>
+                <button class="btn" id="runtimeShowDownloadBtn">Jump To Downloads</button>
+              </div>
+            </article>
+
+            <article class="panel glass runtime-side-panel">
+              <h2>Runtime Paths</h2>
+              <div class="runtime-path-list">
+                <div class="runtime-path-item"><span>Working Directory</span><code id="runtimeWorkingDir">-</code></div>
+                <div class="runtime-path-item"><span>Runtime Root</span><code id="runtimeRootDir">-</code></div>
+                <div class="runtime-path-item"><span>Backend Script</span><code id="runtimeBackendPath">-</code></div>
+                <div class="runtime-path-item"><span>Python Target</span><code id="runtimePythonPath">-</code></div>
+                <div class="runtime-path-item"><span>ffmpeg Target</span><code id="runtimeFfmpegPath">-</code></div>
+                <div class="runtime-path-item"><span>Temp Directory</span><code id="runtimeTempPath">-</code></div>
+              </div>
+            </article>
+          </div>
+
+          <article class="panel glass runtime-log-panel">
+            <div class="runtime-section-head">
+              <div>
+                <h2>Install Log</h2>
+                <p class="runtime-copy">Live startup/runtime output, including pip activity and backend verification.</p>
+              </div>
+              <span id="runtimeLogState" class="runtime-log-state">Idle</span>
+            </div>
+            <pre id="runtimeInstallLog" class="runtime-install-log">Waiting for runtime activity...</pre>
+          </article>
+        </section>
+
+        <section class="page" id="page-python">
+          <header class="topbar glass compact">
+            <h1>Python</h1>
+            <div class="status-strip">
+              <span id="pythonStatusBadge">STATUS: Idle</span>
+              <span id="pythonPipBadge">pip: Checking</span>
+            </div>
+          </header>
+
+          <div class="runtime-grid">
+            <article class="panel glass runtime-main-panel">
+              <div class="runtime-section-head">
+                <div>
+                  <h2>Runtime pip</h2>
+                  <p class="runtime-copy">Runs pip inside the exact Python environment used by the renderer backend.</p>
+                </div>
+                <button class="btn" id="pythonRefreshBtn">Refresh</button>
+              </div>
+              <div class="runtime-path-list">
+                <div class="runtime-path-item"><span>Python Command</span><code id="pythonCommandPath">-</code></div>
+                <div class="runtime-path-item"><span>Python Target</span><code id="pythonTargetPath">-</code></div>
+                <div class="runtime-path-item"><span>pip Log</span><code id="pythonPipLogPath">-</code></div>
+              </div>
+              <div class="form-grid two python-quick-actions">
+                <button class="btn" id="pythonPipVersionBtn">pip --version</button>
+                <button class="btn" id="pythonPipListBtn">pip list</button>
+                <button class="btn" id="pythonPipFreezeBtn">pip freeze</button>
+                <button class="btn" id="pythonVerifyBackendBtn">Verify Selected Backend</button>
+              </div>
+              <label>pip arguments
+                <input id="pythonPipCommand" type="text" value="list" placeholder="Example: install package-name or show torch" />
+              </label>
+              <div class="form-grid two">
+                <button class="btn btn-accent" id="pythonRunPipBtn">Run pip</button>
+                <button class="btn" id="pythonClearOutputBtn">Clear Output</button>
+              </div>
+            </article>
+
+            <article class="panel glass runtime-side-panel">
+              <h2>Python Probe</h2>
+              <pre id="pythonInfoOutput" class="runtime-install-log compact-log">Waiting for Python runtime info...</pre>
+            </article>
+          </div>
+
+          <article class="panel glass runtime-log-panel">
+            <div class="runtime-section-head">
+              <div>
+                <h2>pip Output</h2>
+                <p class="runtime-copy">Use normal pip arguments only. Shell operators are blocked.</p>
+              </div>
+              <span id="pythonCommandState" class="runtime-log-state">Idle</span>
+            </div>
+            <pre id="pythonPipOutput" class="runtime-install-log">pip output will appear here...</pre>
+          </article>
+        </section>
+
+        <section class="page" id="page-settings">
+          <header class="topbar glass compact"><h1>Settings</h1></header>
+          <article class="panel glass">
+            <div class="tabs" data-tabs="settings-tabs">
+              <button class="tab active" data-tab="out">Output Settings</button>
+              <button class="tab" data-tab="render">Render Settings</button>
+              <button class="tab" data-tab="rve">RVE Settings</button>
+              <button class="tab" data-tab="backends">Backends</button>
+              <button class="tab" data-tab="models">Custom Models</button>
+            </div>
+            <div class="tab-panels">
+              <div class="tab-panel active" id="tab-out">
+                <div class="toggle-grid">
+                  <label><input id="setUseSameOutputFolder" type="checkbox" /> Use same output folder as input</label>
+                  <label><input id="setSceneDetectEnabled" type="checkbox" checked /> Scene Change Detection Enabled</label>
+                  <label><input id="setAutoBorderCropping" type="checkbox" /> Auto Border Cropping</label>
+                </div>
+                <div class="form-grid two">
+                  <label>Scene Change Method
+                    <select id="setSceneDetectMethod">
+                      <option value="pyscenedetect">PySceneDetect</option>
+                      <option value="mean">Mean</option>
+                      <option value="mean_segmented">Mean Segmented</option>
+                      <option value="sudo_scene_detect">Sudo Scene Detect</option>
+                      <option value="sudo_maxxvit">Sudo MaxxVit</option>
+                      <option value="none">None</option>
+                    </select>
+                  </label>
+                  <label>Scene Change Threshold <input id="setSceneDetectThreshold" type="number" step="0.1" value="3.5" /></label>
+                  <label>Video Container
+                    <select id="setVideoContainer">
+                      <option value="mkv">mkv</option>
+                      <option value="mp4">mp4</option>
+                      <option value="mov">mov</option>
+                      <option value="webm">webm</option>
+                      <option value="avi">avi</option>
+                    </select>
+                  </label>
+                  <label>Video Pixel Format
+                    <select id="setVideoPixelFormat">
+                      <option value="yuv420p">yuv420p</option>
+                      <option value="yuv422p">yuv422p</option>
+                      <option value="yuv444p">yuv444p</option>
+                      <option value="yuv420p10le">yuv420p10le</option>
+                      <option value="yuv422p10le">yuv422p10le</option>
+                      <option value="yuv444p10le">yuv444p10le</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+              <div class="tab-panel" id="tab-render">
+                <div class="form-grid two">
+                  <label>Precision
+                    <select id="setPrecision"><option value="auto">auto</option><option value="float16">float16</option><option value="float32">float32</option></select>
+                  </label>
+                  <label>NCNN GPU ID <input id="setNcnnGpuId" type="number" value="0" min="0" /></label>
+                  <label>PyTorch GPU ID <input id="setPytorchGpuId" type="number" value="0" min="0" /></label>
+                  <label>TensorRT Opt Level <input id="setTensorRTOptLevel" type="number" value="3" min="1" max="5" /></label>
+                </div>
+                <div class="toggle-grid">
+                  <label><input id="setAutoHDRMode" type="checkbox" checked /> Auto HDR Mode</label>
+                  <label><input id="setTensorRTDynamicEngine" type="checkbox" /> TensorRT Dynamic Engine</label>
+                  <label><input id="setUHDMode" type="checkbox" /> Interpolation UHD Mode</label>
+                  <label><input id="setDynamicScaledFlow" type="checkbox" /> Dynamic Scaled Optical Flow</label>
+                  <label><input id="setEnsemble" type="checkbox" /> Ensemble (if supported)</label>
+                </div>
+              </div>
+              <div class="tab-panel" id="tab-rve">
+                <div class="toggle-grid">
+                  <label><input id="setPreviewEnabled" type="checkbox" checked /> Preview Enabled</label>
+                  <label><input id="setDiscordRPC" type="checkbox" /> Discord Rich Presence</label>
+                </div>
+                <div class="form-grid two">
+                  <button class="btn" id="openRveFolderBtn">Open RVE Folder</button>
+                  <button class="btn danger" id="resetSettingsBtn">Reset Settings</button>
+                </div>
+              </div>
+              <div class="tab-panel" id="tab-backends">
+                <div class="backend-settings-stack">
+                  <div class="backend-settings-summary">
+                    <div class="stat-card">
+                      <span>Installed Backends</span>
+                      <strong id="settingsInstalledBackends">Detecting...</strong>
+                    </div>
+                    <div class="stat-card">
+                      <span>Recommended</span>
+                      <strong id="settingsRecommendedBackend">Detecting...</strong>
+                    </div>
+                    <div class="stat-card">
+                      <span>Disk Free</span>
+                      <strong id="settingsBackendDiskFree">--</strong>
+                    </div>
+                  </div>
+
+                  <div class="form-grid two">
+                    <label>Backend Target
+                      <select id="setBackendManagerTarget">
+                        <option value="pytorch">PyTorch</option>
+                        <option value="tensorrt">TensorRT</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <div id="backendConfigPytorch" class="backend-config-panel active">
+                    <div class="form-grid two">
+                      <label>PyTorch Version
+                        <select id="setBackendTorchVersion"></select>
+                      </label>
+                      <label>PyTorch Backend
+                        <select id="setBackendTorchBackend"></select>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div id="backendConfigTensorRt" class="backend-config-panel">
+                    <div class="form-grid two">
+                      <label>TensorRT Runtime Version
+                        <select id="setBackendTensorRtTorchVersion"></select>
+                      </label>
+                      <label>TensorRT Backend
+                        <input id="setBackendTensorRtBackend" type="text" value="CUDA (required)" readonly />
+                      </label>
+                      <label>TensorRT Opt Level
+                        <input id="setBackendTensorRTOptLevel" type="number" value="3" min="1" max="5" />
+                      </label>
+                      <label>Dynamic TensorRT Engine
+                        <select id="setBackendTensorRTDynamicEngine">
+                          <option value="false">Disabled</option>
+                          <option value="true">Enabled</option>
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div class="form-grid two">
+                    <button class="btn btn-accent" id="settingsInstallRecommendedBtn">Install Recommended</button>
+                    <button class="btn" id="settingsRefreshBackendsBtn">Refresh Installed Backends</button>
+                    <button class="btn" id="settingsVerifyBackendBtn">Verify Selected Backend</button>
+                    <button class="btn" id="settingsInstallNcnnBtn">Install NCNN</button>
+                    <button class="btn danger" id="settingsUninstallNcnnBtn">Delete NCNN</button>
+                    <button class="btn" id="settingsInstallTorchBtn">Install PyTorch</button>
+                    <button class="btn danger" id="settingsUninstallTorchBtn">Delete PyTorch</button>
+                    <button class="btn" id="settingsInstallTensorRtBtn">Install TensorRT</button>
+                    <button class="btn danger" id="settingsUninstallTensorRtBtn">Delete TensorRT</button>
+                    <button class="btn" id="settingsInstallDirectMlBtn" disabled>Install DirectML</button>
+                    <button class="btn danger" id="settingsUninstallDirectMlBtn" disabled>Delete DirectML</button>
+                  </div>
+
+                  <div class="backend-settings-note">
+                    <strong id="settingsBackendReason">Waiting for backend recommendation...</strong>
+                    <p id="settingsBackendSupportNote">This tab mirrors the upstream backend installer options, including install and delete actions for installed backends.</p>
+                  </div>
+
+                  <textarea id="settingsBackendLog" class="logbox" readonly>Backend installer activity will appear here...</textarea>
+                </div>
+              </div>
+              <div class="tab-panel" id="tab-models">
+                <div class="custom-models-shell">
+                  <div class="runtime-section-head">
+                    <div>
+                      <h2>Custom Model Collection</h2>
+                      <p class="runtime-copy">Import model files into the app collection so they appear in the normal model dropdowns.</p>
+                    </div>
+                    <span id="customModelsCount" class="runtime-log-state">0 models</span>
+                  </div>
+                  <div class="form-grid two">
+                    <button class="btn btn-accent" id="importCustomModelsBtn">Import Model Files</button>
+                    <button class="btn" id="importCustomModelFolderBtn">Import Model Folder</button>
+                    <button class="btn" id="refreshCustomModelsBtn">Refresh Collection</button>
+                    <button class="btn" id="openCustomModelsFolderBtn">Open Custom Models Folder</button>
+                  </div>
+                  <div class="runtime-path-item">
+                    <span>Collection Folder</span>
+                    <code id="customModelsFolderPath">-</code>
+                  </div>
+                  <div id="customModelsList" class="custom-models-list" aria-live="polite"></div>
+                  <details class="advanced-custom-paths">
+                    <summary>Advanced direct path override</summary>
+                    <div class="form-grid two">
+                      <button class="btn" id="pickCustomInterpolateModel">Pick Custom Interpolate Model</button>
+                      <button class="btn" id="pickCustomUpscaleModel">Pick Custom Upscale Model</button>
+                      <label>Custom Interpolate Model Path <input id="setCustomInterpolateModel" type="text" placeholder="Optional custom model path" /></label>
+                      <label>Custom Upscale Model Path <input id="setCustomUpscaleModel" type="text" placeholder="Optional custom model path" /></label>
+                    </div>
+                  </details>
+                </div>
+              </div>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <div id="previewOverlay" class="preview-overlay" aria-hidden="true">
+      <div class="preview-overlay-bg"></div>
+      <div class="preview-lightbox" role="dialog" aria-modal="true" aria-label="Live preview enlarged">
+        <button id="closePreviewOverlay" class="preview-close" aria-label="Close enlarged preview">X</button>
+        <div class="preview-runtime-hud">
+          <div class="hud-row">
+            <div class="hud-item"><span>ETA</span><strong id="hudEta">--</strong></div>
+            <div class="hud-item"><span>Gen FPS</span><strong id="hudGenFps">--</strong></div>
+            <div class="hud-item"><span>CPU</span><strong id="hudCpu">--</strong></div>
+            <div class="hud-item"><span>GPU</span><strong id="hudGpu">--</strong></div>
+            <div class="hud-item"><span>RAM</span><strong id="hudRam">--</strong></div>
+            <div class="hud-item"><span>VRAM</span><strong id="hudVram">--</strong></div>
+          </div>
+        </div>
+        <div id="livePreviewExpanded" class="preview-expanded-surface">
+          <img id="livePreviewExpandedVideo" class="preview-video" alt="Live preview enlarged frame" />
+          <span id="livePreviewExpandedLabel" class="preview-label">Live Preview - Idle</span>
+        </div>
+      </div>
+    </div>
+
+    <script src="app.js?v=20260402b"></script>
+  </body>
+</html>
