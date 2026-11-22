@@ -40,7 +40,7 @@ For WSL setup details and manual model installation, see [WSL-UBUNTU.md](WSL-UBU
 
 Open **Settings → Updates** and use **Check for updates**. If a newer Windows installer is available, select **Download update**, then **Install downloaded update**. The app downloads the installer from this repository's published GitHub release and starts it for you.
 
-**Existing 2.4.29 installs need one manual update first.** That build checks the original upstream release feed, so it cannot discover releases published by this fork. Install 2.4.30 once from [GitHub Releases](https://github.com/B1progame/REAL-Video-Enhancer/releases/latest); later versions can update through Settings.
+**Existing 2.4.29 installs need one manual update first.** That build checks the original upstream release feed, so it cannot discover releases published by this fork. Install 2.4.31 once from [GitHub Releases](https://github.com/B1progame/REAL-Video-Enhancer/releases/latest); later versions can update through Settings. Because this fork is private, install GitHub CLI and sign in to B1progame with `gh auth login -h github.com`; the app uses `gh` for release access and never stores your GitHub token.
 
 The installer updates the application files. It does not remove your model library or settings. When you uninstall, the uninstaller asks whether to also remove the managed runtime, downloaded models, and app data from Windows and WSL.
 

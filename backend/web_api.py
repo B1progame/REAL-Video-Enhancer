@@ -67,7 +67,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.30")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.31")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -106,6 +106,10 @@ def hidden_subprocess_kwargs():
     """Keep CLI probes and render children from opening Windows consoles."""
     if os.name != "nt":
         return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0), "startupinfo": startupinfo}
 
 
 def version_tuple(value):
@@ -114,11 +118,44 @@ def version_tuple(value):
     return tuple(int(part) for part in match.group(0).split(".")) if match else ()
 
 
-def check_github_update():
+def github_cli_path():
+    return shutil.which("gh.exe") or shutil.which("gh")
+
+
+def fetch_latest_release():
     request = urllib.request.Request(UPDATE_API, headers={"Accept": "application/vnd.github+json", "User-Agent": "REAL-Video-Enhancer-Native"})
-    with urllib.request.urlopen(request, timeout=15) as response:
-        release = json.loads(response.read(2 * 1024 * 1024))
-    tag = str(release.get("tag_name") or "").lstrip("v")
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return json.loads(response.read(2 * 1024 * 1024)), None
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (401, 403, 404):
+            raise
+        gh = github_cli_path()
+        if not gh:
+            raise RuntimeError(
+                "This GitHub repository is private. Install GitHub CLI and sign in with an account "
+                "that can read B1progame/REAL-Video-Enhancer, then try again."
+            ) from exc
+        result = subprocess.run(
+            [gh, "api", f"repos/{UPDATE_REPOSITORY}/releases/latest"],
+            capture_output=True, text=True, timeout=20, **hidden_subprocess_kwargs(),
+        )
+        if result.returncode:
+            detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "GitHub CLI could not read the release."
+            raise RuntimeError(
+                "The private GitHub release could not be read. Sign in with `gh auth login -h github.com` "
+                f"using an account with repository access. {detail}"
+            ) from exc
+        try:
+            return json.loads(result.stdout), "gh"
+        except json.JSONDecodeError as error:
+            raise RuntimeError("GitHub CLI returned an invalid release response.") from error
+
+
+def check_github_update():
+    release, access_method = fetch_latest_release()
+    release_tag = str(release.get("tag_name") or "")
+    tag = release_tag.lstrip("v")
     if not tag:
         raise RuntimeError("GitHub did not return a release version.")
     installer = next((asset for asset in release.get("assets", [])
@@ -130,12 +167,13 @@ def check_github_update():
     installer_sha256 = digest.removeprefix("sha256:").lower() if digest.startswith("sha256:") else ""
     has_valid_digest = len(installer_sha256) == 64 and all(char in "0123456789abcdef" for char in installer_sha256)
     can_download = bool(newer and installer and has_valid_digest)
-    return {"status": "ready", "current_version": APP_VERSION, "latest_version": tag,
+    return {"status": "ready", "current_version": APP_VERSION, "latest_version": tag, "release_tag": release_tag,
             "update_available": can_download, "release_url": release.get("html_url"),
             "installer_name": installer.get("name") if installer else None,
             "installer_url": installer.get("browser_download_url") if installer else None,
             "installer_size": installer.get("size") if installer else None,
             "installer_sha256": installer_sha256 if has_valid_digest else None,
+            "access_method": access_method,
             "detail": (f"Version {tag} is ready to install." if can_download else
                        f"Version {tag} is newer, but GitHub did not provide a valid installer checksum." if newer and installer and not has_valid_digest else
                        f"Version {tag} is newer, but GitHub has no Windows installer asset." if newer else
@@ -159,25 +197,61 @@ def download_update_installer(release):
         folder.mkdir(parents=True, exist_ok=True)
         target = folder / name
         partial = target.with_suffix(target.suffix + ".part")
-        request = urllib.request.Request(url, headers={"User-Agent": "REAL-Video-Enhancer-Native"})
         import hashlib
         checksum = hashlib.sha256()
-        with urllib.request.urlopen(request, timeout=45) as response, partial.open("wb") as output:
-            total = int(response.headers.get("Content-Length", "0") or 0)
-            if total and total != expected_size:
-                raise IOError(f"GitHub reported {total} bytes, but the release metadata says {expected_size}.")
-            received = 0
-            while True:
-                block = response.read(1024 * 1024)
-                if not block:
-                    break
-                output.write(block)
-                checksum.update(block)
-                received += len(block)
-                if received > expected_size:
-                    raise IOError("The installer download exceeded the published release size.")
-                with update_lock:
-                    update_state["progress"] = min(100, round(received * 100 / expected_size))
+        received = 0
+        if release.get("access_method") == "gh":
+            gh = github_cli_path()
+            if not gh:
+                raise RuntimeError("GitHub CLI is required to download from this private repository.")
+            tag = str(release.get("release_tag") or "")
+            if not tag:
+                raise ValueError("GitHub release metadata did not include the original release tag.")
+            temporary_folder = folder / f".download-{uuid.uuid4().hex}"
+            temporary_folder.mkdir(parents=True, exist_ok=True)
+            try:
+                result = subprocess.run(
+                    [gh, "release", "download", tag, "--repo", UPDATE_REPOSITORY,
+                     "--pattern", name, "--dir", str(temporary_folder), "--clobber"],
+                    capture_output=True, text=True, timeout=600, **hidden_subprocess_kwargs(),
+                )
+                if result.returncode:
+                    detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "GitHub CLI download failed."
+                    raise RuntimeError(f"Could not download the private release with GitHub CLI: {detail}")
+                downloaded = temporary_folder / name
+                if not downloaded.is_file():
+                    raise FileNotFoundError("GitHub CLI did not download the expected Windows installer.")
+                downloaded.replace(partial)
+            finally:
+                shutil.rmtree(temporary_folder, ignore_errors=True)
+            with partial.open("rb") as source:
+                while True:
+                    block = source.read(1024 * 1024)
+                    if not block:
+                        break
+                    checksum.update(block)
+                    received += len(block)
+                    if received > expected_size:
+                        raise IOError("The installer download exceeded the published release size.")
+                    with update_lock:
+                        update_state["progress"] = min(100, round(received * 100 / expected_size))
+        else:
+            request = urllib.request.Request(url, headers={"User-Agent": "REAL-Video-Enhancer-Native"})
+            with urllib.request.urlopen(request, timeout=45) as response, partial.open("wb") as output:
+                total = int(response.headers.get("Content-Length", "0") or 0)
+                if total and total != expected_size:
+                    raise IOError(f"GitHub reported {total} bytes, but the release metadata says {expected_size}.")
+                while True:
+                    block = response.read(1024 * 1024)
+                    if not block:
+                        break
+                    output.write(block)
+                    checksum.update(block)
+                    received += len(block)
+                    if received > expected_size:
+                        raise IOError("The installer download exceeded the published release size.")
+                    with update_lock:
+                        update_state["progress"] = min(100, round(received * 100 / expected_size))
         if received != expected_size:
             raise IOError(f"The installer download was incomplete ({received} of {expected_size} bytes).")
         if checksum.hexdigest() != expected_sha256:
@@ -209,10 +283,6 @@ def begin_update_download():
         update_state.update(status="downloading", progress=0, detail="Downloading the GitHub Windows installer…")
         threading.Thread(target=download_update_installer, args=(release,), name="rve-update-download", daemon=True).start()
         return dict(update_state)
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = 0
-    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0), "startupinfo": startupinfo}
 
 
 def find_ffmpeg_path():
