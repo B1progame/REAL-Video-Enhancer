@@ -64,10 +64,14 @@ render = {"status": "idle", "paused": False, "process": None, "pause_memory": No
 install_state = {"status": "not_started", "progress": 0, "stage": "Runtime check", "detail": "Runtime setup has not been started."}
 install_lock = threading.RLock()
 PYTHON_VERSION = "3.12.9"
-UPDATE_API = "https://api.github.com/repos/TNTwise/REAL-Video-Enhancer/releases/latest"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.29")
+UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
+UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
+UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.30")
 update_lock = threading.RLock()
-update_state = {"status": "idle", "progress": 0, "detail": "Check GitHub for a newer Windows release.", "current_version": APP_VERSION}
+update_state = {"status": "idle", "progress": 0,
+                "detail": "Check B1progame on GitHub for the latest Windows release.",
+                "current_version": APP_VERSION}
 def default_model_dir(storage=None):
     configured = os.environ.get("RVE_MODEL_DIR")
     if configured:
@@ -122,41 +126,62 @@ def check_github_update():
                       and "windows" in str(asset.get("name", "")).lower()
                       and ("setup" in str(asset.get("name", "")).lower() or "installer" in str(asset.get("name", "")).lower())), None)
     newer = bool(version_tuple(tag) and version_tuple(APP_VERSION) and version_tuple(tag) > version_tuple(APP_VERSION))
-    can_download = bool(newer and installer)
+    digest = str(installer.get("digest") or "") if installer else ""
+    installer_sha256 = digest.removeprefix("sha256:").lower() if digest.startswith("sha256:") else ""
+    has_valid_digest = len(installer_sha256) == 64 and all(char in "0123456789abcdef" for char in installer_sha256)
+    can_download = bool(newer and installer and has_valid_digest)
     return {"status": "ready", "current_version": APP_VERSION, "latest_version": tag,
             "update_available": can_download, "release_url": release.get("html_url"),
             "installer_name": installer.get("name") if installer else None,
             "installer_url": installer.get("browser_download_url") if installer else None,
+            "installer_size": installer.get("size") if installer else None,
+            "installer_sha256": installer_sha256 if has_valid_digest else None,
             "detail": (f"Version {tag} is ready to install." if can_download else
+                       f"Version {tag} is newer, but GitHub did not provide a valid installer checksum." if newer and installer and not has_valid_digest else
                        f"Version {tag} is newer, but GitHub has no Windows installer asset." if newer else
-                       f"You have {APP_VERSION}; latest stable upstream is {tag}." if version_tuple(tag) else
+                       f"You have {APP_VERSION}; the latest stable B1progame release is {tag}." if version_tuple(tag) else
                        "Could not compare the release versions.")}
 
 
 def download_update_installer(release):
     try:
         url = str(release.get("installer_url") or "")
-        if not url.startswith("https://github.com/TNTwise/REAL-Video-Enhancer/releases/download/"):
+        if not url.startswith(UPDATE_DOWNLOAD_PREFIX):
             raise ValueError("GitHub did not provide a trusted Windows installer download.")
         name = Path(str(release.get("installer_name") or "")).name
         if not name.lower().endswith(".exe"):
             raise ValueError("The Windows release installer was not found.")
+        expected_size = int(release.get("installer_size") or 0)
+        expected_sha256 = str(release.get("installer_sha256") or "").lower()
+        if expected_size <= 0 or len(expected_sha256) != 64:
+            raise ValueError("GitHub did not provide a valid installer size and SHA-256 checksum.")
         folder = APP_DATA / "updates"
         folder.mkdir(parents=True, exist_ok=True)
         target = folder / name
         partial = target.with_suffix(target.suffix + ".part")
         request = urllib.request.Request(url, headers={"User-Agent": "REAL-Video-Enhancer-Native"})
+        import hashlib
+        checksum = hashlib.sha256()
         with urllib.request.urlopen(request, timeout=45) as response, partial.open("wb") as output:
             total = int(response.headers.get("Content-Length", "0") or 0)
+            if total and total != expected_size:
+                raise IOError(f"GitHub reported {total} bytes, but the release metadata says {expected_size}.")
             received = 0
             while True:
                 block = response.read(1024 * 1024)
                 if not block:
                     break
                 output.write(block)
+                checksum.update(block)
                 received += len(block)
+                if received > expected_size:
+                    raise IOError("The installer download exceeded the published release size.")
                 with update_lock:
-                    update_state["progress"] = min(100, round(received * 100 / total)) if total else 0
+                    update_state["progress"] = min(100, round(received * 100 / expected_size))
+        if received != expected_size:
+            raise IOError(f"The installer download was incomplete ({received} of {expected_size} bytes).")
+        if checksum.hexdigest() != expected_sha256:
+            raise IOError("The downloaded installer does not match GitHub's SHA-256 checksum.")
         if target.exists():
             target.unlink()
         partial.replace(target)
@@ -178,7 +203,9 @@ def begin_update_download():
             return dict(update_state)
         release = update_state.get("release")
         if not release or not release.get("update_available") or not release.get("installer_url"):
-            return {**update_state, "error": "Check for a newer Windows release first; no newer installer is available."}
+            update_state.update(status="error", error="No newer Windows installer is available.",
+                                detail="Check for a newer release first. There is no newer Windows installer to download.")
+            return dict(update_state)
         update_state.update(status="downloading", progress=0, detail="Downloading the GitHub Windows installer…")
         threading.Thread(target=download_update_installer, args=(release,), name="rve-update-download", daemon=True).start()
         return dict(update_state)
@@ -568,7 +595,7 @@ def python_capabilities(refresh=False):
               "ffmpeg_available": bool(Path(ffmpeg_path).is_file()),
               "available_backends": [], "runtime_root": str(APP_DATA), "working_directory": str(APP_DATA),
               "backend_script_path": str(BACKEND), "python_runtime": PYTHON, "python_target_path": PYTHON,
-              "temp_directory": str(APP_DATA / "temp"), "version": "2.4.29", "os": f"{platform.system()} {platform.release()} {platform.machine()}",
+              "temp_directory": str(APP_DATA / "temp"), "version": APP_VERSION, "os": f"{platform.system()} {platform.release()} {platform.machine()}",
               "cpu": platform.processor() or platform.machine(), "ram": "Unavailable", "available_disk_gb": None,
               "recommended_backend_label": "Install the project runtime dependencies", "recommended_backend_reason": "The API is connected; render support depends on PyTorch/OpenCV and model weights."}
     try:
@@ -920,7 +947,7 @@ def install_animescripter_cli():
     install_root.mkdir(parents=True, exist_ok=True)
     script_path.parent.mkdir(parents=True, exist_ok=True)
     set_install_state(stage="Downloading AnimeScripter installer", progress=93, detail="Fetching the official Windows CLI installer from tas.nevermindnilas.dev.")
-    request = urllib.request.Request("https://tas.nevermindnilas.dev/install.ps1", headers={"User-Agent": "REAL-Video-Enhancer/2.4.29"})
+    request = urllib.request.Request("https://tas.nevermindnilas.dev/install.ps1", headers={"User-Agent": f"REAL-Video-Enhancer/{APP_VERSION}"})
     with urllib.request.urlopen(request, timeout=45) as response:
         script = response.read(1024 * 1024 + 1)
     if not script or len(script) > 1024 * 1024:
@@ -1592,7 +1619,7 @@ class Handler(BaseHTTPRequestHandler):
                 respond_json(self, release)
             except Exception as exc:
                 with update_lock:
-                    update_state.update(status="error", detail=f"GitHub update check failed: {exc}")
+                    update_state.update(status="error", error=str(exc), detail=f"Could not check GitHub for updates: {exc}")
                 respond_json(self, {**update_state, "error": str(exc)}, 503)
             return
         if path == "/api/app/update/status":

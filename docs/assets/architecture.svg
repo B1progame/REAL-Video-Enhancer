@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 650" role="img" aria-labelledby="title desc">
+  <title id="title">REAL Video Enhancer architecture</title>
+  <desc id="desc">A native Rust Windows app connects to the local Python service and video engine. Models can live in WSL Ubuntu or Windows, and app updates come from this GitHub repository.</desc>
+  <defs>
+    <linearGradient id="canvas" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#101c24"/><stop offset="1" stop-color="#172a33"/>
+    </linearGradient>
+    <linearGradient id="aqua" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#35e6dc"/><stop offset="1" stop-color="#00b8c6"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#071016" flood-opacity=".34"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5 0 10z" fill="#4b7883"/>
+    </marker>
+    <style>
+      text{font-family:Inter,'Segoe UI',Arial,sans-serif}.heading{fill:#f4f8f8;font-size:28px;font-weight:650}.label{fill:#e8f1f2;font-size:20px;font-weight:600}.body{fill:#a8bec3;font-size:15px}.tag{fill:#65e8dd;font-size:13px;font-weight:700;letter-spacing:1.5px}.small{fill:#a8bec3;font-size:13px}
+    </style>
+  </defs>
+  <rect width="1280" height="650" rx="28" fill="url(#canvas)"/>
+  <text x="56" y="68" class="tag">A LOCAL VIDEO WORKFLOW</text>
+  <text x="56" y="112" class="heading">A native Windows app, with models where you want them.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="56" y="165" width="330" height="196" rx="20" fill="#202f37" stroke="#36505a"/>
+    <rect x="56" y="165" width="5" height="196" rx="2.5" fill="url(#aqua)"/>
+    <text x="82" y="205" class="tag">WINDOWS DESKTOP</text>
+    <text x="82" y="246" class="label">Rust interface</text>
+    <text x="82" y="278" class="body">Sidebar · processing · downloads</text>
+    <text x="82" y="303" class="body">Runtime · Python · settings</text>
+    <text x="82" y="338" class="small">egui native window</text>
+
+    <rect x="474" y="165" width="356" height="196" rx="20" fill="#202f37" stroke="#36505a"/>
+    <rect x="474" y="165" width="5" height="196" rx="2.5" fill="#c8845d"/>
+    <text x="500" y="205" class="tag" fill="#e3a17c">LOCAL RENDER ENGINE</text>
+    <text x="500" y="246" class="label">Python service + engine</text>
+    <text x="500" y="278" class="body">Existing processing pipeline</text>
+    <text x="500" y="303" class="body">FFmpeg · inference backends</text>
+    <text x="500" y="338" class="small">Loopback API · 127.0.0.1</text>
+
+    <rect x="918" y="165" width="306" height="196" rx="20" fill="#202f37" stroke="#36505a"/>
+    <rect x="918" y="165" width="5" height="196" rx="2.5" fill="#8fac81"/>
+    <text x="944" y="205" class="tag" fill="#b6cf9c">MODEL STORAGE</text>
+    <text x="944" y="246" class="label">WSL or Windows</text>
+    <text x="944" y="278" class="body">Ubuntu home directory, or</text>
+    <text x="944" y="303" class="body">local app data on Windows</text>
+    <text x="944" y="338" class="small">Weights downloaded at setup</text>
+  </g>
+
+  <path d="M386 263h74" fill="none" stroke="#4b7883" stroke-width="3" marker-end="url(#arrow)"/>
+  <text x="393" y="246" class="small">HTTP · local only</text>
+  <path d="M830 263h74" fill="none" stroke="#4b7883" stroke-width="3" marker-end="url(#arrow)"/>
+  <text x="842" y="246" class="small">model files</text>
+
+  <g filter="url(#shadow)">
+    <rect x="56" y="416" width="1168" height="166" rx="20" fill="#192830" stroke="#314c55"/>
+  </g>
+  <circle cx="101" cy="471" r="19" fill="#143e43" stroke="#35e6dc"/>
+  <path d="M92 471h18m-9-9 9 9-9 9" fill="none" stroke="#65e8dd" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="140" y="465" class="tag">UPDATES FROM YOUR RELEASE CHANNEL</text>
+  <text x="140" y="505" class="label">Settings → Updates → Check, download, install</text>
+  <text x="140" y="539" class="body">The app checks B1progame/REAL-Video-Enhancer, fetches the Windows installer, and launches it to update the app.</text>
+  <text x="140" y="563" class="small">Installer upgrades preserve app settings and model storage.</text>
+  <path d="M220 361v27h840v-27" fill="none" stroke="#365861" stroke-width="2" stroke-dasharray="6 7"/>
+</svg>

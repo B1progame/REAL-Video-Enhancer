@@ -594,7 +594,9 @@ impl NativeApp {
                     "/api/animescripter/status" => self.anime = value,
                     "/api/python/info" => self.python = value,
                     "/api/storage/status" => self.storage_status = value,
-                    "/api/app/update/status" | "/api/app/update/check" => self.update = value,
+                    "/api/app/update/status"
+                    | "/api/app/update/check"
+                    | "/api/app/update/download" => self.update = value,
                     "/api/dialog/select_input" => {
                         self.input_path = value["path"].as_str().unwrap_or_default().to_owned();
                         if let Some(parent) = Path::new(&self.input_path).parent() {
@@ -616,6 +618,18 @@ impl NativeApp {
                 Err(error) => {
                     if event.endpoint == "/api/bootstrap" {
                         self.connected = false;
+                    }
+                    if matches!(
+                        event.endpoint.as_str(),
+                        "/api/app/update/check"
+                            | "/api/app/update/status"
+                            | "/api/app/update/download"
+                    ) {
+                        self.update = json!({
+                            "status": "error",
+                            "current_version": APP_VERSION,
+                            "detail": format!("Update request failed: {error}")
+                        });
                     }
                     self.logs.push(error);
                 }
@@ -749,6 +763,8 @@ impl NativeApp {
             .corner_radius(10)
             .inner_margin(16)
             .show(ui, |ui| {
+                let available_width = ui.available_width();
+                ui.set_min_width(available_width);
                 ui.label(RichText::new(title).size(15.0).strong());
                 ui.add_space(10.0);
                 content(ui)
@@ -1229,12 +1245,41 @@ impl NativeApp {
         });
         ui.add_space(12.0);
         Self::card(ui, "Updates", |ui| {
-            ui.label(format!("Installed version · {APP_VERSION}"));
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Installed").color(secondary_text_color(!ui.visuals().dark_mode)),
+                );
+                ui.label(RichText::new(format!("v{APP_VERSION}")).strong());
+                if let Some(version) = self.update["latest_version"].as_str() {
+                    ui.separator();
+                    ui.label(
+                        RichText::new("Latest")
+                            .color(secondary_text_color(!ui.visuals().dark_mode)),
+                    );
+                    ui.label(RichText::new(format!("v{version}")).strong());
+                }
+            });
             ui.label(
                 self.update["detail"]
                     .as_str()
-                    .unwrap_or("Check GitHub for a newer Windows release."),
+                    .unwrap_or("Check B1progame on GitHub for the latest Windows release."),
             );
+            ui.hyperlink_to(
+                "Release channel · B1progame/REAL-Video-Enhancer",
+                "https://github.com/B1progame/REAL-Video-Enhancer/releases",
+            );
+            if self.update["status"] == "error" {
+                ui.colored_label(
+                    Color32::from_rgb(220, 90, 82),
+                    "Update check needs attention",
+                );
+            }
+            if self.update["status"] == "downloaded" {
+                ui.colored_label(
+                    Color32::from_rgb(73, 157, 104),
+                    "Installer downloaded and ready",
+                );
+            }
             if let Some(url) = self.update["release_url"].as_str() {
                 ui.hyperlink_to("View release notes on GitHub", url);
             }
@@ -1247,7 +1292,21 @@ impl NativeApp {
                 }
             }
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Check GitHub for updates").clicked() {
+                let checking = self.update["status"] == "checking";
+                let check_label = if checking {
+                    "Checking for updates…"
+                } else {
+                    "Check for updates"
+                };
+                if ui
+                    .add_enabled(!checking, egui::Button::new(check_label))
+                    .clicked()
+                {
+                    self.update = json!({
+                        "status": "checking",
+                        "current_version": APP_VERSION,
+                        "detail": "Checking the B1progame GitHub releases…"
+                    });
                     self.get("/api/app/update/check");
                 }
                 if self.update["update_available"].as_bool() == Some(true)
@@ -1258,11 +1317,16 @@ impl NativeApp {
                     self.post("/api/app/update/download", json!({}));
                 }
                 if self.update["status"] == "downloaded"
-                    && ui.button("Install and restart").clicked()
+                    && ui.button("Install downloaded update").clicked()
                 {
-                    if let Some(path) = self.update["installer_path"].as_str() {
-                        if Command::new(path).spawn().is_ok() {
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    if let Some(path) = self.update["installer_path"].as_str().map(str::to_owned) {
+                        match Command::new(path).spawn() {
+                            Ok(_) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+                            Err(error) => {
+                                self.update["status"] = json!("error");
+                                self.update["detail"] =
+                                    json!(format!("Could not start the update installer: {error}"));
+                            }
                         }
                     }
                 }
@@ -1586,11 +1650,14 @@ impl eframe::App for NativeApp {
 }
 
 fn main() -> eframe::Result<()> {
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../docs/assets/rve-logo.png"))
+        .unwrap_or_default();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("REAL Video Enhancer")
             .with_inner_size([1360.0, 860.0])
-            .with_min_inner_size([840.0, 620.0]),
+            .with_min_inner_size([840.0, 620.0])
+            .with_icon(icon),
         ..Default::default()
     };
     eframe::run_native(

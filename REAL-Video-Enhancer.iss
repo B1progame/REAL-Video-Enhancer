@@ -1,9 +1,9 @@
 #define MyAppName "REAL Video Enhancer"
 #ifndef MyAppVersion
-#define MyAppVersion "2.4.29"
+#define MyAppVersion "2.4.30"
 #endif
-#define MyAppPublisher "TNTwise"
-#define MyAppURL "https://github.com/TNTwise/REAL-Video-Enhancer"
+#define MyAppPublisher "B1progame"
+#define MyAppURL "https://github.com/B1progame/REAL-Video-Enhancer"
 #define MyAppExeName "REAL-Video-Enhancer.exe"
 #ifexist "LICENSE"
   #define MyLicenseFile "LICENSE"
