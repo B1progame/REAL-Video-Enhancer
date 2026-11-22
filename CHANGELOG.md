@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.34 — 2026-11-22
+
+- Closing the window during a render, model download, runtime setup, storage setup, or app update now offers to keep the work running in the system tray.
+- Added tray actions to reopen the app and request a clean quit after active work finishes.
+- Quitting while idle shuts down the local engine, and installer completion launches the updated app.
+
 ## 2.4.33 — 2026-11-22
 
 - Use an OS-assigned loopback port to avoid Windows port exclusions and existing listeners.

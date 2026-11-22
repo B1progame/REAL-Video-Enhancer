@@ -50,7 +50,7 @@ set "RVE_VERSION_FILE=%TEMP%\rve-version-%RANDOM%-%RANDOM%.txt"
 if errorlevel 1 goto :build_failed
 set /p "RVE_VERSION="<"%RVE_VERSION_FILE%"
 del "%RVE_VERSION_FILE%" >nul 2>&1
-if not defined RVE_VERSION set "RVE_VERSION=2.4.33"
+if not defined RVE_VERSION set "RVE_VERSION=2.4.34"
 set "RVE_APP_VERSION=%RVE_VERSION%"
 
 echo [2/3] Compiling the Rust desktop interface...

@@ -14,6 +14,11 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+#[cfg(windows)]
+use tray_icon::{
+    Icon as TrayIconImage, TrayIcon, TrayIconBuilder, TrayIconEvent,
+    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
+};
 mod ui;
 use ui::theme::{accent_for_theme, border_color, contrast_text, secondary_text_color};
 use ui::{components, icons, theme};
@@ -46,6 +51,136 @@ struct ApiEvent {
 struct ApiBridge {
     send: Sender<ApiCommand>,
     receive: Receiver<ApiEvent>,
+}
+
+#[derive(Clone, Copy)]
+enum TrayCommand {
+    Open,
+    Quit,
+}
+
+fn active_task_from(
+    render: &str,
+    download_active: bool,
+    runtime: &str,
+    storage: &str,
+    update: &str,
+    anime: &str,
+) -> Option<&'static str> {
+    if matches!(render, "preparing" | "running" | "paused") {
+        Some("A video render")
+    } else if download_active {
+        Some("A model download")
+    } else if runtime == "running" {
+        Some("Runtime setup")
+    } else if matches!(storage, "starting" | "installing") {
+        Some("Model storage setup")
+    } else if update == "downloading" {
+        Some("An app update download")
+    } else if anime == "running" {
+        Some("AnimeScripter setup")
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn create_tray(ctx: &egui::Context) -> (Option<TrayIcon>, Receiver<TrayCommand>, Option<String>) {
+    let (send, receive) = mpsc::channel();
+    let open = MenuItem::with_id("rve-open", "Open REAL Video Enhancer", true, None);
+    let quit = MenuItem::with_id("rve-quit", "Quit when work finishes", true, None);
+    let menu = Menu::new();
+    let separator = PredefinedMenuItem::separator();
+    if let Err(error) = menu.append_items(&[&open, &separator, &quit]) {
+        return (
+            None,
+            receive,
+            Some(format!("Could not create the tray menu: {error}")),
+        );
+    }
+
+    let open_id = open.id().clone();
+    let quit_id = quit.id().clone();
+    let menu_send = send.clone();
+    let menu_ctx = ctx.clone();
+    MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+        let command = if event.id == open_id {
+            Some(TrayCommand::Open)
+        } else if event.id == quit_id {
+            Some(TrayCommand::Quit)
+        } else {
+            None
+        };
+        if let Some(command) = command {
+            let _ = menu_send.send(command);
+            if matches!(command, TrayCommand::Open) {
+                menu_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                menu_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
+            menu_ctx.request_repaint();
+        }
+    }));
+
+    let click_send = send;
+    let click_ctx = ctx.clone();
+    TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+        if matches!(
+            event,
+            TrayIconEvent::Click {
+                button: tray_icon::MouseButton::Left,
+                ..
+            }
+        ) {
+            let _ = click_send.send(TrayCommand::Open);
+            click_ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            click_ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            click_ctx.request_repaint();
+        }
+    }));
+
+    let image =
+        match eframe::icon_data::from_png_bytes(include_bytes!("../../docs/assets/rve-logo.png")) {
+            Ok(image) => image,
+            Err(error) => {
+                return (
+                    None,
+                    receive,
+                    Some(format!("Could not load the tray icon: {error}")),
+                );
+            }
+        };
+    let image = match TrayIconImage::from_rgba(image.rgba, image.width, image.height) {
+        Ok(image) => image,
+        Err(error) => {
+            return (
+                None,
+                receive,
+                Some(format!("Could not prepare the tray icon: {error}")),
+            );
+        }
+    };
+    match TrayIconBuilder::new()
+        .with_tooltip("REAL Video Enhancer")
+        .with_icon(image)
+        .with_menu(Box::new(menu))
+        .build()
+    {
+        Ok(icon) => (Some(icon), receive, None),
+        Err(error) => (
+            None,
+            receive,
+            Some(format!("Could not create the system tray icon: {error}")),
+        ),
+    }
+}
+
+#[cfg(not(windows))]
+fn create_tray(_: &egui::Context) -> (Receiver<TrayCommand>, Option<String>) {
+    let (_, receive) = mpsc::channel();
+    (
+        receive,
+        Some("The system tray is currently supported on Windows only.".to_owned()),
+    )
 }
 
 fn agent() -> ureq::Agent {
@@ -420,6 +555,12 @@ fn default_encoding() -> Value {
 struct NativeApp {
     api: ApiBridge,
     _engine: Option<Child>,
+    #[cfg(windows)]
+    _tray_icon: Option<TrayIcon>,
+    tray_events: Receiver<TrayCommand>,
+    tray_error: Option<String>,
+    close_confirmation: bool,
+    quit_when_idle: bool,
     page: usize,
     accent: Color32,
     appearance: String,
@@ -464,6 +605,10 @@ struct NativeApp {
 
 impl NativeApp {
     fn new(ctx: &eframe::CreationContext<'_>) -> Self {
+        #[cfg(windows)]
+        let (tray_icon, tray_events, tray_error) = create_tray(&ctx.egui_ctx);
+        #[cfg(not(windows))]
+        let (tray_events, tray_error) = create_tray(&ctx.egui_ctx);
         let accent = saved_accent();
         let appearance = saved_appearance();
         let reduce_motion = saved_reduce_motion();
@@ -489,6 +634,12 @@ impl NativeApp {
         Self {
             api: start_api_worker(ctx.egui_ctx.clone()),
             _engine: engine,
+            #[cfg(windows)]
+            _tray_icon: tray_icon,
+            tray_events,
+            tray_error,
+            close_confirmation: false,
+            quit_when_idle: false,
             page: if first_setup { 5 } else { 0 },
             accent,
             appearance,
@@ -633,6 +784,72 @@ impl NativeApp {
             .api
             .send
             .send(ApiCommand::Post(endpoint.to_owned(), payload));
+    }
+
+    fn active_task(&self) -> Option<&'static str> {
+        if !self.connected && self.engine_error.is_none() {
+            return Some("Local engine startup");
+        }
+        active_task_from(
+            self.render["status"].as_str().unwrap_or_default(),
+            self.download["active"].as_bool() == Some(true),
+            self.install["status"].as_str().unwrap_or_default(),
+            self.storage_status["status"].as_str().unwrap_or_default(),
+            self.update["status"].as_str().unwrap_or_default(),
+            self.anime["status"].as_str().unwrap_or_default(),
+        )
+    }
+
+    fn tray_available(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self._tray_icon.is_some()
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+
+    fn hide_to_tray(&self, ctx: &egui::Context) {
+        #[cfg(windows)]
+        if let Some(icon) = self._tray_icon.as_ref() {
+            let activity = self.active_task().unwrap_or("Work");
+            let _ = icon.set_tooltip(Some(format!(
+                "REAL Video Enhancer · {activity} in background"
+            )));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+        #[cfg(not(windows))]
+        let _ = ctx;
+    }
+
+    fn process_tray_commands(&mut self, ctx: &egui::Context) {
+        while let Ok(command) = self.tray_events.try_recv() {
+            match command {
+                TrayCommand::Open => {
+                    self.close_confirmation = false;
+                    #[cfg(windows)]
+                    if let Some(icon) = self._tray_icon.as_ref() {
+                        let _ = icon.set_tooltip(Some("REAL Video Enhancer"));
+                    }
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                TrayCommand::Quit => {
+                    if self.active_task().is_some() {
+                        self.quit_when_idle = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    } else {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+            }
+        }
+        if self.quit_when_idle && self.active_task().is_none() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 
     fn consume_events(&mut self, ctx: &egui::Context) {
@@ -2255,6 +2472,11 @@ impl eframe::App for NativeApp {
 
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
+        self.process_tray_commands(&ctx);
+        if ctx.input(|input| input.viewport().close_requested()) && self.active_task().is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.close_confirmation = true;
+        }
         self.consume_events(&ctx);
         if let Some(path) = ctx.input(|input| {
             input
@@ -2477,6 +2699,25 @@ impl eframe::App for NativeApp {
                     )),
             )
             .show(root_ui, |ui| {
+                if self.quit_when_idle {
+                    let palette = theme::palette(light, self.accent);
+                    egui::Frame::new()
+                        .fill(palette.elevated)
+                        .corner_radius(theme::radius::CONTROL)
+                        .inner_margin(egui::Margin::symmetric(12, 8))
+                        .show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(
+                                    RichText::new("Will quit after current work finishes.")
+                                        .color(palette.warning),
+                                );
+                                if ui.small_button("Cancel exit").clicked() {
+                                    self.quit_when_idle = false;
+                                }
+                            });
+                        });
+                    ui.add_space(theme::space::SM);
+                }
                 self.header(ui);
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -2490,6 +2731,36 @@ impl eframe::App for NativeApp {
                         _ => self.home_page(ui),
                     });
             });
+
+        if self.close_confirmation {
+            let active_task = self.active_task().unwrap_or("A background task");
+            egui::Window::new("Work is still running")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(&ctx, |ui| {
+                    ui.set_min_width(360.0);
+                    ui.label(RichText::new(format!("{active_task} is still in progress.")).strong());
+                    ui.add_space(theme::space::SM);
+                    ui.label("Keep REAL Video Enhancer running in the system tray? You can reopen it there while the work continues.");
+                    if let Some(error) = &self.tray_error {
+                        ui.add_space(theme::space::SM);
+                        ui.colored_label(theme::palette(light, self.accent).error, error);
+                    }
+                    ui.add_space(theme::space::MD);
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(self.tray_available(), egui::Button::new("Keep working in tray")).clicked() {
+                            self.close_confirmation = false;
+                            self.quit_when_idle = false;
+                            self.hide_to_tray(&ctx);
+                        }
+                        if ui.button("Keep app open").clicked() {
+                            self.close_confirmation = false;
+                            self.quit_when_idle = false;
+                        }
+                    });
+                });
+        }
 
         self.draw_startup_animation(&ctx);
     }
@@ -2511,4 +2782,45 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|ctx| Ok(Box::new(NativeApp::new(ctx)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::active_task_from;
+
+    #[test]
+    fn active_render_prevents_a_full_close() {
+        assert_eq!(
+            active_task_from("running", false, "", "", "", ""),
+            Some("A video render")
+        );
+    }
+
+    #[test]
+    fn any_background_install_or_download_prevents_a_full_close() {
+        assert_eq!(
+            active_task_from("idle", true, "", "", "", ""),
+            Some("A model download")
+        );
+        assert_eq!(
+            active_task_from("idle", false, "running", "", "", ""),
+            Some("Runtime setup")
+        );
+        assert_eq!(
+            active_task_from("idle", false, "", "installing", "", ""),
+            Some("Model storage setup")
+        );
+        assert_eq!(
+            active_task_from("idle", false, "", "", "downloading", ""),
+            Some("An app update download")
+        );
+    }
+
+    #[test]
+    fn idle_app_can_close_normally() {
+        assert_eq!(
+            active_task_from("completed", false, "", "", "ready", ""),
+            None
+        );
+    }
 }

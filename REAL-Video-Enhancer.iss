@@ -1,6 +1,6 @@
 #define MyAppName "REAL Video Enhancer"
 #ifndef MyAppVersion
-#define MyAppVersion "2.4.33"
+#define MyAppVersion "2.4.34"
 #endif
 #define MyAppPublisher "B1progame"
 #define MyAppURL "https://github.com/B1progame/REAL-Video-Enhancer"
@@ -62,7 +62,7 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; WorkingDir: "{app}"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Finish setup and install the runtime and model library"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch REAL Video Enhancer"; Flags: nowait postinstall skipifsilent
 
 [Code]
 var
