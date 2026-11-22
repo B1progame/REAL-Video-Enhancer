@@ -6,8 +6,16 @@ __pycache__/
 *$py.class
 
 # Dev files
+node_modules/
+**/node_modules/
+web-ui/dist/
 build
 dist
+/release-stage/
+/integrations/
+/native-ui/target/
+/web-ui/
+/ffmpeg_log.txt
 venv
 .venv/
 /bin/

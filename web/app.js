@@ -10,14 +10,93 @@ const pages = {
 
 function activatePage(name) {
   if (!name || !pages[name]) return;
+  if (name === 'process' && processNavigationButton?.disabled) return;
   navButtons.forEach((btn) => btn.classList.toggle('active', btn.dataset.page === name));
   Object.entries(pages).forEach(([key, el]) => el.classList.toggle('active', key === name));
 }
+
+const processNavigationButton = document.querySelector('.nav-btn[data-page="process"]');
+const firstRunSetupDialog = document.getElementById('firstRunSetupDialog');
+const firstRunInstallBtn = document.getElementById('firstRunInstallBtn');
+const firstRunAnimeScripterBtn = document.getElementById('firstRunAnimeScripterBtn');
+const firstRunLaterBtn = document.getElementById('firstRunLaterBtn');
+const processStartButton = document.getElementById('startRender');
+const homeStartProcessButton = document.getElementById('homeStartProcess');
+setProcessAvailability(false);
+
+function setProcessAvailability(available) {
+  const enabled = Boolean(available);
+  if (processNavigationButton) {
+    processNavigationButton.disabled = !enabled;
+    processNavigationButton.title = enabled ? 'Process' : 'Install a processing backend before rendering';
+    processNavigationButton.setAttribute('aria-disabled', String(!enabled));
+  }
+  if (processStartButton) processStartButton.disabled = !enabled;
+  if (homeStartProcessButton) homeStartProcessButton.disabled = !enabled;
+}
+
+function showFirstRunSetupPrompt() {
+  firstRunSetupDialog?.classList.remove('anime-only-setup');
+  const title = document.getElementById('firstRunSetupTitle');
+  const description = document.getElementById('firstRunSetupDescription');
+  const includes = document.getElementById('firstRunIncludes');
+  if (title) title.textContent = 'Set up video processing?';
+  if (description) description.textContent = 'No compatible processing backend is ready yet. Install the recommended setup for this PC, or choose a backend yourself later.';
+  if (includes) includes.innerHTML = '<li>Managed Python runtime and RVE libraries</li><li>Recommended PyTorch or NCNN backend for this PC</li><li>FFmpeg for reading and exporting video</li><li>TheAnimeScripter command-line engine</li>';
+  if (firstRunInstallBtn) firstRunInstallBtn.hidden = false;
+  if (firstRunAnimeScripterBtn) firstRunAnimeScripterBtn.hidden = true;
+  if (!firstRunSetupDialog?.open) firstRunSetupDialog?.showModal();
+}
+
+function showAnimeScripterSetupPrompt() {
+  firstRunSetupDialog?.classList.add('anime-only-setup');
+  const title = document.getElementById('firstRunSetupTitle');
+  const description = document.getElementById('firstRunSetupDescription');
+  const includes = document.getElementById('firstRunIncludes');
+  if (title) title.textContent = 'Add the AnimeScripter engine?';
+  if (description) description.textContent = 'The RVE engine is ready. Install the official portable AnimeScripter CLI so the AnimeScripter engine and its extra operations work from this launcher.';
+  if (includes) includes.innerHTML = '<li>Official portable AnimeScripter command-line engine</li><li>Installed in the RVE application data folder</li><li>Model weights download the first time you use each method</li>';
+  if (firstRunInstallBtn) firstRunInstallBtn.hidden = true;
+  if (firstRunAnimeScripterBtn) firstRunAnimeScripterBtn.hidden = false;
+  if (!firstRunSetupDialog?.open) firstRunSetupDialog?.showModal();
+}
+
+firstRunLaterBtn?.addEventListener('click', async () => {
+  const animeOnly = firstRunSetupDialog?.classList.contains('anime-only-setup');
+  if (animeOnly) {
+    try {
+      await apiPost('/api/settings', { settings: { animescripter_setup_dismissed: true } });
+    } catch (_error) {
+    }
+  }
+  firstRunSetupDialog?.close();
+  if (!animeOnly) activatePage('download');
+});
+
+firstRunInstallBtn?.addEventListener('click', async () => {
+  firstRunSetupDialog?.close();
+  try {
+    const system = await runRuntimeSetupFromUI();
+    if (!system?.available_backends?.length) {
+      showToastNotification('Setup needs attention', 'No usable processing backend was detected. Check the Runtime page log.');
+    }
+  } catch (error) {
+    activatePage('runtime');
+    appendDownloadLog(`First-run setup failed: ${String(error)}`);
+  }
+});
+
+firstRunAnimeScripterBtn?.addEventListener('click', async () => {
+  firstRunSetupDialog?.close();
+  await installAnimeScripterFromUI();
+});
 
 navButtons.forEach((btn) => {
   if (!btn.dataset.page) return;
   btn.addEventListener('click', () => activatePage(btn.dataset.page));
 });
+
+document.getElementById('homeStartProcess')?.addEventListener('click', () => activatePage('process'));
 
 function setupTabs(wrapperSelector) {
   const wrap = document.querySelector(`[data-tabs="${wrapperSelector}"]`);
@@ -73,11 +152,17 @@ const videoFrames = document.getElementById('videoFrames');
 const outputFps = document.getElementById('outputFps');
 const inputPathField = document.getElementById('inputPathField');
 const outputPathField = document.getElementById('outputPathField');
+const renderStartTime = document.getElementById('renderStartTime');
+const renderEndTime = document.getElementById('renderEndTime');
 const selectInputVideoBtn = document.getElementById('selectInputVideoBtn');
 const batchSelectBtn = document.getElementById('batchSelectBtn');
 const selectOutputFolderBtn = document.getElementById('selectOutputFolderBtn');
 const openOutputFolderBtn = document.getElementById('openOutputFolderBtn');
 const backendSelect = document.getElementById('backendSelect');
+const processingEngine = document.getElementById('processingEngine');
+const animeScripterStatus = document.getElementById('animeScripterStatus');
+const installAnimeScripterBtn = document.getElementById('installAnimeScripterBtn');
+const animeScripterOptions = document.getElementById('animeScripterOptions');
 const interpolateModel = document.getElementById('interpolateModel');
 const upscaleModel = document.getElementById('upscaleModel');
 const interpolateFactor = document.getElementById('interpolateFactor');
@@ -134,6 +219,7 @@ const audioBitrate = document.getElementById('audioBitrate');
 const subtitleEncoder = document.getElementById('subtitleEncoder');
 const videoTune = document.getElementById('videoTune');
 const keyframeInterval = document.getElementById('keyframeInterval');
+const customEncoder = document.getElementById('customEncoder');
 const encoderPreview = document.getElementById('encoderPreview');
 const systemInfoBox = document.getElementById('systemInfoBox');
 const refreshBackendsBtn = document.getElementById('refreshBackends');
@@ -194,10 +280,13 @@ const hudGpu = document.getElementById('hudGpu');
 const hudRam = document.getElementById('hudRam');
 const hudVram = document.getElementById('hudVram');
 const setUseSameOutputFolder = document.getElementById('setUseSameOutputFolder');
+const setOutputFolderLocation = document.getElementById('setOutputFolderLocation');
+const setSelectOutputFolderBtn = document.getElementById('setSelectOutputFolderBtn');
 const setSceneDetectEnabled = document.getElementById('setSceneDetectEnabled');
 const setAutoBorderCropping = document.getElementById('setAutoBorderCropping');
 const setSceneDetectMethod = document.getElementById('setSceneDetectMethod');
 const setSceneDetectThreshold = document.getElementById('setSceneDetectThreshold');
+const setSceneDetectModel = document.getElementById('setSceneDetectModel');
 const setVideoContainer = document.getElementById('setVideoContainer');
 const setVideoPixelFormat = document.getElementById('setVideoPixelFormat');
 const setPrecision = document.getElementById('setPrecision');
@@ -228,6 +317,9 @@ const pickCustomInterpolateModelBtn = document.getElementById('pickCustomInterpo
 const pickCustomUpscaleModelBtn = document.getElementById('pickCustomUpscaleModel');
 const importCustomModelsBtn = document.getElementById('importCustomModelsBtn');
 const importCustomModelFolderBtn = document.getElementById('importCustomModelFolderBtn');
+const customModelFilesInput = document.getElementById('customModelFilesInput');
+const customModelFolderInput = document.getElementById('customModelFolderInput');
+const customModelSingleInput = document.getElementById('customModelSingleInput');
 const refreshCustomModelsBtn = document.getElementById('refreshCustomModelsBtn');
 const openCustomModelsFolderBtn = document.getElementById('openCustomModelsFolderBtn');
 const customModelsFolderPath = document.getElementById('customModelsFolderPath');
@@ -252,9 +344,20 @@ const settingsBackendSupportNote = document.getElementById('settingsBackendSuppo
 const settingsBackendLog = document.getElementById('settingsBackendLog');
 const advBenchmarkMode = document.getElementById('advBenchmarkMode');
 const advTiling = document.getElementById('advTiling');
+const advMotionBlur = document.getElementById('advMotionBlur');
+const advMotionBlurGamma = document.getElementById('advMotionBlurGamma');
+const advMotionBlurShutterAngle = document.getElementById('advMotionBlurShutterAngle');
+const advMotionBlurStrength = document.getElementById('advMotionBlurStrength');
+const advDeduplicate = document.getElementById('advDeduplicate');
+const advDeduplicateThreshold = document.getElementById('advDeduplicateThreshold');
 const advDynamicScaledFlowMirror = document.getElementById('advDynamicScaledFlowMirror');
 const advEnsembleMirror = document.getElementById('advEnsembleMirror');
 const advTileSize = document.getElementById('advTileSize');
+const advTileOverlap = document.getElementById('advTileOverlap');
+const advOverwrite = document.getElementById('advOverwrite');
+const advDevice = document.getElementById('advDevice');
+const advOutputToMpv = document.getElementById('advOutputToMpv');
+const advMergeSubtitles = document.getElementById('advMergeSubtitles');
 const advTensorRTOptMirror = document.getElementById('advTensorRTOptMirror');
 
 const generationState = {
@@ -299,9 +402,12 @@ let latestRuntimeMetrics = {
 };
 let latestSystemInfo = null;
 let latestBackendManagerState = null;
+let backendConnectionStatus = 'checking';
 
 let renderStatusPollHandle = null;
 let runtimeInstallPollHandle = null;
+let runtimeMetricsPollHandle = null;
+let runtimeMetricsFetchInFlight = false;
 let firstFrameObjectUrl = null;
 let previewFrameObjectUrl = null;
 let previewFrameFetchInFlight = false;
@@ -453,7 +559,10 @@ async function apiPost(path, payload = {}) {
     const detail = (parsed && typeof parsed === 'object' && parsed.error)
       ? parsed.error
       : (typeof parsed === 'string' && parsed ? parsed : `POST ${path} failed with ${response.status}`);
-    throw new Error(detail);
+    const error = new Error(detail);
+    error.code = parsed && typeof parsed === 'object' ? parsed.code : undefined;
+    error.outputFile = parsed && typeof parsed === 'object' ? parsed.output_file : undefined;
+    throw error;
   }
   return parsed;
 }
@@ -626,14 +735,22 @@ class StartupWireframeLoader {
   }
 
   _sampleShape(phase01) {
-    const states = this.states;
+    const fallbackCube = [
+      [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
+      [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1],
+    ];
+    const states = Array.isArray(this.states) && this.states.length
+      ? this.states.filter((state) => Array.isArray(state) && state.length === fallbackCube.length)
+      : [fallbackCube];
+    if (!states.length) return fallbackCube;
+    const phase = Number.isFinite(phase01) ? phase01 : 0;
     const count = states.length;
-    const segment = (phase01 % 1) * count;
+    const segment = (phase % 1) * count;
     const indexA = Math.floor(segment) % count;
     const indexB = (indexA + 1) % count;
     const blend = smoothstep(segment - Math.floor(segment));
-    const stateA = states[indexA];
-    const stateB = states[indexB];
+    const stateA = states[indexA] || fallbackCube;
+    const stateB = states[indexB] || stateA;
     return stateA.map(([ax, ay, az], i) => {
       const [bx, by, bz] = stateB[i];
       return [
@@ -652,6 +769,125 @@ class StartupWireframeLoader {
       y: centerY + (vertex[1] * inv),
       z: vertex[2],
     };
+  }
+
+  _drawHolographicStage(ctx, width, height, elapsed, pulse) {
+    const cx = width * 0.5;
+    const cy = height * 0.5;
+    const radius = Math.min(width, height) * 0.39;
+    const breathe = this.reduceMotion ? 1 : pulse;
+
+    const halo = ctx.createRadialGradient(cx, cy, radius * 0.08, cx, cy, radius * 1.55);
+    halo.addColorStop(0, 'rgba(74, 232, 220, 0.16)');
+    halo.addColorStop(0.42, 'rgba(48, 157, 255, 0.075)');
+    halo.addColorStop(1, 'rgba(26, 73, 133, 0)');
+    ctx.fillStyle = halo;
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    for (let ring = 0; ring < 3; ring += 1) {
+      const ringRadius = radius * (0.83 + (ring * 0.22)) * breathe;
+      const tilt = -0.28 + (ring * 0.28);
+      ctx.save();
+      ctx.rotate(tilt + (this.reduceMotion ? 0 : elapsed * (ring % 2 ? -0.045 : 0.055)));
+      ctx.beginPath();
+      ctx.ellipse(0, 0, ringRadius, ringRadius * (0.27 + ring * 0.025), 0, 0, Math.PI * 2);
+      const orbit = ctx.createLinearGradient(-ringRadius, 0, ringRadius, 0);
+      orbit.addColorStop(0, 'rgba(77, 231, 219, 0.03)');
+      orbit.addColorStop(0.32, 'rgba(91, 229, 236, 0.38)');
+      orbit.addColorStop(0.68, 'rgba(101, 166, 255, 0.27)');
+      orbit.addColorStop(1, 'rgba(100, 166, 255, 0.025)');
+      ctx.strokeStyle = orbit;
+      ctx.lineWidth = ring === 1 ? 1.35 : 0.8;
+      ctx.shadowColor = 'rgba(88, 215, 255, 0.5)';
+      ctx.shadowBlur = ring === 1 ? 12 : 7;
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.restore();
+
+    // A thin light sheet travels through the floating model, like a frame scan.
+    const scanY = cy + Math.sin(elapsed * (this.reduceMotion ? 0 : 0.72)) * radius * 0.72;
+    const scan = ctx.createLinearGradient(0, scanY - 12, 0, scanY + 12);
+    scan.addColorStop(0, 'rgba(76, 238, 220, 0)');
+    scan.addColorStop(0.5, 'rgba(91, 233, 239, 0.12)');
+    scan.addColorStop(1, 'rgba(94, 175, 255, 0)');
+    ctx.fillStyle = scan;
+    ctx.fillRect(cx - radius * 1.25, scanY - 12, radius * 2.5, 24);
+
+    // Sparse, stable motes make the depth legible without a noisy particle field.
+    for (let i = 0; i < 18; i += 1) {
+      const seed = (i * 2.3999632297);
+      const drift = this.reduceMotion ? 0 : elapsed * (0.1 + ((i % 4) * 0.025));
+      const orbitRadius = radius * (0.48 + ((i * 17 % 47) / 100));
+      const x = cx + Math.cos(seed + drift) * orbitRadius;
+      const y = cy + Math.sin(seed * 1.31 + drift * 0.75) * orbitRadius * 0.7;
+      const twinkle = 0.24 + (0.55 * ((Math.sin(elapsed * 1.4 + i) + 1) * 0.5));
+      ctx.beginPath();
+      ctx.arc(x, y, i % 5 === 0 ? 1.65 : 0.9, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${i % 3 === 0 ? '100, 255, 222' : '134, 195, 255'}, ${twinkle})`;
+      ctx.shadowColor = 'rgba(83, 228, 227, 0.75)';
+      ctx.shadowBlur = 8;
+      ctx.fill();
+    }
+    ctx.shadowBlur = 0;
+  }
+
+  _drawCore(ctx, raw, centerX, centerY, scale, rotations) {
+    const [rotX, rotY, rotZ] = rotations;
+    const inner = raw.map((vertex) => {
+      let v = vertex.map((axis) => axis * 0.48);
+      v = rotateX(v, rotX);
+      v = rotateY(v, rotY + Math.PI / 4);
+      v = rotateZ(v, rotZ);
+      return this._projectVertex(v, centerX, centerY, scale);
+    });
+    const coreEdges = [
+      [0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4],
+      [0, 4], [1, 5], [2, 6], [3, 7],
+    ];
+    ctx.save();
+    ctx.lineWidth = 2.2;
+    ctx.strokeStyle = 'rgba(92, 255, 220, 0.9)';
+    ctx.shadowColor = 'rgba(73, 241, 217, 0.95)';
+    ctx.shadowBlur = 18;
+    ctx.beginPath();
+    for (const [a, b] of coreEdges) {
+      ctx.moveTo(inner[a].x, inner[a].y);
+      ctx.lineTo(inner[b].x, inner[b].y);
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#d9fff8';
+    for (const vertex of inner) {
+      ctx.beginPath();
+      ctx.arc(vertex.x, vertex.y, 2.1, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const badgeW = 58;
+    const badgeH = 34;
+    const badgeX = centerX - badgeW / 2;
+    const badgeY = centerY - badgeH / 2;
+    const badge = ctx.createLinearGradient(badgeX, badgeY, badgeX + badgeW, badgeY + badgeH);
+    badge.addColorStop(0, 'rgba(15, 35, 49, 0.96)');
+    badge.addColorStop(1, 'rgba(13, 26, 39, 0.96)');
+    ctx.fillStyle = badge;
+    ctx.strokeStyle = 'rgba(125, 255, 230, 0.8)';
+    ctx.lineWidth = 1.2;
+    ctx.shadowColor = 'rgba(75, 239, 215, 0.65)';
+    ctx.shadowBlur = 18;
+    ctx.beginPath();
+    ctx.roundRect(badgeX, badgeY, badgeW, badgeH, 10);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#d9fff8';
+    ctx.font = '700 13px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('RVE', centerX, centerY + 0.5);
+    ctx.restore();
   }
 
   _loop(time) {
@@ -675,7 +911,7 @@ class StartupWireframeLoader {
     const rotX = this.reduceMotion ? 0.46 : (Math.sin(elapsedSeconds * 0.5) * 0.42);
     const rotY = elapsedSeconds * (this.reduceMotion ? 0.26 : 0.36);
     const rotZ = this.reduceMotion ? 0 : (Math.cos(elapsedSeconds * 0.4) * 0.22);
-    const scale = Math.min(viewW, viewH) * (this.reduceMotion ? 1.38 : 1.42) * pulse;
+    const scale = Math.min(viewW, viewH) * (this.reduceMotion ? 1.9 : 2.02) * pulse;
 
     const transformed = raw.map((vertex) => {
       let v = vertex;
@@ -706,30 +942,37 @@ class StartupWireframeLoader {
     ctx.save();
     ctx.scale(this.dpr, this.dpr);
 
+    this._drawHolographicStage(ctx, viewW, viewH, elapsedSeconds, pulse);
+
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
 
     for (const segment of segments) {
       const depthNorm = clamp01((segment.depth + 2) / 4);
       const alpha = 0.22 + (depthNorm * 0.18);
-      ctx.strokeStyle = `rgba(106, 193, 255, ${alpha})`;
-      ctx.lineWidth = 2.8;
+      ctx.strokeStyle = `rgba(75, 213, 235, ${alpha})`;
+      ctx.lineWidth = 4.4;
+      ctx.shadowColor = 'rgba(76, 203, 255, 0.7)';
+      ctx.shadowBlur = 14;
+      ctx.beginPath();
+      ctx.moveTo(segment.va.x, segment.va.y);
+      ctx.lineTo(segment.vb.x, segment.vb.y);
+      ctx.stroke();
+    }
+    ctx.shadowBlur = 0;
+
+    for (const segment of segments) {
+      const depthNorm = clamp01((segment.depth + 2) / 4);
+      const alpha = 0.6 + (depthNorm * 0.35);
+      ctx.strokeStyle = `rgba(218, 250, 255, ${alpha})`;
+      ctx.lineWidth = 1.45;
       ctx.beginPath();
       ctx.moveTo(segment.va.x, segment.va.y);
       ctx.lineTo(segment.vb.x, segment.vb.y);
       ctx.stroke();
     }
 
-    for (const segment of segments) {
-      const depthNorm = clamp01((segment.depth + 2) / 4);
-      const alpha = 0.6 + (depthNorm * 0.35);
-      ctx.strokeStyle = `rgba(224, 242, 255, ${alpha})`;
-      ctx.lineWidth = 1.22;
-      ctx.beginPath();
-      ctx.moveTo(segment.va.x, segment.va.y);
-      ctx.lineTo(segment.vb.x, segment.vb.y);
-      ctx.stroke();
-    }
+    this._drawCore(ctx, raw, centerX, centerY, scale, [rotX, rotY, rotZ]);
 
     if (!this.canvasVerified) {
       this.canvasVerified = this._verifyCanvasPaint(segments);
@@ -781,10 +1024,10 @@ class StartupWireframeLoader {
         line.setAttribute('vector-effect', 'non-scaling-stroke');
         line.setAttribute('fill', 'none');
       }
-      pair.glow.setAttribute('stroke', `rgba(106, 193, 255, ${glowAlpha.toFixed(3)})`);
-      pair.glow.setAttribute('stroke-width', '2.8');
-      pair.core.setAttribute('stroke', `rgba(224, 242, 255, ${coreAlpha.toFixed(3)})`);
-      pair.core.setAttribute('stroke-width', '1.3');
+      pair.glow.setAttribute('stroke', `rgba(75, 213, 235, ${glowAlpha.toFixed(3)})`);
+      pair.glow.setAttribute('stroke-width', '4.2');
+      pair.core.setAttribute('stroke', `rgba(218, 250, 255, ${coreAlpha.toFixed(3)})`);
+      pair.core.setAttribute('stroke-width', '1.45');
     });
   }
 }
@@ -822,7 +1065,7 @@ function renderRuntimeInstallState(state) {
   if (!state || typeof state !== 'object') return;
   const progress = Math.max(0, Math.min(100, Number(state.progress || 0)));
   const status = String(state.status || 'idle').toUpperCase();
-  const lines = Array.isArray(state.log_lines) ? state.log_lines : [];
+  const lines = Array.isArray(state.log_lines) ? state.log_lines : Array.isArray(state.output) ? state.output : [];
   setTextIfPresent(runtimeStatusBadge, `STATUS: ${status}`, 'STATUS: IDLE');
   setTextIfPresent(runtimeStageText, `Stage: ${state.stage || 'Waiting'}`, 'Stage: Waiting');
   setTextIfPresent(runtimeEtaText, `ETA: ${state.eta_label || '--'}`, 'ETA: --');
@@ -849,7 +1092,7 @@ function renderRuntimeInstallState(state) {
 
 function renderStartupInstallState(state) {
   if (!state || typeof state !== 'object') return;
-  const lines = Array.isArray(state.log_lines) ? state.log_lines : [];
+  const lines = Array.isArray(state.log_lines) ? state.log_lines : Array.isArray(state.output) ? state.output : [];
   const status = String(state.status || 'idle').toUpperCase();
   if (startupInstallState) startupInstallState.textContent = status;
   if (startupInstallLog) {
@@ -912,6 +1155,10 @@ async function runStartupInstallSequence(initialState = null) {
 }
 
 async function finishStartupSequence(status = 'Backend ready', detail = 'Interface online and ready to render') {
+  // Give the hero animation enough time to register before transitioning away.
+  const minimumSceneTime = 1900;
+  const sceneElapsed = performance.now() - startupState.startedAt;
+  if (sceneElapsed < minimumSceneTime) await sleep(minimumSceneTime - sceneElapsed);
   setStartupStage(100, status, detail);
   startupState.loader?.stop();
   await sleep(560);
@@ -1015,7 +1262,16 @@ function renderRuntimeSystemInfo(system) {
   setMeterState(runtimeBackendMeter, !!system.backend_script_available);
   setMeterState(runtimePythonMeter, !!system.python_available);
   setMeterState(runtimeFfmpegMeter, !!system.ffmpeg_available);
-  renderBackendManagerState(system.backend_management || null, system);
+  const managerState = system.backend_management || {
+    // Older API builds only expose rendering capabilities. Keep the manager
+    // useful with those responses instead of showing an empty installed list.
+    installed_backends: system.installed_backends || system.available_backends || [],
+    torch_versions: ['2.9.0', '2.8.0', '2.7.0', '2.6.0'],
+    pytorch_backends: [{ value: 'cuda', label: 'CUDA' }, { value: 'cpu', label: 'CPU' }],
+    directml_supported: false,
+    tensorrt_supported: true,
+  };
+  renderBackendManagerState(managerState, system);
 }
 
 function renderPythonInfo(info) {
@@ -1181,19 +1437,64 @@ async function refreshCustomModels() {
   }
 }
 
-async function importCustomModels(folder = false) {
-  const endpoint = folder ? '/api/actions/import_custom_model_folder' : '/api/actions/import_custom_models';
-  appendDownloadLog(folder ? 'Importing custom model folder...' : 'Importing custom model files...');
+function importCustomModels(folder = false) {
+  const picker = folder ? customModelFolderInput : customModelFilesInput;
+  if (!picker) {
+    appendDownloadLog('The model file picker is unavailable in this browser.');
+    return;
+  }
+  picker.value = '';
+  picker.click();
+}
+
+async function uploadCustomModelFiles(fileList, { directory = false, directTarget = null } = {}) {
+  const files = [...(fileList || [])];
+  if (!files.length) return;
+  const allowed = new Set(['.pth', '.pt', '.onnx', '.safetensors', '.engine', '.bin', '.param', '.ckpt']);
+  const accepted = files.filter((file) => allowed.has(file.name.slice(file.name.lastIndexOf('.')).toLowerCase()));
+  const skipped = files.length - accepted.length;
+  if (!accepted.length) {
+    appendDownloadLog('No supported model files were selected. Choose a supported model file or an NCNN .bin/.param pair.');
+    return;
+  }
+  const pairKey = (file) => (file.webkitRelativePath || file.name).replace(/\.(bin|param)$/i, '').toLowerCase();
+  const binStems = new Set(accepted.filter((file) => /\.bin$/i.test(file.name)).map(pairKey));
+  const paramStems = new Set(accepted.filter((file) => /\.param$/i.test(file.name)).map(pairKey));
+  const unpaired = accepted.filter((file) => /\.bin$/i.test(file.name) ? !paramStems.has(pairKey(file))
+    : /\.param$/i.test(file.name) && !binStems.has(pairKey(file)));
+  const toUpload = accepted.filter((file) => !unpaired.includes(file));
+  if (unpaired.length) {
+    appendDownloadLog(`NCNN models need matching .bin and .param files. Skipped: ${unpaired.map((file) => file.name).join(', ')}`);
+  }
+  if (!toUpload.length) return;
+  appendDownloadLog(`Importing ${toUpload.length} model file${toUpload.length === 1 ? '' : 's'}${directory ? ' from the selected folder' : ''}...`);
+  const imported = [];
   try {
-    const payload = await apiPost(endpoint, {});
-    renderCustomModels(payload);
+    for (const [index, file] of toUpload.entries()) {
+      const relativePath = directory ? (file.webkitRelativePath || file.name) : file.name;
+      const query = new URLSearchParams({ filename: file.name, relative_path: relativePath });
+      const response = await fetch(`/api/custom_models/upload?${query}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) throw new Error(payload.error || `Could not import ${file.name}`);
+      imported.push(payload.path);
+      appendDownloadLog(`Imported ${index + 1}/${toUpload.length}: ${file.name}`);
+    }
     await populateModelsForBackend();
-    const imported = Array.isArray(payload.imported) ? payload.imported.length : 0;
-    const failures = Array.isArray(payload.failures) ? payload.failures : [];
-    appendDownloadLog(`Imported ${imported} custom model${imported === 1 ? '' : 's'}.`);
-    if (failures.length) appendDownloadLog(`Import warnings: ${failures.join('; ')}`);
+    renderCustomModels(await apiGet('/api/custom_models'));
+    if (directTarget && imported[0]) {
+      directTarget.value = imported[0];
+      directTarget.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    appendDownloadLog(`Imported ${imported.length} custom model file${imported.length === 1 ? '' : 's'}.`);
+    if (skipped) appendDownloadLog(`Skipped ${skipped} unsupported file${skipped === 1 ? '' : 's'}.`);
+    showToastNotification('Model import complete', `${imported.length} file${imported.length === 1 ? '' : 's'} added to the collection.`, true);
   } catch (err) {
     appendDownloadLog(`Custom model import failed: ${String(err)}`);
+    showToastNotification('Model import failed', String(err));
   }
 }
 
@@ -1363,6 +1664,17 @@ function showEtaToast(message, done = false) {
   showToastNotification('ETA', message, done);
 }
 
+function reportRenderStartError(error, context = 'Render') {
+  const message = String(error?.message || error || 'Unknown error');
+  if (error?.code === 'BACKEND_NOT_INSTALLED') {
+    activatePage('runtime');
+    appendDownloadLog(message);
+    showToastNotification('Rendering backend required', message, true);
+    return;
+  }
+  showEtaToast(`${context} failed: ${message}`, true);
+}
+
 function primeDesktopNotifications() {
   try {
     if (typeof window === 'undefined' || !('Notification' in window)) return;
@@ -1419,12 +1731,24 @@ function setLiveEtaToast(message, state = 'running') {
 }
 
 function setLiveModelDownloadToast(status) {
-  if (!etaToasts) return;
-  const active = !!status?.download_active;
-  const label = String(status?.download_label || 'model').trim() || 'model';
-  const progress = Number(status?.download_progress || 0);
+  const indicator = document.getElementById('modelDownloadIndicator');
+  const indicatorTitle = document.getElementById('modelDownloadTitle');
+  const indicatorPercent = document.getElementById('modelDownloadPercent');
+  const indicatorFill = document.getElementById('modelDownloadFill');
+  const indicatorDetail = document.getElementById('modelDownloadDetail');
+  const active = !!(status?.active ?? status?.download_active);
+  const label = String(status?.label || status?.download_label || 'model').trim() || 'model';
+  const progress = Number(status?.progress ?? status?.download_progress ?? 0);
   const progressText = Number.isFinite(progress) ? `${Math.round(progress)}%` : '--';
-  const detail = String(status?.download_detail || '').trim();
+  const detail = String(status?.detail || status?.download_detail || '').trim();
+  if (indicator) indicator.hidden = !active;
+  if (active) {
+    if (indicatorTitle) indicatorTitle.textContent = `${status?.stage || status?.download_stage || 'Downloading'} · ${label}`;
+    if (indicatorPercent) indicatorPercent.textContent = progressText;
+    if (indicatorFill) indicatorFill.style.width = `${Math.max(0, Math.min(100, progress || 0))}%`;
+    if (indicatorDetail) indicatorDetail.textContent = detail || 'Preparing model download…';
+  }
+  if (!etaToasts) return;
   if (!active) {
     if (liveModelDownloadToast) {
       liveModelDownloadToast.remove();
@@ -1657,19 +1981,21 @@ function updatePreviewDetails() {
   updatePreviewProgress();
 }
 
-async function refreshPreviewFrame() {
+async function refreshPreviewFrame(renderState = 'running') {
   if (!previewIsEnabled() || previewFrameFetchInFlight) return;
   previewFrameFetchInFlight = true;
   try {
     const stamp = Date.now();
     const response = await fetch(`/api/render/preview_frame?t=${stamp}`, { cache: 'no-store' });
     if (!response.ok) {
-      setLivePreviewText('Working on video...');
+      const terminal = ['completed', 'stopped', 'error'].includes(renderState);
+      setLivePreviewText(terminal ? 'No rendered frame was produced' : 'Waiting for first enhanced frame...');
       return;
     }
     const blob = await response.blob();
     if (!blob || blob.size === 0) {
-      setLivePreviewText('Working on video...');
+      const terminal = ['completed', 'stopped', 'error'].includes(renderState);
+      setLivePreviewText(terminal ? 'No rendered frame was produced' : 'Waiting for first enhanced frame...');
       return;
     }
     releasePreviewFrameObjectUrl();
@@ -1710,8 +2036,60 @@ async function loadInputFirstFrame(path) {
   }
 }
 
+function getModelAvailability(statusMap, name) {
+  if (!statusMap || !Object.prototype.hasOwnProperty.call(statusMap, name)) return 'unknown';
+  return statusMap[name] === true ? 'installed' : statusMap[name] === false ? 'missing' : 'unknown';
+}
+
+function compactModelLabel(name) {
+  return String(name)
+    .replace(/\s*\(Slow Model, Animation\/Realistic\)/i, ' · Slow · Animation / realistic')
+    .replace(/\s*\(Animation\/Realistic\)/i, ' · Animation / realistic')
+    .replace(/\s*\(Slow Model, Realistic\/General\)/i, ' · Slow · Realistic / general')
+    .replace(/\s*\(Fast Model, Realistic only\)/i, ' · Fast · Realistic')
+    .replace(/\s*\(Slowest RIFE Model, Animation\)/i, ' · Slowest · Animation')
+    .replace(/\s*\(Fastest Model\)/i, ' · Fastest')
+    .replace(/\s*\(Smoothest Model\)/i, ' · Smoothest')
+    .replace(/\s*\(Latest General Model, Recommended\)/i, ' · Recommended')
+    .replace(/\s*\(Latest LITE model\)/i, ' · Latest Lite')
+    .replace(/\s*\(Low-High Quality Source\)/i, ' · Any quality')
+    .replace(/\s*\((High|Medium|Low) Quality Source\)/gi, (_, quality) => ` · ${quality} quality`)
+    .replace(/\s*\((\d+)X\)/gi, ' · ×$1')
+    .replace(/\s*\((Fast|Slow)\)/gi, ' · $1')
+    .replace(/\s*\((Realistic|Animation|Old Animation|HD Input)\)/gi, ' · $1')
+    .replace(/\s*\((Helps with text warping)\)/gi, '')
+    .replace(/\s*\(([^)]*)\)/g, ' · $1');
+}
+
+function updateModelAvailabilityHint(selectEl, statusMap) {
+  if (!selectEl) return;
+  let hint = selectEl.parentElement?.querySelector('.model-install-status');
+  if (!hint && selectEl.parentElement) {
+    hint = document.createElement('small');
+    hint.className = 'model-install-status is-unknown';
+    hint.setAttribute('aria-live', 'polite');
+    selectEl.insertAdjacentElement('afterend', hint);
+  }
+  if (!hint) return;
+  const availability = getModelAvailability(statusMap, selectEl.value);
+  const selectedOption = selectEl.selectedOptions?.[0];
+  selectEl.title = selectedOption?.title || selectEl.value;
+  const messages = {
+    installed: ['✓ Installed', 'is-installed'],
+    missing: ['✕ Not installed · download required', 'is-missing'],
+    unknown: ['Installation status unavailable', 'is-unknown'],
+  };
+  const [message, className] = messages[availability];
+  hint.textContent = message;
+  hint.className = `model-install-status ${className}`;
+  hint.title = availability === 'unknown'
+    ? 'The local model check did not return a result.'
+    : '';
+}
+
 function setOptions(selectEl, items, statusMap = null) {
   if (!selectEl) return;
+  selectEl._modelStatusMap = statusMap;
   const previousValue = selectEl.value;
   selectEl.innerHTML = '';
   if (!items || !items.length) {
@@ -1725,15 +2103,22 @@ function setOptions(selectEl, items, statusMap = null) {
   items.forEach((name) => {
     const opt = document.createElement('option');
     opt.value = name;
-    if (statusMap && Object.prototype.hasOwnProperty.call(statusMap, name)) {
-      opt.textContent = `${statusMap[name] ? '✅' : '❌'} ${name}`;
-    } else {
-      opt.textContent = name;
-    }
+    const availability = getModelAvailability(statusMap, name);
+    const indicator = availability === 'installed' ? '✅ ' : availability === 'missing' ? '❌ ' : '○ ';
+    opt.textContent = `${indicator}${compactModelLabel(name)}`;
+    opt.dataset.availability = availability;
+    opt.title = name;
     selectEl.appendChild(opt);
   });
   if ([...selectEl.options].some((option) => option.value === previousValue)) {
     selectEl.value = previousValue;
+  }
+  updateModelAvailabilityHint(selectEl, statusMap);
+  if (!selectEl.dataset.availabilityListener) {
+    selectEl.addEventListener('change', () => {
+      updateModelAvailabilityHint(selectEl, selectEl._modelStatusMap || null);
+    });
+    selectEl.dataset.availabilityListener = 'true';
   }
 }
 
@@ -1758,7 +2143,21 @@ function populateModelsForBackendFallback() {
   const backend = selectedBackendKey();
   const models = MODEL_CATALOG[backend] || MODEL_CATALOG.pytorch;
   applyModelPayload(models);
+  refreshFallbackModelStatuses(models);
   log(`Model list updated for backend (fallback): ${backend}`);
+}
+
+async function refreshFallbackModelStatuses(models) {
+  try {
+    const modelNames = Object.fromEntries(['interpolate', 'upscale', 'decompress', 'denoise', 'deblur'].map((category) => [
+      category,
+      Array.from(({ interpolate: interpolateModel, upscale: upscaleModel, decompress: decompressModel, denoise: denoiseModel, deblur: deblurModel })[category]?.options || []).map((option) => option.value),
+    ]));
+    const response = await apiPost('/api/models/status', { models: modelNames, backend: selectedBackendKey() });
+    applyModelPayload({ ...models, model_status: response.model_status || {} });
+  } catch (_err) {
+    // Preserve the UI's unknown marker when the backend cannot inspect weights.
+  }
 }
 
 async function populateModelsForBackend() {
@@ -1774,6 +2173,46 @@ async function populateModelsForBackend() {
   populateModelsForBackendFallback();
 }
 
+function selectedModelRequirements() {
+  if ((processingEngine?.value || 'rve').toLowerCase() === 'animescripter') return {};
+  const selections = {};
+  if (toggleInterpolate?.checked) selections.interpolate = interpolateModel?.value || '';
+  if (toggleUpscale?.checked) selections.upscale = upscaleModel?.value || '';
+  if (toggleDecompress?.checked) selections.decompress = decompressModel?.value || '';
+  if (toggleDenoise?.checked) selections.denoise = denoiseModel?.value || '';
+  if (toggleDeblur?.checked) selections.deblur = deblurModel?.value || '';
+  return selections;
+}
+
+async function runModelDownload(payload, description = 'Model download') {
+  const started = await apiPost('/api/models/download', payload);
+  if (!started?.id) throw new Error(started?.error || 'Could not start model download.');
+  appendDownloadLog(`${description} started.`);
+  while (true) {
+    const status = await apiGet(`/api/models/download_status?id=${encodeURIComponent(started.id)}`);
+    setLiveModelDownloadToast(status);
+    if (status.status === 'completed') {
+      appendDownloadLog(status.detail || 'Selected models are ready.');
+      await populateModelsForBackend();
+      return status;
+    }
+    if (status.status === 'error') throw new Error(status.error || status.detail || 'Model download failed.');
+    await sleep(500);
+  }
+}
+
+async function prepareModelsForQueue() {
+  const selections = selectedModelRequirements();
+  if (!Object.keys(selections).length) return;
+  const selectedMissing = Object.entries(selections).some(([category, label]) => {
+    const element = ({ interpolate: interpolateModel, upscale: upscaleModel, decompress: decompressModel, denoise: denoiseModel, deblur: deblurModel })[category];
+    return label && getModelAvailability(element?._modelStatusMap || null, label) !== 'installed';
+  });
+  if (!selectedMissing) return;
+  showToastNotification('Preparing render', 'Downloading selected model weights…');
+  await runModelDownload({ backend: selectedBackendKey(), selections }, 'Selected model download');
+}
+
 async function bootstrapFromBackend(reportStage = null) {
   try {
     reportStage?.(38, 'Connecting to backend bridge...', 'Waiting for Python backend API');
@@ -1781,6 +2220,7 @@ async function bootstrapFromBackend(reportStage = null) {
     reportStage?.(58, 'Reading installed runtimes...', 'Collecting system info, backends and model catalogs');
     renderSystemInfo(payload.system);
     setBackendOptions(payload.system?.available_backends || []);
+    setProcessAvailability((payload.system?.available_backends || []).length > 0);
     const initialBackend = payload.models?.backend || 'pytorch';
     if (backendSelect) {
       const hasOption = [...backendSelect.options].some((opt) => opt.value === initialBackend);
@@ -1816,6 +2256,7 @@ async function bootstrapFromBackend(reportStage = null) {
 async function refreshBackendState() {
   try {
     const system = await apiPost('/api/actions/refresh_backends');
+    setProcessAvailability((system.available_backends || []).length > 0);
     renderSystemInfo(system);
     setBackendOptions(system.available_backends || []);
     await fetchRuntimeInstallState();
@@ -1823,8 +2264,11 @@ async function refreshBackendState() {
     await refreshCustomModels();
     appendDownloadLog('Backends refreshed from runtime.');
     await populateModelsForBackend();
+    return system;
   } catch (err) {
+    setProcessAvailability(false);
     appendDownloadLog(`Backend refresh failed: ${String(err)}`);
+    return null;
   }
 }
 
@@ -1891,8 +2335,7 @@ async function runRuntimeSetupFromUI() {
       const status = String(state.status || 'idle').toLowerCase();
       if (status === 'completed') {
         appendDownloadLog(state.detail || 'Recommended runtime setup completed.');
-        await refreshBackendState();
-        return true;
+        return await refreshBackendState();
       }
       if (status === 'error') {
         throw new Error(state.detail || 'Recommended runtime setup failed');
@@ -1908,6 +2351,7 @@ async function runRuntimeSetupFromUI() {
 }
 
 function installButtonsAsDesktopBridge() {
+  installAnimeScripterBtn?.addEventListener('click', installAnimeScripterFromUI);
   installRecommendedBtn?.addEventListener('click', async () => {
     try {
       await runRuntimeSetupFromUI();
@@ -1918,11 +2362,11 @@ function installButtonsAsDesktopBridge() {
   downloadInterpolationModelsBtn?.addEventListener('click', async () => {
     appendDownloadLog('Downloading interpolation models for current backend...');
     try {
-      const payload = await apiPost('/api/actions/download_models', {
+      const payload = await runModelDownload({
         backend: backendSelect?.value || 'auto',
         categories: ['interpolate'],
-      });
-      appendDownloadLog(payload.message || 'Interpolation models processed.');
+      }, 'Interpolation model download');
+      appendDownloadLog(payload.detail || 'Interpolation models processed.');
     } catch (err) {
       appendDownloadLog(`Interpolation model download failed: ${String(err)}`);
     }
@@ -1930,11 +2374,11 @@ function installButtonsAsDesktopBridge() {
   downloadUpscaleModelsBtn?.addEventListener('click', async () => {
     appendDownloadLog('Downloading upscale models for current backend...');
     try {
-      const payload = await apiPost('/api/actions/download_models', {
+      const payload = await runModelDownload({
         backend: backendSelect?.value || 'auto',
         categories: ['upscale', 'decompress', 'denoise', 'deblur'],
-      });
-      appendDownloadLog(payload.message || 'Upscale/restoration models processed.');
+      }, 'Upscale and restoration model download');
+      appendDownloadLog(payload.detail || 'Upscale/restoration models processed.');
     } catch (err) {
       appendDownloadLog(`Upscale model download failed: ${String(err)}`);
     }
@@ -1942,11 +2386,11 @@ function installButtonsAsDesktopBridge() {
   downloadAllModelsBtn?.addEventListener('click', async () => {
     appendDownloadLog('Downloading every available model for the current backend...');
     try {
-      const payload = await apiPost('/api/actions/download_models', {
+      const payload = await runModelDownload({
         backend: backendSelect?.value || 'auto',
         categories: ['interpolate', 'upscale', 'decompress', 'denoise', 'deblur', 'scene_change'],
-      });
-      appendDownloadLog(payload.message || 'All models processed.');
+      }, 'Complete model download');
+      appendDownloadLog(payload.detail || 'All models processed.');
     } catch (err) {
       appendDownloadLog(`Download all models failed: ${String(err)}`);
     }
@@ -1993,6 +2437,18 @@ function installButtonsAsDesktopBridge() {
   });
   importCustomModelsBtn?.addEventListener('click', () => importCustomModels(false));
   importCustomModelFolderBtn?.addEventListener('click', () => importCustomModels(true));
+  customModelFilesInput?.addEventListener('change', () => uploadCustomModelFiles(customModelFilesInput.files));
+  customModelFolderInput?.addEventListener('change', () => uploadCustomModelFiles(customModelFolderInput.files, { directory: true }));
+  customModelSingleInput?.addEventListener('change', () => {
+    const target = customModelSingleInput.dataset.target === 'interpolate' ? setCustomInterpolateModel : setCustomUpscaleModel;
+    uploadCustomModelFiles(customModelSingleInput.files, { directTarget: target });
+  });
+  const openCustomModelPathPicker = (category) => {
+    if (!customModelSingleInput) return;
+    customModelSingleInput.value = '';
+    customModelSingleInput.dataset.target = category;
+    customModelSingleInput.click();
+  };
   refreshCustomModelsBtn?.addEventListener('click', refreshCustomModels);
   openCustomModelsFolderBtn?.addEventListener('click', async () => {
     try {
@@ -2016,32 +2472,10 @@ function installButtonsAsDesktopBridge() {
     }
   });
   pickCustomInterpolateModelBtn?.addEventListener('click', async () => {
-    try {
-      const payload = await apiPost('/api/dialog/select_custom_model', {
-        backend: backendSelect?.value || 'auto',
-        category: 'interpolate',
-      });
-      if (payload?.path && setCustomInterpolateModel) {
-        setCustomInterpolateModel.value = payload.path;
-        setCustomInterpolateModel.dispatchEvent(new Event('change'));
-      }
-    } catch (err) {
-      appendDownloadLog(`Pick interpolate model failed: ${String(err)}`);
-    }
+    openCustomModelPathPicker('interpolate');
   });
   pickCustomUpscaleModelBtn?.addEventListener('click', async () => {
-    try {
-      const payload = await apiPost('/api/dialog/select_custom_model', {
-        backend: backendSelect?.value || 'auto',
-        category: 'upscale',
-      });
-      if (payload?.path && setCustomUpscaleModel) {
-        setCustomUpscaleModel.value = payload.path;
-        setCustomUpscaleModel.dispatchEvent(new Event('change'));
-      }
-    } catch (err) {
-      appendDownloadLog(`Pick upscale model failed: ${String(err)}`);
-    }
+    openCustomModelPathPicker('upscale');
   });
   settingsInstallRecommendedBtn?.addEventListener('click', async () => {
     try {
@@ -2162,6 +2596,7 @@ function readAdvancedSettingsFromUI() {
     scene_change_detection_enabled: !!setSceneDetectEnabled?.checked,
     scene_change_detection_method: setSceneDetectMethod?.value || 'pyscenedetect',
     scene_change_detection_threshold: Number(setSceneDetectThreshold?.value || 3.5),
+    scene_detect_model: setSceneDetectModel?.value.trim() || '',
     auto_border_cropping: !!setAutoBorderCropping?.checked,
     precision: setPrecision?.value || 'auto',
     tensorrt_optimization_level: Number(setTensorRTOptLevel?.value || 3),
@@ -2181,16 +2616,33 @@ function readAdvancedSettingsFromUI() {
     benchmark_mode: !!advBenchmarkMode?.checked,
     tiling_enabled: !!advTiling?.checked,
     tile_size: Number(advTileSize?.value || 0),
-    video_quality: videoQualityPreset?.value || 'High',
-    output_folder_location: outputPathField?.value && outputPathField.value !== 'No folder selected'
+    overlap: Math.max(0, Number(advTileOverlap?.value || 0)),
+    overwrite: !!advOverwrite?.checked,
+    device: advDevice?.value || 'auto',
+    output_to_mpv: !!advOutputToMpv?.checked,
+    merge_subtitles: !!advMergeSubtitles?.checked,
+    motion_blur: !!advMotionBlur?.checked,
+    motion_blur_shutter_angle: Math.min(360, Math.max(0, Number(advMotionBlurShutterAngle?.value || 180))),
+    motion_blur_strength: advMotionBlurStrength?.value || 'gaussian_sym',
+    motion_blur_gamma: !!advMotionBlurGamma?.checked,
+    deduplicate: !!advDeduplicate?.checked,
+    deduplicate_threshold: Math.min(1, Math.max(0, Number(advDeduplicateThreshold?.value || 0.9))),
+    video_quality: String(videoQualityPreset?.value || 'High').trim().replace(/\s+/g, '_'),
+    output_folder_location: setOutputFolderLocation?.value || (outputPathField?.value && outputPathField.value !== 'No folder selected'
       ? outputPathField.value
-      : '',
+      : ''),
+    render_start_time: renderStartTime?.value || '',
+    render_end_time: renderEndTime?.value || '',
     last_input_folder_location: inputFolder,
   };
 }
 
 function readEncodingSettingsFromUI() {
+  const customEncoderOptions = customEncoder?.value.trim();
   return {
+    ...(customEncoderOptions ? { custom_encoder: customEncoderOptions } : {}),
+    video_tune: videoTune?.value || 'none',
+    keyframe_interval: Math.max(1, Math.min(300, Number(keyframeInterval?.value || 48))),
     video_encoder_preset: videoEncoder?.value || 'libx264',
     video_encoder_speed: videoEncoderSpeed?.value || 'medium',
     audio_encoder_preset: audioEncoder?.value || 'copy_audio',
@@ -2199,12 +2651,21 @@ function readEncodingSettingsFromUI() {
     video_container: setVideoContainer?.value || videoContainer?.value || 'mkv',
     video_pixel_format: setVideoPixelFormat?.value || videoPixelFormat?.value || 'yuv420p',
     crf: videoCrf?.value || '18',
+    video_quality: String(videoQualityPreset?.value || 'High').trim().replace(/\s+/g, '_'),
   };
 }
 
 function collectWebSettings() {
   return {
     backend: backendSelect?.value || 'auto',
+    engine: processingEngine?.value || 'rve',
+    animescripter: {
+      smooth_dedup: !!document.getElementById('tasSmoothDedup')?.checked,
+      depth: !!document.getElementById('tasDepth')?.checked,
+      segment: !!document.getElementById('tasSegment')?.checked,
+      stabilize: !!document.getElementById('tasStabilize')?.checked,
+      depth_quality: document.getElementById('tasDepthQuality')?.value || 'low',
+    },
     toggles: {
       interpolate: !!toggleInterpolate?.checked,
       upscale: !!toggleUpscale?.checked,
@@ -2212,6 +2673,14 @@ function collectWebSettings() {
       decompress: !!toggleDecompress?.checked,
       denoise: !!toggleDenoise?.checked,
       deblur: !!toggleDeblur?.checked,
+    },
+    processing_options: {
+      denoise_strength: Number(document.getElementById('denoiseStrength')?.value || 5),
+      denoise_temporal: document.getElementById('denoiseTemporal')?.value || 'Off',
+      denoise_keep_film_grain: !!document.getElementById('denoiseFilmGrain')?.checked,
+      deblur_strength: Number(document.getElementById('deblurStrength')?.value || 6),
+      deblur_edge_recovery: Number(document.getElementById('deblurEdgeRecovery')?.value || 38),
+      deblur_ghosting_guard: document.getElementById('deblurGhostingGuard')?.value || 'Auto',
     },
     advanced: readAdvancedSettingsFromUI(),
     encoding: readEncodingSettingsFromUI(),
@@ -2221,12 +2690,33 @@ function collectWebSettings() {
       pytorch_backend: (setBackendTorchBackend?.value || 'cuda').toUpperCase(),
     },
     render_profile: document.getElementById('renderProfile')?.value || 'Balanced',
+    decompression: {
+      compression_bias: document.getElementById('compressionBias')?.value || 'High/Medium Source',
+      strength: Math.min(10, Math.max(1, Number(document.getElementById('decompressStrength')?.value || 6))),
+      banding_reduction: document.getElementById('decompressBanding')?.value || 'Balanced',
+    },
   };
 }
 
 function applySettingsToUI(settings) {
   if (!settings || typeof settings !== 'object') return;
+  const processingOptions = settings.processing_options || {};
+  if ('denoise_strength' in processingOptions) setControlValue(document.getElementById('denoiseStrength'), processingOptions.denoise_strength);
+  if ('denoise_temporal' in processingOptions) setControlValue(document.getElementById('denoiseTemporal'), processingOptions.denoise_temporal);
+  if ('denoise_keep_film_grain' in processingOptions) setControlChecked(document.getElementById('denoiseFilmGrain'), processingOptions.denoise_keep_film_grain);
+  if ('deblur_strength' in processingOptions) setControlValue(document.getElementById('deblurStrength'), processingOptions.deblur_strength);
+  if ('deblur_edge_recovery' in processingOptions) setControlValue(document.getElementById('deblurEdgeRecovery'), processingOptions.deblur_edge_recovery);
+  if ('deblur_ghosting_guard' in processingOptions) setControlValue(document.getElementById('deblurGhostingGuard'), processingOptions.deblur_ghosting_guard);
   if (backendSelect && settings.backend) backendSelect.value = settings.backend;
+  if (processingEngine && settings.engine) processingEngine.value = settings.engine;
+  updateProcessingEngineUI();
+  const tas = settings.animescripter || {};
+  setControlChecked(document.getElementById('tasSmoothDedup'), tas.smooth_dedup);
+  setControlChecked(document.getElementById('tasDepth'), tas.depth);
+  setControlChecked(document.getElementById('tasSegment'), tas.segment);
+  setControlChecked(document.getElementById('tasStabilize'), tas.stabilize);
+  setControlValue(document.getElementById('tasDepthQuality'), tas.depth_quality);
+  setControlValue(document.getElementById('renderProfile'), settings.render_profile);
   if (settings.toggles && typeof settings.toggles === 'object') {
     setControlChecked(toggleInterpolate, settings.toggles.interpolate);
     setControlChecked(toggleUpscale, settings.toggles.upscale);
@@ -2242,6 +2732,7 @@ function applySettingsToUI(settings) {
   setControlChecked(setSceneDetectEnabled, advanced.scene_change_detection_enabled);
   setControlValue(setSceneDetectMethod, advanced.scene_change_detection_method);
   setControlValue(setSceneDetectThreshold, advanced.scene_change_detection_threshold);
+  setControlValue(setSceneDetectModel, advanced.scene_detect_model);
   setControlChecked(setAutoBorderCropping, advanced.auto_border_cropping);
   setControlValue(setPrecision, advanced.precision);
   setControlValue(setTensorRTOptLevel, advanced.tensorrt_optimization_level);
@@ -2261,6 +2752,17 @@ function applySettingsToUI(settings) {
   setControlChecked(advBenchmarkMode, advanced.benchmark_mode);
   setControlChecked(advTiling, advanced.tiling_enabled);
   setControlValue(advTileSize, advanced.tile_size);
+  setControlValue(advTileOverlap, advanced.overlap ?? advanced.tile_overlap ?? 10);
+  setControlChecked(advOverwrite, advanced.overwrite);
+  setControlValue(advDevice, advanced.device || 'auto');
+  setControlChecked(advOutputToMpv, advanced.output_to_mpv);
+  setControlChecked(advMergeSubtitles, advanced.merge_subtitles !== false);
+  setControlChecked(advMotionBlur, advanced.motion_blur);
+  setControlChecked(advMotionBlurGamma, advanced.motion_blur_gamma !== false);
+  setControlValue(advMotionBlurShutterAngle, advanced.motion_blur_shutter_angle ?? 180);
+  setControlValue(advMotionBlurStrength, advanced.motion_blur_strength || 'gaussian_sym');
+  setControlChecked(advDeduplicate, advanced.deduplicate);
+  setControlValue(advDeduplicateThreshold, advanced.deduplicate_threshold ?? 0.9);
   setControlValue(videoQualityPreset, String(advanced.video_quality || '').replace('_', ' '));
   setControlValue(videoEncoder, encoding.video_encoder_preset || advanced.encoder);
   setControlValue(videoEncoderSpeed, encoding.video_encoder_speed || advanced.video_encoder_speed);
@@ -2268,16 +2770,26 @@ function applySettingsToUI(settings) {
   setControlValue(subtitleEncoder, encoding.subtitle_encoder_preset || advanced.subtitle_encoder);
   setControlValue(audioBitrate, encoding.audio_bitrate || advanced.audio_bitrate);
   setControlValue(videoCrf, encoding.crf || videoCrf?.value || '18');
+  setControlValue(customEncoder, encoding.custom_encoder || '');
+  setControlValue(videoTune, encoding.video_tune || 'none');
+  setControlValue(keyframeInterval, encoding.keyframe_interval ?? 48);
+  setControlValue(renderStartTime, advanced.render_start_time);
+  setControlValue(renderEndTime, advanced.render_end_time);
   const target = String(backendManagement.backend_manager_target || 'pytorch').toLowerCase();
   setControlValue(setBackendManagerTarget, target === 'tensorrt' ? 'tensorrt' : 'pytorch');
   setControlValue(setBackendTorchVersion, backendManagement.pytorch_version || '2.9.0');
   setControlValue(setBackendTensorRtTorchVersion, backendManagement.pytorch_version || '2.9.0');
   setControlValue(setBackendTorchBackend, String(backendManagement.pytorch_backend || 'CUDA').toLowerCase());
+  const decompression = settings.decompression || {};
+  setControlValue(document.getElementById('compressionBias'), decompression.compression_bias);
+  setControlValue(document.getElementById('decompressStrength'), decompression.strength);
+  setControlValue(document.getElementById('decompressBanding'), decompression.banding_reduction);
   syncTensorRtSettingsMirrors();
   syncBackendManagerVisibility();
   if (outputPathField) {
     outputPathField.value = advanced.output_folder_location || 'No folder selected';
   }
+  setControlValue(setOutputFolderLocation, advanced.output_folder_location || '');
 }
 
 function syncAdvancedMirrors() {
@@ -2287,6 +2799,23 @@ function syncAdvancedMirrors() {
 }
 
 function setupInputOutputPickers() {
+  setSelectOutputFolderBtn?.addEventListener('click', async () => {
+    try {
+      const payload = await apiPost('/api/dialog/select_output');
+      if (!payload?.path) return;
+      setOutputFolderLocation.value = payload.path;
+      if (outputPathField && (outputPathField.value === 'No folder selected' || !setUseSameOutputFolder?.checked)) {
+        outputPathField.value = payload.path;
+        outputPathField.dispatchEvent(new Event('change'));
+      }
+      setOutputFolderLocation.dispatchEvent(new Event('change'));
+    } catch (err) {
+      const message = err?.message || String(err);
+      appendSettingsBackendLog(`Default output folder dialog failed: ${message}`);
+      showToastNotification('Could not select output folder', message);
+    }
+  });
+
   selectInputVideoBtn?.addEventListener('click', async () => {
     try {
       const payload = await apiPost('/api/dialog/select_input');
@@ -2321,15 +2850,14 @@ function setupInputOutputPickers() {
       if (videoDuration) videoDuration.textContent = info.duration_seconds ? formatDuration(info.duration_seconds) : '--';
       if (videoFrames) videoFrames.textContent = info.frames ? String(info.frames) : '--';
       if (outputFps) outputFps.textContent = info.fps ? String(Math.round(Number(info.fps) * 100) / 100) : '--';
-      if (previewIsEnabled()) {
-        clearPreviewLabel();
-        await loadInputFirstFrame(selected);
-      }
+      if (previewIsEnabled()) clearPreviewLabel();
       updatePreviewDetails();
       log(`Input video selected: ${selected}`);
       inputPathField?.dispatchEvent(new Event('change'));
     } catch (err) {
-      appendDownloadLog(`Input dialog failed: ${String(err)}`);
+      const message = err?.message || String(err);
+      appendDownloadLog(`Input dialog failed: ${message}`);
+      showToastNotification('Could not import video', message);
     }
   });
 
@@ -2344,7 +2872,11 @@ function setupInputOutputPickers() {
       try {
         const payload = await apiPost('/api/dialog/select_inputs');
         const paths = Array.isArray(payload?.paths) ? payload.paths : [];
-        if (!paths.length) return;
+        if (!paths.length) {
+          appendDownloadLog(payload?.detail || 'No supported videos were found in the selected folder.');
+          showToastNotification('No valid videos found', payload?.detail || 'Choose a folder containing supported video files.');
+          return;
+        }
         paths.forEach((path) => addQueueItem(basename(path), path));
         const first = paths[0];
         if (inputPathField) inputPathField.value = first;
@@ -2370,16 +2902,16 @@ function setupInputOutputPickers() {
         if (videoDuration) videoDuration.textContent = info.duration_seconds ? formatDuration(info.duration_seconds) : '--';
         if (videoFrames) videoFrames.textContent = info.frames ? String(info.frames) : '--';
         if (outputFps) outputFps.textContent = info.fps ? String(Math.round(Number(info.fps) * 100) / 100) : '--';
-        if (previewIsEnabled()) {
-          clearPreviewLabel();
-          await loadInputFirstFrame(first);
-        }
+        if (previewIsEnabled()) clearPreviewLabel();
         updatePreviewDetails();
         inputPathField?.dispatchEvent(new Event('change'));
         appendDownloadLog(`Added ${paths.length} video(s) to the render queue.`);
+        if (payload?.detail) appendDownloadLog(payload.detail);
         log(`Batch selection added ${paths.length} video(s)`);
       } catch (err) {
-        appendDownloadLog(`Batch select failed: ${String(err)}`);
+        const message = err?.message || String(err);
+        appendDownloadLog(`Batch select failed: ${message}`);
+        showToastNotification('Could not select batch videos', message);
       }
     })();
   });
@@ -2395,7 +2927,9 @@ function setupInputOutputPickers() {
       }
       log(`Output folder selected: ${selected}`);
     } catch (err) {
-      appendDownloadLog(`Output dialog failed: ${String(err)}`);
+      const message = err?.message || String(err);
+      appendDownloadLog(`Output dialog failed: ${message}`);
+      showToastNotification('Could not select output folder', message);
     }
   });
 
@@ -2412,6 +2946,12 @@ function setupInputOutputPickers() {
 
 function installSettingsAutosave() {
   const watchedIds = [
+    'processingEngine',
+    'tasSmoothDedup',
+    'tasDepth',
+    'tasSegment',
+    'tasStabilize',
+    'tasDepthQuality',
     'toggleInterpolate',
     'toggleUpscale',
     'toggleSloMo',
@@ -2425,20 +2965,36 @@ function installSettingsAutosave() {
     'audioEncoder',
     'audioBitrate',
     'subtitleEncoder',
+    'customEncoder',
+    'videoTune',
+    'keyframeInterval',
     'videoQualityPreset',
     'videoCrf',
+    'renderStartTime',
+    'renderEndTime',
     'interpolateFactor',
     'upscaleScale',
     'interpolateModel',
     'upscaleModel',
     'decompressModel',
+    'compressionBias',
+    'decompressStrength',
+    'decompressBanding',
     'denoiseModel',
     'deblurModel',
+    'denoiseStrength',
+    'denoiseTemporal',
+    'denoiseFilmGrain',
+    'deblurStrength',
+    'deblurEdgeRecovery',
+    'deblurGhostingGuard',
     'setUseSameOutputFolder',
+    'setOutputFolderLocation',
     'setSceneDetectEnabled',
     'setAutoBorderCropping',
     'setSceneDetectMethod',
     'setSceneDetectThreshold',
+    'setSceneDetectModel',
     'setVideoContainer',
     'setVideoPixelFormat',
     'setPrecision',
@@ -2464,6 +3020,17 @@ function installSettingsAutosave() {
     'advBenchmarkMode',
     'advTiling',
     'advTileSize',
+    'advTileOverlap',
+    'advOverwrite',
+    'advDevice',
+    'advOutputToMpv',
+    'advMergeSubtitles',
+    'advMotionBlur',
+    'advMotionBlurGamma',
+    'advMotionBlurShutterAngle',
+    'advMotionBlurStrength',
+    'advDeduplicate',
+    'advDeduplicateThreshold',
     'advDynamicScaledFlowMirror',
     'advEnsembleMirror',
     'advTensorRTOptMirror',
@@ -2539,15 +3106,19 @@ function spawnParticles(count = 24) {
 }
 
 function animateKpis() {
-  const fallbackGpu = Math.floor(28 + Math.random() * 48);
-  const gpuValue = latestRuntimeMetrics.gpu_util_percent ?? fallbackGpu;
+  const gpuValue = latestRuntimeMetrics.gpu_util_percent;
+  const hasGpuValue = gpuValue !== null && gpuValue !== undefined && Number.isFinite(Number(gpuValue));
   const fps = generationState.fps ?? 0;
-  const healthy = fps > 70 ? 'Optimal' : fps > 40 ? 'Stable' : generationState.status === 'Running' ? 'Load High' : 'Ready';
-  if (gpuLoad) gpuLoad.textContent = `${Math.round(gpuValue)}%`;
-  if (gpuText) gpuText.textContent = `GPU: ${Math.round(gpuValue)}%`;
+  const healthy = backendConnectionStatus === 'offline'
+    ? 'Offline'
+    : backendConnectionStatus === 'checking'
+      ? 'Connecting'
+      : fps > 70 ? 'Optimal' : fps > 40 ? 'Stable' : generationState.status === 'Running' ? 'Load High' : 'Ready';
+  if (gpuLoad) gpuLoad.textContent = hasGpuValue ? `${Math.round(Number(gpuValue))}%` : '--';
+  if (gpuText) gpuText.textContent = hasGpuValue ? `GPU: ${Math.round(Number(gpuValue))}%` : 'GPU: telemetry unavailable';
   if (throughput) throughput.textContent = fps > 0 ? `${fps.toFixed(1)} Gen FPS` : '--';
   if (health) health.textContent = healthy;
-  if (gpuMeter) gpuMeter.style.width = `${Math.min(100, Math.max(0, gpuValue))}%`;
+  if (gpuMeter) gpuMeter.style.width = hasGpuValue ? `${Math.min(100, Math.max(0, Number(gpuValue)))}%` : '0%';
   if (fpsMeter) fpsMeter.style.width = `${Math.min(100, fps)}%`;
   updatePreviewHud();
   updatePreviewDetails();
@@ -2575,11 +3146,15 @@ function updateEncoderPreview() {
   const audBr = audioBitrate?.value || '192k';
   const subCodec = subtitleEncoder?.value || 'copy_subtitle';
   const tune = videoTune?.value || 'none';
-  const gop = keyframeInterval?.value || '48';
+  const gop = Math.max(1, Math.min(300, Number(keyframeInterval?.value || 48)));
+  const customOptions = customEncoder?.value.trim();
   const ext = videoContainer?.value || 'mkv';
-  const tuneArg = tune !== 'none' ? ` -tune ${tune}` : '';
+  if (customOptions) {
+    encoderPreview.value = `ffmpeg -i input.mp4 ${customOptions} output_enhanced.${ext}`;
+    return;
+  }
   const command = [
-    `ffmpeg -i input.mp4 -c:v ${codec} -preset ${speed} -crf ${quality}${tuneArg} -g ${gop}`,
+    `ffmpeg -i input.mp4 -c:v ${codec} -preset ${speed} -crf ${quality}${tune !== 'none' ? ` -tune ${tune}` : ''} -g ${gop}`,
     `-pix_fmt ${pixFmt} -c:a ${audCodec} -b:a ${audBr} -c:s ${subCodec}`,
     `output_enhanced.${ext}`,
   ].join(' ');
@@ -2601,6 +3176,8 @@ function closePreviewOverlayPanel() {
 }
 
 async function fetchRuntimeMetrics() {
+  if (runtimeMetricsFetchInFlight) return;
+  runtimeMetricsFetchInFlight = true;
   try {
     const payload = await apiGet('/api/runtime_metrics');
     latestRuntimeMetrics = {
@@ -2609,13 +3186,16 @@ async function fetchRuntimeMetrics() {
     };
   } catch (_err) {
     // keep previous metrics if runtime endpoint is unavailable
+  } finally {
+    runtimeMetricsFetchInFlight = false;
+    animateKpis();
   }
-  animateKpis();
 }
 
 function startRuntimeMetricsPolling() {
+  if (runtimeMetricsPollHandle !== null) window.clearInterval(runtimeMetricsPollHandle);
   fetchRuntimeMetrics();
-  setInterval(fetchRuntimeMetrics, 1000);
+  runtimeMetricsPollHandle = window.setInterval(fetchRuntimeMetrics, 2000);
 }
 
 videoQualityPreset?.addEventListener('change', () => {
@@ -2624,13 +3204,13 @@ videoQualityPreset?.addEventListener('change', () => {
   updateEncoderPreview();
 });
 
-[videoEncoder, videoEncoderSpeed, videoCrf, videoContainer, videoPixelFormat, audioEncoder, audioBitrate, subtitleEncoder, videoTune, keyframeInterval]
+[videoEncoder, videoEncoderSpeed, videoCrf, videoContainer, videoPixelFormat, audioEncoder, audioBitrate, subtitleEncoder, customEncoder, videoTune, keyframeInterval]
   .forEach((el) => el?.addEventListener('change', () => {
     updateEncoderPreview();
     updatePreviewDetails();
   }));
 
-[videoCrf, keyframeInterval]
+[videoCrf]
   .forEach((el) => el?.addEventListener('input', () => {
     updateEncoderPreview();
     updatePreviewDetails();
@@ -2674,15 +3254,27 @@ function setQueueItemStatus(item, status, tone = '') {
   item.classList.toggle('queue-error', tone === 'error');
 }
 
-document.getElementById('addQueue')?.addEventListener('click', () => {
+document.getElementById('addQueue')?.addEventListener('click', async () => {
   const inputPath = inputPathField?.value || '';
   if (!inputPath || inputPath === 'No file selected') {
     showEtaToast('Select an input video first', true);
     return;
   }
   const name = basename(inputPath);
-  const added = addQueueItem(name, inputPath);
-  log(added ? `Added ${name} to render queue` : `${name} is already in the render queue`);
+  const exists = queueItems().some((item) => (item.dataset.inputPath || '') === String(inputPath));
+  if (exists) {
+    addQueueItem(name, inputPath);
+    log(`${name} is already in the render queue`);
+    return;
+  }
+  try {
+    await prepareModelsForQueue();
+    addQueueItem(name, inputPath);
+    log(`Added ${name} to render queue`);
+  } catch (err) {
+    showToastNotification('Model download failed', String(err), true);
+    appendDownloadLog(`Could not queue ${name}: ${String(err)}`);
+  }
 });
 
 document.getElementById('queueRemove')?.addEventListener('click', () => {
@@ -2726,7 +3318,9 @@ async function fetchRenderStatus() {
     generationState.downloadProgress = Number(status.download_progress || 0);
     generationState.downloadLabel = String(status.download_label || '').trim();
     generationState.downloadDetail = String(status.download_detail || '').trim();
-    const stateLabel = state === 'downloading_model' ? 'DOWNLOADING MODEL' : state.toUpperCase();
+    const stateLabel = status.download_active || state === 'downloading_model'
+      ? 'DOWNLOADING MODEL'
+      : state.toUpperCase();
     setStatus(eta, fps, stateLabel);
     const pauseLabel = status.paused ? 'Resume' : 'Pause';
     const pauseMiniLabel = status.paused ? '>' : '||';
@@ -2738,12 +3332,13 @@ async function fetchRenderStatus() {
     notifyEtaUpdate(eta, state);
     updatePreviewProgress();
     if (generationState.downloadActive) {
-      setLivePreviewText('Downloading model...');
+      setLivePreviewText(`Downloading ${generationState.downloadLabel || 'model'} · ${Math.round(generationState.downloadProgress)}%`);
     } else if (generationState.frame > 0) {
       clearPreviewLabel();
     }
-    if (!generationState.downloadActive && status.preview?.available && previewIsEnabled()) {
-      refreshPreviewFrame();
+    const previewStateFinished = ['completed', 'stopped', 'error'].includes(state) && lastRenderStatus !== state;
+    if (!generationState.downloadActive && previewIsEnabled() && (status.preview?.available || previewStateFinished)) {
+      refreshPreviewFrame(state);
     }
     if (Array.isArray(status.log_lines)) {
       if (status.log_lines.length < renderedBackendLogCount) {
@@ -2779,11 +3374,17 @@ async function fetchRenderStatus() {
     if (state === 'error' && lastRenderStatus !== 'error') {
       setLiveModelDownloadToast({ download_active: false });
       setLiveEtaToast('--', 'error');
-      notifyRenderEvent('Render', 'Render failed', { done: true, desktop: true, tag: 'render-error' });
+      const detail = String(status.error || status.log_lines?.slice(-8).join('\n') || 'Check the Logs tab for the renderer error.');
+      showToastNotification('Render failed', detail, true);
+      notifyRenderEvent('Render', detail, { done: true, desktop: true, tag: 'render-error' });
+      setLivePreviewText(livePreviewImage?.getAttribute('src') ? '' : detail);
     }
     if (state === 'stopped' || state === 'idle') {
       setLiveModelDownloadToast({ download_active: false });
       setLiveEtaToast('--', state);
+      if (state === 'stopped') {
+        setLivePreviewText(livePreviewImage?.getAttribute('src') ? '' : 'Render stopped before the first preview frame');
+      }
     }
     lastRenderStatus = state;
     return status;
@@ -2808,16 +3409,33 @@ function resolveOutputPathForInput(inputPath) {
     outputPath = idx > 0 ? normalized.slice(0, idx).replace(/\//g, '\\') : '';
     if (outputPathField && outputPath) outputPathField.value = outputPath;
   }
+  if ((!outputPath || outputPath === 'No folder selected') && !setUseSameOutputFolder?.checked) {
+    outputPath = setOutputFolderLocation?.value || '';
+    if (outputPathField && outputPath) outputPathField.value = outputPath;
+  }
   return outputPath;
 }
 
 function buildRenderPayload(inputPath, outputPath) {
+  const startValue = String(renderStartTime?.value || '').trim();
+  const endValue = String(renderEndTime?.value || '').trim();
+  const advancedSettings = readAdvancedSettingsFromUI();
   const payload = {
+    engine: processingEngine?.value || 'rve',
     input_path: inputPath,
     output_folder: outputPath,
+    ...(startValue ? { start_time: Number(startValue) } : {}),
+    ...(endValue ? { end_time: Number(endValue) } : {}),
     backend: backendSelect?.value || 'auto',
+    render_profile: document.getElementById('renderProfile')?.value || 'Balanced',
     interpolate_factor: Number(document.getElementById('interpolateFactor')?.value || 2),
     override_upscale_scale: Number(document.getElementById('upscaleScale')?.value || 0),
+    denoise_strength: Math.min(10, Math.max(1, Number(document.getElementById('denoiseStrength')?.value || 5))),
+    denoise_temporal: String(document.getElementById('denoiseTemporal')?.value || 'Off').toLowerCase(),
+    denoise_keep_film_grain: !!document.getElementById('denoiseFilmGrain')?.checked,
+    deblur_strength: Math.min(10, Math.max(1, Number(document.getElementById('deblurStrength')?.value || 6))),
+    deblur_edge_recovery: Math.min(100, Math.max(0, Number(document.getElementById('deblurEdgeRecovery')?.value || 0))),
+    deblur_ghosting_guard: String(document.getElementById('deblurGhostingGuard')?.value || 'Off').toLowerCase(),
     toggles: {
       interpolate: !!toggleInterpolate?.checked,
       upscale: !!toggleUpscale?.checked,
@@ -2833,10 +3451,79 @@ function buildRenderPayload(inputPath, outputPath) {
       denoise: denoiseModel?.value || null,
       deblur: deblurModel?.value || null,
     },
-    settings: readAdvancedSettingsFromUI(),
+    settings: {
+      ...advancedSettings,
+      // The renderer enables tiling from the tile size; zero keeps the full-frame path.
+      tile_size: advancedSettings.tiling_enabled ? advancedSettings.tile_size : 0,
+      overlap: advancedSettings.tiling_enabled ? advancedSettings.overlap : 0,
+    },
+    animescripter: {
+      smooth_dedup: !!document.getElementById('tasSmoothDedup')?.checked,
+      depth: !!document.getElementById('tasDepth')?.checked,
+      segment: !!document.getElementById('tasSegment')?.checked,
+      stabilize: !!document.getElementById('tasStabilize')?.checked,
+      depth_quality: document.getElementById('tasDepthQuality')?.value || 'low',
+    },
     encoding: readEncodingSettingsFromUI(),
   };
   return payload;
+}
+
+function updateProcessingEngineUI() {
+  const animeSelected = processingEngine?.value === 'animescripter';
+  if (animeScripterOptions) animeScripterOptions.hidden = !animeSelected;
+}
+
+async function refreshAnimeScripterStatus() {
+  if (!animeScripterStatus) return;
+  try {
+    const status = await apiGet('/api/animescripter/status');
+    animeScripterStatus.textContent = status.available ? `AnimeScripter found · ${status.executable}` : status.detail;
+    animeScripterStatus.dataset.state = status.available ? 'ready' : 'missing';
+    if (installAnimeScripterBtn) installAnimeScripterBtn.hidden = Boolean(status.available);
+    return status;
+  } catch (_error) {
+    animeScripterStatus.textContent = 'API connection required to detect AnimeScripter';
+    animeScripterStatus.dataset.state = 'unknown';
+    if (installAnimeScripterBtn) installAnimeScripterBtn.hidden = true;
+    return null;
+  }
+}
+
+async function installAnimeScripterFromUI() {
+  if (!installAnimeScripterBtn) return;
+  installAnimeScripterBtn.disabled = true;
+  installAnimeScripterBtn.textContent = 'Installing…';
+  animeScripterStatus.textContent = 'Installing the official AnimeScripter CLI into the launcher runtime…';
+  animeScripterStatus.dataset.state = 'unknown';
+  try {
+    const initial = await apiPost('/api/animescripter/install', {});
+    renderRuntimeInstallState(initial);
+    while (true) {
+      const state = await apiGet('/api/startup/install_status');
+      renderRuntimeInstallState(state);
+      if (String(state.status || '').toLowerCase() === 'completed') break;
+      if (String(state.status || '').toLowerCase() === 'error') throw new Error(state.detail || 'AnimeScripter installation failed.');
+      await sleep(900);
+    }
+    const status = await refreshAnimeScripterStatus();
+    if (!status?.available) throw new Error(status?.detail || 'The installer completed, but AnimeScripter could not be detected.');
+    if (animeScripterStatus) animeScripterStatus.textContent = 'AnimeScripter CLI installed and ready. Its model weights download when first used.';
+    showToastNotification('AnimeScripter ready', 'The CLI is installed in the RVE launcher runtime.');
+  } catch (error) {
+    const rawError = String(error || 'Unknown installation error');
+    const message = /urlopen error|winerror 10013|zugriff auf einen socket/i.test(rawError)
+      ? 'Could not reach the AnimeScripter installer. Check network access, then retry.'
+      : rawError;
+    if (animeScripterStatus) {
+      animeScripterStatus.textContent = `AnimeScripter install failed: ${message}`;
+      animeScripterStatus.dataset.state = 'missing';
+    }
+    appendDownloadLog(`AnimeScripter install failed: ${message}${message === rawError ? '' : ` (${rawError})`}`);
+  } finally {
+    installAnimeScripterBtn.disabled = false;
+    installAnimeScripterBtn.textContent = 'Install AnimeScripter';
+  }
 }
 
 function waitForRenderToFinish() {
@@ -2852,6 +3539,21 @@ function waitForRenderToFinish() {
   });
 }
 
+async function startRenderWithOverwritePrompt(payload) {
+  try {
+    return await apiPost('/api/render/start', payload);
+  } catch (error) {
+    if (error?.code !== 'OUTPUT_EXISTS') throw error;
+    const outputFile = error.outputFile || '';
+    const confirmed = window.confirm(
+      `This output file already exists:\n\n${outputFile}\n\nReplace it with the new render?`
+    );
+    if (!confirmed) return { ok: false, cancelled: true, error: 'Render cancelled; the existing output was kept.' };
+    payload.settings = { ...(payload.settings || {}), overwrite: true };
+    return apiPost('/api/render/start', payload);
+  }
+}
+
 async function runQueuedBatchRender(items) {
   if (batchRenderActive) return;
   batchRenderActive = true;
@@ -2865,8 +3567,8 @@ async function runQueuedBatchRender(items) {
         setQueueItemStatus(item, 'Skipped', 'error');
         continue;
       }
-      const outputPath = resolveOutputPathForInput(inputPath);
-      if (!outputPath || outputPath === 'No folder selected') {
+      const outputPath = advOutputToMpv?.checked ? '' : resolveOutputPathForInput(inputPath);
+      if ((!outputPath || outputPath === 'No folder selected') && !advOutputToMpv?.checked) {
         setQueueItemStatus(item, 'No output', 'error');
         showEtaToast('Select an output folder first', true);
         break;
@@ -2879,20 +3581,24 @@ async function runQueuedBatchRender(items) {
       const payload = buildRenderPayload(inputPath, outputPath);
       payload.queue_index = index + 1;
       payload.queue_total = items.length;
-      startRenderStatusPolling();
       let result = null;
       try {
-        result = await apiPost('/api/render/start', payload);
+        result = await startRenderWithOverwritePrompt(payload);
       } catch (err) {
         setQueueItemStatus(item, 'Failed', 'error');
-        showEtaToast(`Failed to start queued render: ${String(err)}`, true);
+        reportRenderStartError(err, 'Queued render');
         break;
       }
       if (!result.ok) {
+        if (result.cancelled) {
+          setQueueItemStatus(item, 'Skipped', 'error');
+          break;
+        }
         setQueueItemStatus(item, 'Failed', 'error');
         showEtaToast(result.error || 'Failed to start queued render', true);
         break;
       }
+      startRenderStatusPolling();
       const finalStatus = await waitForRenderToFinish();
       const state = String(finalStatus?.status || '').toLowerCase();
       if (state === 'completed') {
@@ -2911,18 +3617,36 @@ async function runQueuedBatchRender(items) {
 }
 
 async function startBackendRender() {
+  const startValue = String(renderStartTime?.value || '').trim();
+  const endValue = String(renderEndTime?.value || '').trim();
+  const invalidStart = startValue && (!Number.isFinite(Number(startValue)) || Number(startValue) < 0);
+  const invalidEnd = endValue && (!Number.isFinite(Number(endValue)) || Number(endValue) < 0);
+  if (invalidStart || invalidEnd || (startValue && endValue && Number(endValue) <= Number(startValue))) {
+    showEtaToast('Enter non-negative times, with the end after the start', true);
+    return;
+  }
+  const interpolateEnabled = !!toggleInterpolate?.checked;
+  const interpolationFactor = Number(interpolateFactor?.value || 1);
+  if (advMotionBlur?.checked && (!interpolateEnabled || interpolationFactor <= 1 || toggleSloMo?.checked)) {
+    showEtaToast('Motion blur requires interpolation above 1x and cannot use SloMo mode', true);
+    return;
+  }
+  if (advDeduplicate?.checked && (!interpolateEnabled || interpolationFactor <= 1)) {
+    showEtaToast('Duplicate frame skipping requires interpolation above 1x', true);
+    return;
+  }
   const queuedItems = queueItems().filter((item) => item.dataset.inputPath);
   if (queuedItems.length > 1) {
     await runQueuedBatchRender(queuedItems);
     return;
   }
   const inputPath = queuedItems[0]?.dataset.inputPath || inputPathField?.value || '';
-  const outputPath = resolveOutputPathForInput(inputPath);
+  const outputPath = advOutputToMpv?.checked ? '' : resolveOutputPathForInput(inputPath);
   if (!inputPath || inputPath === 'No file selected') {
     showEtaToast('Select an input video first', true);
     return;
   }
-  if (!outputPath || outputPath === 'No folder selected') {
+  if ((!outputPath || outputPath === 'No folder selected') && !advOutputToMpv?.checked) {
     showEtaToast('Select an output folder first', true);
     return;
   }
@@ -2941,18 +3665,26 @@ async function startBackendRender() {
     lastEtaToastAt = 0;
     updatePreviewProgress();
     setStatus('--', '--', 'STARTING');
-    startRenderStatusPolling();
-    const result = await apiPost('/api/render/start', payload);
+    const result = await startRenderWithOverwritePrompt(payload);
+    if (result.cancelled) {
+      setStatus('--', '--', 'IDLE');
+      showEtaToast(result.error, true);
+      return;
+    }
     if (!result.ok) {
       showEtaToast(result.error || 'Failed to start render', true);
       return;
     }
+    startRenderStatusPolling();
     log('Render request accepted by backend');
-    releasePreviewFrameObjectUrl();
-    setPreviewFrameSource('');
-    setLivePreviewText('Working on video...');
+    // Keep the decoded input still visible while the renderer warms up models
+    // and prepares its first processed frame. Dropping it here made the preview
+    // look broken throughout long model initialization periods.
+    if (!livePreviewImage?.getAttribute('src')) {
+      void loadInputFirstFrame(inputPath);
+    }
   } catch (err) {
-    showEtaToast(`Failed to start render: ${String(err)}`, true);
+    reportRenderStartError(err, 'Render start');
   }
 }
 
@@ -2988,7 +3720,7 @@ async function stopBackendRender() {
 }
 
 async function quitApplication() {
-  showEtaToast('Closing web UI...', true);
+  showEtaToast('Closing REAL Video Enhancer...', true);
   try {
     await apiPost('/api/app/quit', {});
   } catch (_err) {
@@ -3004,7 +3736,7 @@ async function quitApplication() {
   window.setTimeout(() => {
     if (!window.closed) {
       try {
-        document.body.innerHTML = '<div style="min-height:100vh;display:grid;place-items:center;background:#111822;color:#eef5ff;font-family:Outfit,sans-serif;">Web UI closed. You can close this tab now.</div>';
+        document.body.innerHTML = '<div style="min-height:100vh;display:grid;place-items:center;background:#111822;color:#eef5ff;font-family:Outfit,sans-serif;">REAL Video Enhancer has closed. You can close this tab now.</div>';
       } catch (_err) {
       }
       try {
@@ -3048,6 +3780,11 @@ backendSelect?.addEventListener('change', () => {
   populateModelsForBackend();
 });
 
+processingEngine?.addEventListener('change', () => {
+  updateProcessingEngineUI();
+  refreshAnimeScripterStatus();
+});
+
 [interpolateModel, upscaleModel].forEach((node) => {
   node?.addEventListener('change', updatePreviewDetails);
 });
@@ -3067,6 +3804,8 @@ installButtonsAsDesktopBridge();
 installSettingsAutosave();
 installPreviewToggleSync();
 setupInputOutputPickers();
+updateProcessingEngineUI();
+refreshAnimeScripterStatus();
 syncFeatureModules();
 if (videoCrf && videoQualityPreset) {
   videoCrf.value = String(qualityPresetToCrf(videoQualityPreset.value));
@@ -3151,16 +3890,31 @@ async function runStartupSequence() {
   startRenderStatusPolling();
   await sleep(180);
   if (bootstrap?.ok) {
+    backendConnectionStatus = 'online';
     await finishStartupSequence('Backend ready', 'Live preview, metrics and backend controls are ready');
+    if (!(bootstrap.payload?.system?.available_backends || []).length) showFirstRunSetupPrompt();
+    else if (bootstrap.payload?.startup?.animescripter_available === false
+      && !bootstrap.payload?.settings?.animescripter_setup_dismissed) {
+      log('AnimeScripter is missing; starting its bundled launcher setup.');
+      showToastNotification('Installing AnimeScripter', 'The launcher is setting up the official CLI in the background.');
+      // Let the browser workspace finish starting while the optional engine
+      // installs in the background. Network/setup failures must not strand the
+      // user on the warmup screen.
+      void installAnimeScripterFromUI();
+    }
   } else {
+    backendConnectionStatus = 'offline';
     await finishStartupSequence('Fallback mode ready', 'The interface is ready, but backend live data is limited');
   }
+  animateKpis();
 }
 
 runStartupSequence();
 window.addEventListener('beforeunload', () => {
   startupState.loader?.stop();
   stopRuntimeInstallPolling();
+  if (runtimeMetricsPollHandle !== null) window.clearInterval(runtimeMetricsPollHandle);
+  if (renderStatusPollHandle !== null) window.clearInterval(renderStatusPollHandle);
   if (firstFrameObjectUrl) URL.revokeObjectURL(firstFrameObjectUrl);
   if (previewFrameObjectUrl) URL.revokeObjectURL(previewFrameObjectUrl);
 });

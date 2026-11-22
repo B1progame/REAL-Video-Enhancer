@@ -1,14 +1,14 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>REAL Video Enhancer Web UI</title>
-    <link rel="icon" type="image/svg+xml" href="logo-v2.svg?v=20260402b" />
+    <link rel="icon" type="image/svg+xml" href="logo-v2.svg?v=20261003" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="styles.css?v=20260402b" />
+    <link rel="stylesheet" href="styles.css?v=20261003-video-picker" />
   </head>
   <body class="booting">
     <div class="bg-layer"></div>
@@ -19,6 +19,25 @@
     <div id="particles" class="particles" aria-hidden="true"></div>
     <div id="cursorGlow" class="cursor-glow" aria-hidden="true"></div>
     <div id="etaToasts" class="eta-toasts" aria-live="polite" aria-atomic="false"></div>
+    <dialog id="firstRunSetupDialog" class="first-run-dialog" aria-labelledby="firstRunSetupTitle" aria-describedby="firstRunSetupDescription">
+      <div class="first-run-card glass">
+        <span class="hero-kicker"><span class="hero-kicker-dot"></span> FIRST-TIME SETUP</span>
+        <h2 id="firstRunSetupTitle">Set up video processing?</h2>
+        <p id="firstRunSetupDescription">No compatible processing backend is ready yet. Install the recommended setup for this PC, or choose a backend yourself later.</p>
+        <ul class="first-run-includes" id="firstRunIncludes">
+          <li>Managed Python runtime and RVE libraries</li>
+          <li>Recommended PyTorch or NCNN backend for this PC</li>
+          <li>FFmpeg for reading and exporting video</li>
+          <li>TheAnimeScripter command-line engine</li>
+        </ul>
+        <div class="first-run-actions">
+          <button class="btn btn-accent" id="firstRunInstallBtn" type="button">Install Recommended</button>
+          <button class="btn btn-accent" id="firstRunAnimeScripterBtn" type="button" hidden>Install AnimeScripter</button>
+          <button class="btn" id="firstRunLaterBtn" type="button">Set up later</button>
+        </div>
+        <small>The AnimeScripter portable runtime is downloaded during setup. Model weights are fetched when you use a model for the first time.</small>
+      </div>
+    </dialog>
     <div id="startupScreen" class="startup-screen" aria-live="polite" aria-label="Starting web UI">
       <div class="startup-shell glass">
         <div class="startup-copy">
@@ -70,6 +89,37 @@
               <button class="btn" id="boostVisuals">Boost Visuals</button>
             </div>
           </header>
+
+          <section class="home-hero glass" aria-labelledby="homeHeroTitle">
+            <div class="home-hero-copy">
+              <span class="hero-kicker"><span class="hero-kicker-dot"></span> LOCAL VIDEO PIPELINE</span>
+              <h2 id="homeHeroTitle">Make every frame<br />feel intentional.</h2>
+              <p>Prepare, enhance, and export footage with the tools already installed on this workstation.</p>
+              <button class="hero-action" id="homeStartProcess" type="button">Create a render <span aria-hidden="true">↗</span></button>
+              <div class="hero-engine-state"><span></span><b>RVE FRAME ENGINE</b><i>Ready when you are</i></div>
+            </div>
+            <div class="hero-visual" aria-hidden="true">
+              <div class="hero-visual-glow"></div>
+              <div class="hero-scanline"></div>
+              <div class="hero-orbit hero-orbit-a"><span></span></div>
+              <div class="hero-orbit hero-orbit-b"><span></span></div>
+              <div class="hero-orbit hero-orbit-c"><span></span></div>
+              <div class="hero-cube-stage">
+                <div class="hero-cube">
+                  <div class="hero-cube-face face-front"></div>
+                  <div class="hero-cube-face face-back"></div>
+                  <div class="hero-cube-face face-right"></div>
+                  <div class="hero-cube-face face-left"></div>
+                  <div class="hero-cube-face face-top"></div>
+                  <div class="hero-cube-face face-bottom"></div>
+                  <div class="hero-cube-mark"><span>RVE</span><i>✦</i></div>
+                </div>
+              </div>
+              <div class="hero-scene-label label-frame"><span class="live-dot"></span> FRAME ENGINE</div>
+              <div class="hero-scene-label label-ready"><span class="live-dot"></span> REALTIME READY</div>
+              <span class="hero-star star-a"></span><span class="hero-star star-b"></span><span class="hero-star star-c"></span>
+            </div>
+          </section>
 
           <section class="feature-ribbon">
             <article class="feature-card glass pulse">
@@ -154,6 +204,11 @@ Version: Web Preview</textarea>
                 <span id="previewProgressText" class="preview-progress-text">0%</span>
                 <span id="previewProgressDetail" class="preview-progress-detail" aria-live="polite"></span>
               </div>
+              <div id="modelDownloadIndicator" class="model-download-indicator" role="status" aria-live="polite" hidden>
+                <div class="model-download-heading"><strong id="modelDownloadTitle">Preparing model</strong><span id="modelDownloadPercent">0%</span></div>
+                <div class="model-download-track"><span id="modelDownloadFill"></span></div>
+                <div id="modelDownloadDetail" class="model-download-detail"></div>
+              </div>
             </section>
 
             <section class="panel glass process-controls">
@@ -183,6 +238,15 @@ Version: Web Preview</textarea>
                     </label>
                   </div>
 
+                  <div class="form-grid two render-range-fields">
+                    <label>Render Start (seconds, optional)
+                      <input id="renderStartTime" type="number" min="0" step="0.1" placeholder="Beginning of video" />
+                    </label>
+                    <label>Render End (seconds, optional)
+                      <input id="renderEndTime" type="number" min="0" step="0.1" placeholder="End of video" />
+                    </label>
+                  </div>
+
                   <div class="quick-stats">
                     <div class="stat-card"><span>Resolution</span><strong id="videoRes">-</strong></div>
                     <div class="stat-card"><span>Duration</span><strong id="videoDuration">-</strong></div>
@@ -204,6 +268,32 @@ Version: Web Preview</textarea>
                       </select>
                     </label>
                   </div>
+
+                  <div class="form-grid two">
+                    <label>Processing Engine
+                      <select id="processingEngine">
+                        <option value="rve">REAL Video Enhancer</option>
+                        <option value="animescripter">TheAnimeScripter CLI</option>
+                      </select>
+                    </label>
+                    <div class="anime-engine-status">
+                      <div class="field-note" id="animeScripterStatus" role="status">Checking AnimeScripter engine…</div>
+                      <button class="btn btn-small" id="installAnimeScripterBtn" type="button" hidden>Install AnimeScripter</button>
+                    </div>
+                  </div>
+                  <section class="engine-options" id="animeScripterOptions" hidden>
+                    <div class="section-heading"><div><span class="eyebrow">AnimeScripter</span><h3>Additional operations</h3></div></div>
+                    <p class="field-hint">RVE model names are not passed to AnimeScripter. Its own documented defaults are used; depth, segmentation and stabilization run as separate jobs.</p>
+                    <div class="toggle-grid modern">
+                      <label class="switch-row"><span>Smooth dedup</span><input id="tasSmoothDedup" type="checkbox" /></label>
+                      <label class="switch-row"><span>Depth map</span><input id="tasDepth" type="checkbox" /></label>
+                      <label class="switch-row"><span>Segmentation</span><input id="tasSegment" type="checkbox" /></label>
+                      <label class="switch-row"><span>Stabilization</span><input id="tasStabilize" type="checkbox" /></label>
+                    </div>
+                    <label>Depth quality
+                      <select id="tasDepthQuality"><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select>
+                    </label>
+                  </section>
 
                   <div class="toggle-grid modern">
                     <label class="switch-row"><span>Interpolate</span><input id="toggleInterpolate" type="checkbox" checked /></label>
@@ -384,10 +474,18 @@ Version: Web Preview</textarea>
                         <option>prores</option>
                         <option>ffv1</option>
                         <option>utvideo</option>
+                        <option value="x264_vulkan">H.264 Vulkan</option>
                         <option>x264_nvenc</option>
                         <option>x265_nvenc</option>
                         <option>av1_nvenc</option>
+                        <option value="x264_vaapi">H.264 VAAPI (Linux)</option>
+                        <option value="x265_vaapi">H.265 VAAPI (Linux)</option>
+                        <option value="av1_vaapi">AV1 VAAPI (Linux)</option>
+                        <option value="h264_amf">H.264 AMD AMF</option>
+                        <option value="h265_amf">H.265 AMD AMF</option>
+                        <option value="av1_amf">AV1 AMD AMF</option>
                       </select>
+                      <small class="field-hint">Hardware encoder choices require matching FFmpeg and driver support.</small>
                     </label>
                     <label>Video Encoder Speed
                       <select id="videoEncoderSpeed">
@@ -455,14 +553,18 @@ Version: Web Preview</textarea>
                         <option>webvtt</option>
                       </select>
                     </label>
+                    <label>Custom FFmpeg encoder options (optional)
+                      <input id="customEncoder" type="text" placeholder="Example: -c:v h264_nvenc -cq 20 -c:a copy" />
+                      <small class="field-hint">When set, these options replace the standard video, audio, and subtitle encoder controls.</small>
+                    </label>
                     <label>Tune
                       <select id="videoTune">
-                        <option>none</option>
-                        <option>film</option>
-                        <option>animation</option>
-                        <option>grain</option>
-                        <option>fastdecode</option>
-                        <option>zerolatency</option>
+                        <option value="none">none</option>
+                        <option value="film">film</option>
+                        <option value="animation">animation</option>
+                        <option value="grain">grain</option>
+                        <option value="fastdecode">fastdecode</option>
+                        <option value="zerolatency">zerolatency</option>
                       </select>
                     </label>
                     <label>Keyframe Interval
@@ -486,6 +588,43 @@ Version: Web Preview</textarea>
                 </div>
 
                 <div class="tab-panel" id="tab-advanced">
+                  <h3>Backend frame options</h3>
+                  <div class="toggle-grid">
+                    <label><input id="advMotionBlur" type="checkbox" /> Motion Blur</label>
+                    <label><input id="advMotionBlurGamma" type="checkbox" checked /> Gamma Correct Blur</label>
+                    <label><input id="advDeduplicate" type="checkbox" /> Skip Duplicate Frames</label>
+                    <label><input id="advOutputToMpv" type="checkbox" /> Stream to MPV</label>
+                    <label><input id="advMergeSubtitles" type="checkbox" checked /> Merge subtitles</label>
+                  </div>
+                  <div class="form-grid two">
+                    <label>Processing Device
+                      <select id="advDevice">
+                        <option value="auto">Automatic</option>
+                        <option value="cuda">CUDA</option>
+                        <option value="mps">Apple MPS</option>
+                        <option value="xpu">Intel XPU</option>
+                        <option value="cpu">CPU</option>
+                      </select>
+                      <small class="field-hint">Device availability depends on the selected backend; CPU uses float32.</small>
+                    </label>
+                  </div>
+                  <div class="form-grid two">
+                    <label>Motion Blur Shutter Angle
+                      <input id="advMotionBlurShutterAngle" type="number" min="0" max="360" step="1" value="180" />
+                    </label>
+                    <label>Motion Blur Weighting
+                      <select id="advMotionBlurStrength">
+                        <option value="gaussian_sym">Symmetric Gaussian</option>
+                        <option value="equal">Equal</option>
+                        <option value="pyramid">Pyramid</option>
+                        <option value="ascending">Ascending</option>
+                        <option value="descending">Descending</option>
+                      </select>
+                    </label>
+                    <label>Duplicate Detection Threshold
+                      <input id="advDeduplicateThreshold" type="number" min="0" max="1" step="0.01" value="0.9" />
+                    </label>
+                  </div>
                   <div class="toggle-grid">
                     <label><input id="advBenchmarkMode" type="checkbox" /> Benchmark Mode</label>
                     <label><input id="advTiling" type="checkbox" /> Tiling</label>
@@ -494,7 +633,9 @@ Version: Web Preview</textarea>
                   </div>
                   <div class="form-grid two">
                     <label>Tile Size <input id="advTileSize" type="number" value="256" min="0" /></label>
+                    <label>Tile Overlap <input id="advTileOverlap" type="number" value="10" min="0" /></label>
                     <label>TensorRT Optimization Level <input id="advTensorRTOptMirror" type="number" value="3" min="1" max="5" /></label>
+                    <label><input id="advOverwrite" type="checkbox" /> Overwrite existing output</label>
                   </div>
                 </div>
 
@@ -681,6 +822,12 @@ Version: Web Preview</textarea>
             </div>
             <div class="tab-panels">
               <div class="tab-panel active" id="tab-out">
+                <div class="form-grid two output-location-setting">
+                  <label>Default Output Folder
+                    <input id="setOutputFolderLocation" type="text" placeholder="Choose a folder for rendered videos" readonly />
+                  </label>
+                  <button class="btn" id="setSelectOutputFolderBtn" type="button">Choose Default Output Folder</button>
+                </div>
                 <div class="toggle-grid">
                   <label><input id="setUseSameOutputFolder" type="checkbox" /> Use same output folder as input</label>
                   <label><input id="setSceneDetectEnabled" type="checkbox" checked /> Scene Change Detection Enabled</label>
@@ -698,6 +845,9 @@ Version: Web Preview</textarea>
                     </select>
                   </label>
                   <label>Scene Change Threshold <input id="setSceneDetectThreshold" type="number" step="0.1" value="3.5" /></label>
+                  <label>Scene Detection Model Path (for model based methods)
+                    <input id="setSceneDetectModel" type="text" placeholder="Optional model file path" />
+                  </label>
                   <label>Video Container
                     <select id="setVideoContainer">
                       <option value="mkv">mkv</option>
@@ -740,6 +890,12 @@ Version: Web Preview</textarea>
                 <div class="toggle-grid">
                   <label><input id="setPreviewEnabled" type="checkbox" checked /> Preview Enabled</label>
                   <label><input id="setDiscordRPC" type="checkbox" /> Discord Rich Presence</label>
+                </div>
+                <div class="form-grid two accent-preference">
+                  <label for="accentColorInput">Accent color
+                    <input id="accentColorInput" type="color" value="#d97850" aria-label="Choose the interface accent color" />
+                  </label>
+                  <p>Choose the color used for navigation, buttons, and progress highlights. It is saved on this device.</p>
                 </div>
                 <div class="form-grid two">
                   <button class="btn" id="openRveFolderBtn">Open RVE Folder</button>
@@ -839,7 +995,10 @@ Version: Web Preview</textarea>
                     <button class="btn" id="importCustomModelFolderBtn">Import Model Folder</button>
                     <button class="btn" id="refreshCustomModelsBtn">Refresh Collection</button>
                     <button class="btn" id="openCustomModelsFolderBtn">Open Custom Models Folder</button>
+                    <a class="btn model-db-link" href="https://openmodeldb.info/" target="_blank" rel="noopener noreferrer">Browse OpenModelDB <span aria-hidden="true">↗</span></a>
                   </div>
+                  <input id="customModelFilesInput" type="file" accept=".pth,.pt,.onnx,.safetensors,.engine,.bin,.param,.ckpt" multiple hidden />
+                  <input id="customModelFolderInput" type="file" accept=".pth,.pt,.onnx,.safetensors,.engine,.bin,.param,.ckpt" webkitdirectory directory multiple hidden />
                   <div class="runtime-path-item">
                     <span>Collection Folder</span>
                     <code id="customModelsFolderPath">-</code>
@@ -850,6 +1009,7 @@ Version: Web Preview</textarea>
                     <div class="form-grid two">
                       <button class="btn" id="pickCustomInterpolateModel">Pick Custom Interpolate Model</button>
                       <button class="btn" id="pickCustomUpscaleModel">Pick Custom Upscale Model</button>
+                      <input id="customModelSingleInput" type="file" accept=".pth,.pt,.onnx,.safetensors,.engine,.bin,.param,.ckpt" hidden />
                       <label>Custom Interpolate Model Path <input id="setCustomInterpolateModel" type="text" placeholder="Optional custom model path" /></label>
                       <label>Custom Upscale Model Path <input id="setCustomUpscaleModel" type="text" placeholder="Optional custom model path" /></label>
                     </div>
@@ -883,6 +1043,6 @@ Version: Web Preview</textarea>
       </div>
     </div>
 
-    <script src="app.js?v=20260402b"></script>
+    <script src="app.js?v=20261003-launcher-anime-setup"></script>
   </body>
 </html>

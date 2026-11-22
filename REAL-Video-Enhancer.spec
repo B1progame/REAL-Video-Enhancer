@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['REAL-Video-Enhancer.py'],
-    pathex=[],
+    ['web_launcher.py'],
+    pathex=[SPECPATH],
     binaries=[],
-    datas=[],
+    datas=[('backend', 'backend'), ('web-ui/dist', 'web-ui/dist')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

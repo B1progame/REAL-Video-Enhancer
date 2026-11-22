@@ -1,7 +1,4 @@
-from abc import  abstractmethod
-import os
-import subprocess
-import sys
+from abc import abstractmethod
 import os
 import subprocess
 import sys
@@ -9,13 +6,20 @@ import shutil
 import argparse
 import platform
 import urllib.request
+from importlib import metadata
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 os.chdir(PROJECT_ROOT)
 
 PLATFORM = sys.platform
 CPU_ARCH = "x86_64" if platform.machine() == "AMD64" else platform.machine()
-OUTPUT_FOLDER = "dist"
+OUTPUT_FOLDER = "release-stage"
+BUILD_ENV = os.environ.get("RVE_BUILD_VENV") or (
+    os.path.join(PROJECT_ROOT, ".venv")
+    if os.path.isdir(os.path.join(PROJECT_ROOT, ".venv"))
+    else os.path.join(PROJECT_ROOT, "venv")
+)
+PYTHON_IN_BUILD_ENV = os.path.join(BUILD_ENV, "Scripts", "python.exe") if PLATFORM == "win32" else os.path.join(BUILD_ENV, "bin", "python")
 print(f"Platform: {PLATFORM}")
 print(f"CPU Arch: {CPU_ARCH}")
 print(f"OUTPUT_FOLDER: {OUTPUT_FOLDER}")
@@ -70,16 +74,16 @@ def get_libxcb_cursor_binary():
     
 class PythonManager:
 
-    PYTHON_VENV_PATH = "venv\\Scripts\\python.exe" if PLATFORM == "win32" else "venv/bin/python3"
+    PYTHON_VENV_PATH = PYTHON_IN_BUILD_ENV
     PYTHON_SYSTEM_EXECUTABLE = sys.executable
 
     def __init__(self):
         pass
     
     @classmethod
-    def run_venv_python(cls, command: str):
-        command = [cls.PYTHON_VENV_PATH,] + command.split()
-        subprocess.run(command)
+    def run_venv_python(cls, command):
+        args = [cls.PYTHON_VENV_PATH] + (command.split() if isinstance(command, str) else list(command))
+        return subprocess.run(args, check=True)
     
     @classmethod
     def pip_install_package_in_venv(cls, package: str):
@@ -90,7 +94,7 @@ class PythonManager:
             "install",
             package,
         ]
-        subprocess.run(command)
+        subprocess.run(command, check=True)
 
     def setup_python(self):
         self.__create_venv()
@@ -99,8 +103,8 @@ class PythonManager:
 
     def __create_venv(self):
         print("Creating virtual environment")
-        command = [self.PYTHON_SYSTEM_EXECUTABLE, "-m", "venv", "venv"]
-        subprocess.run(command)
+        command = [self.PYTHON_SYSTEM_EXECUTABLE, "-m", "venv", BUILD_ENV]
+        subprocess.run(command, check=True)
 
 
     def __install_pip_in_venv(self):
@@ -109,7 +113,7 @@ class PythonManager:
             "-m",
             "ensurepip",
         ]
-        subprocess.run(command)
+        subprocess.run(command, check=True)
 
     def __install_requirements_in_venv(self):
         print("Installing requirements in virtual environment")
@@ -124,7 +128,7 @@ class PythonManager:
             "requirements.txt",
         ]
 
-        subprocess.run(command)
+        subprocess.run(command, check=True)
         
 
     def get_venv_site_packages(self):
@@ -147,10 +151,8 @@ class PythonManager:
 
 class BuildManager:
     def __init__(self):
-        shutil.rmtree(OUTPUT_FOLDER, ignore_errors=True)
         self.python_manager = PythonManager()
 
-    @abstractmethod
     def build(self):
         ...
     
@@ -196,26 +198,58 @@ class BuildManager:
         ...
 
 class PyInstaller(BuildManager):
-    pyinstaller_version = "pyinstaller==6.16.0"
+    pyinstaller_version = "pyinstaller==6.22.3"
 
-  
-    def build(self):
-        print("Building executable")
-
-        PythonManager.pip_install_package_in_venv(self.pyinstaller_version)
-        icon_path = "icons/logo-v3.ico"
-        PythonManager.run_venv_python(
-            (
-              "-m PyInstaller" 
-            + " REAL-Video-Enhancer.py" 
-            + f" --icon={icon_path}" 
-            + " --noconfirm"
-            + " --noupx" 
-            + " --noconsole" # i think this fixes weird macos dir shit
-            + " --distpath"
-            + f" {OUTPUT_FOLDER}"
-            )
+    @staticmethod
+    def clean_previous_build_outputs():
+        """Remove only this project's generated build directories before packaging."""
+        generated_paths = (
+            os.path.join(PROJECT_ROOT, "build"),
+            os.path.join(PROJECT_ROOT, "dist"),
+            os.path.join(PROJECT_ROOT, OUTPUT_FOLDER, "REAL-Video-Enhancer"),
         )
+        for path in generated_paths:
+            resolved = os.path.abspath(path)
+            if os.path.commonpath((PROJECT_ROOT, resolved)) != PROJECT_ROOT:
+                raise ValueError(f"Refusing to clean a path outside the project: {resolved}")
+            if os.path.isdir(resolved):
+                print(f"Removing previous generated build output: {resolved}")
+                shutil.rmtree(resolved)
+
+    def build(self):
+        print("Building headless Python render service for the native Rust UI")
+        if not os.path.isfile(PYTHON_IN_BUILD_ENV):
+            self.python_manager.setup_python()
+        self.clean_previous_build_outputs()
+        try:
+            installed_version = metadata.version("pyinstaller")
+        except metadata.PackageNotFoundError:
+            installed_version = None
+        if installed_version != self.pyinstaller_version.split("==", 1)[1]:
+            try:
+                PythonManager.pip_install_package_in_venv(self.pyinstaller_version)
+            except subprocess.CalledProcessError:
+                # Keep a working offline build path when an older PyInstaller
+                # is already present; surface the version in the build log.
+                if not installed_version:
+                    raise
+                print(f"Could not update PyInstaller; using installed {installed_version}.")
+        work_path = os.path.join("build", "pyinstaller-work")
+        spec_path = os.path.join("build", "pyinstaller-spec")
+        os.makedirs(work_path, exist_ok=True)
+        os.makedirs(spec_path, exist_ok=True)
+        separator = ";" if PLATFORM == "win32" else ":"
+        command = [
+            "-m", "PyInstaller", os.path.join(PROJECT_ROOT, "backend", "rve-service.py"), "--noconfirm", "--clean",
+            "--onedir", "--windowed", "--name", "RVE-Engine",
+            "--icon", os.path.join(PROJECT_ROOT, "icons", "logo-v3.ico"),
+            "--distpath", os.path.join(OUTPUT_FOLDER, "REAL-Video-Enhancer"),
+            "--workpath", work_path,
+            "--specpath", spec_path,
+            "--add-data", f"{os.path.join(PROJECT_ROOT, 'backend')}{separator}backend",
+            "--add-data", f"{os.path.join(PROJECT_ROOT, 'install-all-models-wsl.sh')}{separator}.",
+        ]
+        PythonManager.run_venv_python(command)
 
     def patch_for_xcbcursor(self):
         if PLATFORM == "linux":
@@ -281,7 +315,6 @@ class Nuitka(BuildManager):
 
 
 if __name__ == "__main__":
-    
     args = argparse.ArgumentParser()
     args.add_argument("--run", help="Run the application", action="store_true")
     args.add_argument("--run_backend", help="Run the backend", action="store_true")
@@ -289,32 +322,24 @@ if __name__ == "__main__":
     args.add_argument("--copy_backend", help="Copy the backend to the build directory", action="store_true")    
     args = args.parse_args()
     manager = BuildManager()
-    if not os.path.exists("venv") or args.build != "gui":
-        manager.python_manager.setup_python()
-    manager.build_gui()
-    if args.run:
-        PythonManager.run_venv_python("REAL-Video-Enhancer.py")
-    elif args.run_backend:
-        PythonManager.run_venv_python("backend/rve-backend.py")
-    else:
-        manager.build_resources()
-        
-        
-        match args.build:
-            case "pyinstaller":
-                builder = PyInstaller()
-            case "cx_freeze":
-                builder = CxFreeze()
-            case "nuitka":
-                builder = Nuitka()
-            case "gui":
-                exit()
-            case _:
-                raise ValueError("Invalid build option")
+    if args.build == "pyinstaller":
+        builder = PyInstaller()
+        if args.run:
+            raise SystemExit("--run is only valid with --build gui")
         builder.build()
-        builder.patch_for_xcbcursor()
         if args.copy_backend:
             builder.copy_backend()
-        print("Build complete")
+        print("Headless Python render engine build complete")
+    elif args.build == "gui":
+        if not os.path.isfile(PYTHON_IN_BUILD_ENV):
+            manager.python_manager.setup_python()
+        manager.build_gui()
+        manager.build_resources()
+        if args.run:
+            PythonManager.run_venv_python("REAL-Video-Enhancer.py")
+        elif args.run_backend:
+            PythonManager.run_venv_python("backend/rve-backend.py")
+    else:
+        raise SystemExit("The Windows release installer packages the headless Python render engine and native Rust UI.")
     
     

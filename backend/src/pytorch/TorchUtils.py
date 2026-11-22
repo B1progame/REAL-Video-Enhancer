@@ -246,7 +246,13 @@ class TorchUtils:
     @staticmethod
     @torch.inference_mode()
     def tensor_to_np(tensor: torch.Tensor) -> np.ndarray:
-        return tensor.squeeze(0).permute(1, 2, 0).cpu().numpy()
+        # NumPy has no bfloat16 dtype. Restoration models can return bfloat16
+        # tensors when precision is auto, so convert that dtype before crossing
+        # the tensor/NumPy boundary used by temporal denoise and frame effects.
+        frame = tensor.squeeze(0).permute(1, 2, 0)
+        if frame.dtype == torch.bfloat16:
+            frame = frame.float()
+        return frame.cpu().numpy()
 
     @staticmethod
     @torch.inference_mode()

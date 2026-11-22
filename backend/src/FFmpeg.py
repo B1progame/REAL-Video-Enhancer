@@ -1,7 +1,9 @@
 from multiprocessing import shared_memory
+import struct
 import sys
 import time
 import numpy as np
+import cv2
 
 if __name__ != "__main__":
     from .utils.Util import log, padFrame, subprocess_popen_without_terminal
@@ -52,7 +54,7 @@ class InformationWriteOut:
     def __init__(
         self,
         sharedMemoryID,  # image memory id
-        sharedMemoryChunkSize,  # size of the image memory
+        sharedMemoryChunkSize,  # legacy raw frame size; shared preview uses a compact JPEG packet
         paused_shared_memory_id,
         outputWidth,
         outputHeight,
@@ -73,7 +75,7 @@ class InformationWriteOut:
         self.border_detect = border_detect
         self.previewFrame = None
         self.last_length = 0
-        self.framesRendered = 1
+        self.framesRendered = 0
         self.total_paused_time_seconds = 0
         self.hdr_mode = hdr_mode
         self.sharedMemoryChunkSize = sharedMemoryChunkSize
@@ -131,13 +133,14 @@ class InformationWriteOut:
 
     def setPreviewFrame(self, frame):
         self.previewFrame = frame
+        self._publishPreviewFrame(frame)
 
     def setFramesRendered(self, framesRendered: int):
         self.framesRendered = framesRendered
 
     def update(self, preview_frame):
-        self.previewFrame = preview_frame
         self.framesRendered += 1
+        self.setPreviewFrame(preview_frame)
 
     def stopWriting(self):
         self.stop = True
@@ -162,34 +165,57 @@ class InformationWriteOut:
                 paused_duration = time.time() - pause_start_time
                 self.total_paused_time_seconds += paused_duration
 
-            if self.previewFrame is not None and self.framesRendered > 0:
+            if self.framesRendered > 0:
                 # print out data to stdout
                 active_time = time.time() - self.startTime - self.total_paused_time_seconds
-                fps = round(self.framesRendered / max(active_time, 1))
+                fps = self.framesRendered / max(active_time, 0.001)
                 eta = self.calculateETA(framesRendered=self.framesRendered)
-                message = f"FPS: {fps} Current Frame: {self.framesRendered} ETA: {eta}"
+                message = f"FPS: {fps:.4f} Current Frame: {self.framesRendered} ETA: {eta}"
                 if i == 0:
                     print("\n", file=sys.stderr)
                     i = 1
                 self.realTimePrint(message)
-                if self.sharedMemoryID is not None and self.previewFrame is not None:
-                    # Update the shared array
-                    try:
-                        if self.border_detect:
-                            padded_frame = padFrame(
-                                self.previewFrame,
-                                self.width,
-                                self.height,
-                                self.croppedOutputWidth,
-                                self.croppedOututHeight,
-                            )
-                            frame_to_write = bytes(padded_frame)
-                        else:
-                            frame_to_write = (
-                                bytes(self.previewFrame)
-                                if type(self.previewFrame) is not bytes
-                                else self.previewFrame
-                            )
-                        self.shm.buf[:self.sharedMemoryChunkSize] = frame_to_write
-                    except Exception as e:
-                        log("Failed to write preview frame to shared memory: " + str(e))
+    def _publishPreviewFrame(self, preview_frame):
+        """Publish each completed output frame immediately for the browser."""
+        if self.sharedMemoryID is None or preview_frame is None:
+            return
+        try:
+            if self.border_detect:
+                preview_frame = padFrame(
+                    preview_frame,
+                    self.width,
+                    self.height,
+                    self.croppedOutputWidth,
+                    self.croppedOututHeight,
+                )
+            frame_data = bytes(preview_frame) if not isinstance(preview_frame, bytes) else preview_frame
+            width, height = self.width, self.height
+            dtype = np.uint16 if self.hdr_mode else np.uint8
+            expected_bytes = width * height * 3 * np.dtype(dtype).itemsize
+            if len(frame_data) < expected_bytes:
+                raise ValueError(f"Preview frame is short ({len(frame_data)} < {expected_bytes} bytes)")
+            frame = np.frombuffer(frame_data, dtype=dtype, count=width * height * 3).reshape(height, width, 3)
+            if self.hdr_mode:
+                frame = (np.clip(frame.astype(np.float32) / 65535.0, 0, 1) * 255).astype(np.uint8)
+            if width > 1280:
+                preview_height = max(1, round(height * 1280 / width))
+                frame = cv2.resize(frame, (1280, preview_height), interpolation=cv2.INTER_AREA)
+            else:
+                preview_height = height
+            # Frame objects store RGB; OpenCV's JPEG encoder expects BGR.
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 78])
+            if not ok:
+                raise ValueError("JPEG encoder did not produce a preview frame")
+            jpeg = encoded.tobytes()
+            packet_capacity = len(self.shm.buf) - 16
+            if len(jpeg) > packet_capacity:
+                raise ValueError(f"Encoded preview exceeds shared buffer ({len(jpeg)} > {packet_capacity})")
+            # Sequence lock: readers only accept a stable, even sequence.
+            sequence = struct.unpack_from("<I", self.shm.buf, 0)[0]
+            sequence = (sequence + 1) | 1
+            struct.pack_into("<IIII", self.shm.buf, 0, sequence, 0, 0, 0)
+            self.shm.buf[16:16 + len(jpeg)] = jpeg
+            struct.pack_into("<IIII", self.shm.buf, 0, sequence + 1, min(width, 1280), preview_height, len(jpeg))
+        except Exception as e:
+            log("Failed to write preview frame to shared memory: " + str(e))

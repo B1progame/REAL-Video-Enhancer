@@ -146,6 +146,14 @@ class HandleApplication:
             interpolateFactor=self.args.interpolate_factor,
             upscaleModel=self.args.upscale_model,
             extraRestorationModels=self.args.extra_restoration_models,
+            denoise_model_index=self.args.denoise_model_index,
+            denoise_strength=self.args.denoise_strength,
+            denoise_temporal=self.args.denoise_temporal,
+            denoise_keep_film_grain=self.args.denoise_keep_film_grain,
+            deblur_model_index=self.args.deblur_model_index,
+            deblur_strength=self.args.deblur_strength,
+            deblur_edge_recovery=self.args.deblur_edge_recovery,
+            deblur_ghosting_guard=self.args.deblur_ghosting_guard,
             sceneDetectModel=self.args.scene_detect_model,
             tile_size=self.args.tilesize,
             # backend settings
@@ -264,6 +272,30 @@ class HandleApplication:
             action='append',
         )
         parser.add_argument(
+            "--denoise_model_index",
+            help="Index of the denoise model within the extra restoration model list.",
+            type=int,
+            default=-1,
+        )
+        parser.add_argument(
+            "--denoise_strength",
+            help="Blend factor from 1 (light) to 10 (full denoise inference).",
+            type=int,
+            default=10,
+        )
+        parser.add_argument("--denoise_temporal", choices=["off", "light", "medium", "strong"], default="off",
+                            help="Motion-compensated temporal stabilization for denoised frames.")
+        parser.add_argument("--denoise_keep_film_grain", action="store_true",
+                            help="Preserve fine source texture while denoising.")
+        parser.add_argument("--deblur_model_index", type=int, default=-1,
+                            help="Index of the deblur model in the extra restoration model list.")
+        parser.add_argument("--deblur_strength", type=int, default=10,
+                            help="Deblur blend factor from 1 (light) to 10 (full model output).")
+        parser.add_argument("--deblur_edge_recovery", type=int, default=0,
+                            help="Post-restoration edge sharpening amount from 0 to 100.")
+        parser.add_argument("--deblur_ghosting_guard", choices=["off", "conservative", "aggressive"], default="off",
+                            help="Limit deblur changes to reduce ringing and unstable detail.")
+        parser.add_argument(
             "--interpolate_model",
             help="Path to an interpolation checkpoint. PyTorch auto-detects RIFE 4.6/4.7/4.13/4.20/4.21/4.22-Lite/4.25/4.25 Heavy, GMFSS, GIMM, and IFRNet models.",
             type=str,
@@ -334,6 +366,7 @@ class HandleApplication:
                 "av1",
                 "prores",
                 "ffv1",
+                "utvideo",
                 "x264_vulkan",
                 "x264_nvenc",
                 "x265_nvenc",
@@ -341,6 +374,9 @@ class HandleApplication:
                 "x264_vaapi",
                 "x265_vaapi",
                 "av1_vaapi",
+                "h264_amf",
+                "h265_amf",
+                "av1_amf",
             ],
             type=str,
         )
@@ -538,7 +574,7 @@ class HandleApplication:
         parser.add_argument(
             "--merge_subtitles",
             help="Merges subtitles into output video",
-            action="store_true",
+            action=argparse.BooleanOptionalAction,
             default=True,
         )
         parser.add_argument(

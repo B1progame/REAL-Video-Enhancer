@@ -1,5 +1,7 @@
 #define MyAppName "REAL Video Enhancer"
-#define MyAppVersion "2.4.1"
+#ifndef MyAppVersion
+#define MyAppVersion "2.4.29"
+#endif
 #define MyAppPublisher "TNTwise"
 #define MyAppURL "https://github.com/TNTwise/REAL-Video-Enhancer"
 #define MyAppExeName "REAL-Video-Enhancer.exe"
@@ -10,34 +12,37 @@
 #endif
 
 [Setup]
-AppId={{8BEA9D2A-2D25-4D4B-9D96-12D6E149C2D6}
+AppId={{F16B8DD5-5F26-47BD-88CE-43DA8D9BCE24}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
-DefaultDirName={autopf}\{#MyAppName}
+DefaultDirName={localappdata}\Programs\{#MyAppName}
 DefaultGroupName={#MyAppName}
 #ifdef MyLicenseFile
 LicenseFile={#MyLicenseFile}
 #endif
-OutputDir=dist
+OutputDir=release-stage\installer
 OutputBaseFilename=REAL-Video-Enhancer-{#MyAppVersion}-Windows-Installer
 SetupIconFile=icons\logo-v3.ico
 UninstallDisplayIcon={app}\logo-v3.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
 UsePreviousAppDir=yes
 UsePreviousTasks=yes
-VersionInfoVersion=2.4.1.0
+VersionInfoVersion={#MyAppVersion}.0
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Setup
+CloseApplications=yes
+RestartApplications=no
+CloseApplicationsFilter=REAL-Video-Enhancer.exe,RVE-Engine.exe
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -46,7 +51,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "dist\REAL-Video-Enhancer\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "release-stage\REAL-Video-Enhancer\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "icons\logo-v3.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
@@ -55,7 +60,30 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; WorkingDir: "{app}"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Finish setup and install the runtime and model library"; Flags: nowait postinstall skipifsilent
 
-[UninstallDelete]
-Type: filesandordirs; Name: "{localappdata}\REAL-Video-Enhancer"
+[Code]
+var
+  RemoveAppDataOnUninstall: Boolean;
+
+function InitializeUninstall(): Boolean;
+begin
+  Result := True;
+  RemoveAppDataOnUninstall := MsgBox(
+    'Also remove downloaded models, the managed Python runtime, settings, and logs? ' +
+    'This removes REAL Video Enhancer data stored on this PC and in WSL Ubuntu.',
+    mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
+begin
+  if (CurUninstallStep = usPostUninstall) and RemoveAppDataOnUninstall then
+  begin
+    DelTree(ExpandConstant('{localappdata}\REAL-Video-Enhancer'), True, True, True);
+    Exec(ExpandConstant('{sys}\wsl.exe'),
+      '--distribution Ubuntai --exec bash -lc "rm -rf -- $HOME/.local/share/REAL-Video-Enhancer"',
+      '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  end;
+end;

@@ -696,6 +696,9 @@ def getModels(backend:str):
             interpolateModels = onnxInterpolateModels
             upscaleModels = onnxUpscaleModels
             deblurModels = {}
+            denoiseModels = {}
+            decompressModels = {}
+            sceneChangeModels = {}
         case _:
             RegularQTPopup(
                 "Failed to import any backends!, please try to reinstall the app!"

@@ -138,7 +138,28 @@ class Frame:
         )
 
     def _np_to_bytes(self, arr: Any) -> bytes:
-        return arr.tobytes()
+        # Raw renderer/FFmpeg frames are packed RGB24 (or RGB48 for HDR).
+        # Model-side NumPy effects use normalized float arrays, so serialize
+        # those as pixel integers instead of leaking float bytes into the pipe.
+        if self.hdr_mode:
+            if arr.dtype == np.uint16:
+                pixels = arr
+            elif np.issubdtype(arr.dtype, np.floating):
+                pixels = (np.clip(arr, 0.0, 1.0) * 65535.0).round().astype(np.uint16)
+            elif arr.dtype == np.uint8:
+                pixels = arr.astype(np.uint16) * 257
+            else:
+                pixels = np.clip(arr, 0, 65535).round().astype(np.uint16)
+        else:
+            if arr.dtype == np.uint8:
+                pixels = arr
+            elif np.issubdtype(arr.dtype, np.floating):
+                pixels = (np.clip(arr, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+            elif arr.dtype == np.uint16:
+                pixels = (arr.astype(np.float32) / 257.0).round().astype(np.uint8)
+            else:
+                pixels = np.clip(arr, 0, 255).round().astype(np.uint8)
+        return np.ascontiguousarray(pixels).tobytes()
 
     def resize_frame(self, new_width: int, new_height: int) -> "Frame":
         
@@ -165,10 +186,16 @@ class Frame:
         Get the frame as a numpy array in SDR format (H, W, C) with dtype uint8.
         """
         np_frame = self.get_frame_np()
-        if self.hdr_mode:
-            # Convert from HDR (uint16) to SDR (uint8)
-            np_frame = (np.clip(np_frame.astype(np.float32) / 65535.0, 0, 1) * 255).astype(np.uint8)
-        return np_frame
+        if np_frame.dtype == np.uint8 and not self.hdr_mode:
+            return np_frame
+        if np.issubdtype(np_frame.dtype, np.integer):
+            max_value = 65535.0 if self.hdr_mode else float(np.iinfo(np_frame.dtype).max)
+            normalized = np_frame.astype(np.float32) / max_value
+        else:
+            # PyTorch frames are normalized floats in [0, 1], including when
+            # they have passed through a restoration model using bfloat16.
+            normalized = np_frame.astype(np.float32, copy=False)
+        return (np.clip(normalized, 0.0, 1.0) * 255.0).round().astype(np.uint8)
 
     def get_np_sdr_resized(self, target_width: int, target_height: int):
         """

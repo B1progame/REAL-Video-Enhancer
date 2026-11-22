@@ -89,6 +89,14 @@ class Render:
         interpolateModel=None,
         interpolateFactor: float = 1.0,
         extraRestorationModels=None,
+        denoise_model_index: int = -1,
+        denoise_strength: int = 10,
+        denoise_temporal: str = "off",
+        denoise_keep_film_grain: bool = False,
+        deblur_model_index: int = -1,
+        deblur_strength: int = 10,
+        deblur_edge_recovery: int = 0,
+        deblur_ghosting_guard: str = "off",
         sceneDetectModel: str = None,
         tile_size=None,
         drba=False,
@@ -186,6 +194,16 @@ class Render:
         self.override_upscale_scale = override_upscale_scale
         self.trt_dynamic_shapes = trt_dynamic_shapes
         self.extraRestorationModels = []
+        self.denoise_model_index = int(denoise_model_index)
+        self.denoise_strength = min(10, max(1, int(denoise_strength)))
+        self.denoise_temporal = str(denoise_temporal or "off").lower()
+        self.denoise_keep_film_grain = bool(denoise_keep_film_grain)
+        self.deblur_model_index = int(deblur_model_index)
+        self.deblur_strength = min(10, max(1, int(deblur_strength)))
+        self.deblur_edge_recovery = min(100, max(0, int(deblur_edge_recovery)))
+        self.deblur_ghosting_guard = str(deblur_ghosting_guard or "off").lower()
+        self._previous_denoise_gray = None
+        self._previous_denoised_frame = None
         
         if cwd:
             log("Working Directory: " + cwd)
@@ -440,8 +458,16 @@ class Render:
             # without running optical-flow inference. This preserves CFR timing.
             skip_interpolation = scene_change or is_duplicate
 
-            for extraRestoration in self.extraRestorationModels:
+            for restoration_index, extraRestoration in enumerate(self.extraRestorationModels):
+                is_denoise = restoration_index == self.denoise_model_index
+                is_deblur = restoration_index == self.deblur_model_index
+                source_frame = frame if is_denoise or is_deblur else None
                 frame = extraRestoration(frame)
+                if source_frame is not None:
+                    if is_denoise:
+                        frame = self.processDenoiseFrame(source_frame, frame)
+                    elif is_deblur:
+                        frame = self.processDeblurFrame(source_frame, frame)
 
             if self.motion_blur:
                 interpolated_frames = list(
@@ -529,6 +555,76 @@ class Render:
         
         if self.backend == "ncnn":
             return self.upscaleNCNNObject(scale=1, modelPath=modelPath)
+
+    def blendRestorationFrame(self, source, restored, strength):
+        """Blend a restoration result with its input, keeping tensor work on GPU."""
+        if strength >= 1.0:
+            return restored
+        if self.backend in ("pytorch", "tensorrt"):
+            original_tensor = source.get_frame_tensor()
+            restored_tensor = restored.get_frame_tensor()
+            return restored.set_frame_tensor(original_tensor.lerp(restored_tensor, strength))
+        original_np = source.get_frame_np()
+        restored_np = restored.get_frame_np()
+        return restored.set_frame_np(
+            cv2.addWeighted(original_np, 1.0 - strength, restored_np, strength, 0)
+        )
+
+    @staticmethod
+    def _frame_max_value(array):
+        return float(np.iinfo(array.dtype).max) if np.issubdtype(array.dtype, np.integer) else 1.0
+
+    def processDenoiseFrame(self, source, denoised):
+        denoised = self.blendRestorationFrame(source, denoised, self.denoise_strength / 10.0)
+        if self.denoise_temporal in ("light", "medium", "strong"):
+            source_sdr = source.get_np_sdr()
+            current_gray = cv2.cvtColor(source_sdr, cv2.COLOR_BGR2GRAY)
+            current = denoised.get_frame_np().astype(np.float32)
+            if self._previous_denoise_gray is not None and self._previous_denoised_frame is not None:
+                change = float(cv2.absdiff(current_gray, self._previous_denoise_gray).mean())
+                if change < 28.0 and self._previous_denoised_frame.shape == current.shape:
+                    height, width = current_gray.shape[:2]
+                    flow_scale = min(1.0, 640.0 / max(width, height))
+                    flow_size = (max(1, round(width * flow_scale)), max(1, round(height * flow_scale)))
+                    flow_current = cv2.resize(current_gray, flow_size, interpolation=cv2.INTER_AREA)
+                    flow_previous = cv2.resize(self._previous_denoise_gray, flow_size, interpolation=cv2.INTER_AREA)
+                    flow_small = cv2.calcOpticalFlowFarneback(flow_current, flow_previous, None,
+                                                              0.5, 3, 15, 3, 5, 1.2, 0)
+                    flow = cv2.resize(flow_small, (width, height), interpolation=cv2.INTER_LINEAR)
+                    flow[..., 0] *= width / flow_size[0]
+                    flow[..., 1] *= height / flow_size[1]
+                    y, x = np.mgrid[:height, :width].astype(np.float32)
+                    warped = cv2.remap(self._previous_denoised_frame,
+                                       x + flow[..., 0], y + flow[..., 1],
+                                       cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+                    amount = {"light": 0.12, "medium": 0.22, "strong": 0.32}[self.denoise_temporal]
+                    current = current * (1.0 - amount) + warped * amount
+            self._previous_denoise_gray = current_gray.copy()
+            self._previous_denoised_frame = current.copy()
+            denoised = denoised.set_frame_np(np.clip(current, 0, self._frame_max_value(denoised.get_frame_np())).astype(denoised.get_frame_np().dtype))
+
+        if self.denoise_keep_film_grain:
+            original = source.get_frame_np().astype(np.float32)
+            output = denoised.get_frame_np().astype(np.float32)
+            low_frequency = cv2.GaussianBlur(original, (0, 0), 1.0)
+            preserved_texture = (original - low_frequency) * 0.35
+            output += preserved_texture
+            source_dtype = denoised.get_frame_np().dtype
+            denoised = denoised.set_frame_np(np.clip(output, 0, self._frame_max_value(denoised.get_frame_np())).astype(source_dtype))
+        return denoised
+
+    def processDeblurFrame(self, source, deblurred):
+        guard_factor = {"off": 1.0, "conservative": 0.82, "aggressive": 0.62}.get(self.deblur_ghosting_guard, 0.82)
+        strength = (self.deblur_strength / 10.0) * guard_factor
+        deblurred = self.blendRestorationFrame(source, deblurred, strength)
+        if self.deblur_edge_recovery <= 0:
+            return deblurred
+        restored = deblurred.get_frame_np().astype(np.float32)
+        blur = cv2.GaussianBlur(restored, (0, 0), 0.8)
+        amount = (self.deblur_edge_recovery / 100.0) * 0.7
+        restored += (restored - blur) * amount
+        dtype = deblurred.get_frame_np().dtype
+        return deblurred.set_frame_np(np.clip(restored, 0, self._frame_max_value(deblurred.get_frame_np())).astype(dtype))
 
     def setupUpscale(self):
         log("Setting up Upscale")

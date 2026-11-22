@@ -2,7 +2,7 @@ import os
 import sys
 import requests
 import platform
-from PySide6.QtCore import QDir
+import tempfile
 def networkCheck(hostname="https://raw.githubusercontent.com") -> bool:
     """
     checks network availability against a url, default url: raw.githubusercontent.com
@@ -15,7 +15,7 @@ def networkCheck(hostname="https://raw.githubusercontent.com") -> bool:
     return False
 HAS_NETWORK_ON_STARTUP = networkCheck()
 
-LOCKFILE = QDir.tempPath() + "/REAL-Video-Enhancer.lock"
+LOCKFILE = os.path.join(tempfile.gettempdir(), "REAL-Video-Enhancer.lock")
 
 
 
