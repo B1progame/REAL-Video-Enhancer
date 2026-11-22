@@ -21,7 +21,6 @@ import time
 import uuid
 import urllib.parse
 import urllib.request
-import tarfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -67,7 +66,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.31")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.33")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -648,6 +647,20 @@ def begin_model_storage_setup(mode):
     return storage_snapshot()
 
 
+def available_backends_from_probe(opencv_available, installed_backends):
+    """Keep CPU PyTorch available even when the detected CUDA arch is unsupported."""
+    if not opencv_available:
+        return []
+    return [name for name in ("pytorch", "ncnn", "tensorrt") if name in installed_backends]
+
+
+def selected_backend_is_available(capabilities, backend):
+    selected = str(backend or "pytorch").strip().lower()
+    if selected == "auto":
+        selected = "pytorch"
+    return bool(capabilities.get("opencv_available")) and selected in capabilities.get("available_backends", [])
+
+
 def python_capabilities(refresh=False):
     """Probe the managed runtime once and reuse the result for render requests.
 
@@ -672,23 +685,46 @@ def python_capabilities(refresh=False):
         if not PYTHON:
             raise FileNotFoundError("The portable RVE Python runtime is not installed yet.")
         probe_code = """
-import cv2, torch
 from importlib import metadata
-cuda = torch.cuda.is_available()
-cap = torch.cuda.get_device_capability(0) if cuda else None
-arch = ('sm_' + ''.join(map(str, cap))) if cap else ''
-supported = (not cuda) or arch in torch.cuda.get_arch_list()
 distributions = {dist.metadata.get('Name', '').lower().replace('_', '-') for dist in metadata.distributions()}
 ncnn_packages = {'rife-ncnn-vulkan-python-tntwise', 'upscale-ncnn-py', 'ncnn'}
 tensorrt_packages = {'tensorrt', 'tensorrt-cu12-bindings', 'tensorrt-cu12-libs'}
-print('opencv=True')
-print('torch=' + torch.__version__)
-print('device=' + (torch.cuda.get_device_name(0) if cuda else 'CPU'))
+try:
+    import cv2
+    opencv = True
+except Exception:
+    opencv = False
+try:
+    import torch
+    import torch.nn.functional
+    cuda = torch.cuda.is_available()
+    cap = torch.cuda.get_device_capability(0) if cuda else None
+    arch = ('sm_' + ''.join(map(str, cap))) if cap else ''
+    supported = (not cuda) or arch in torch.cuda.get_arch_list()
+    device = torch.cuda.get_device_name(0) if cuda else 'CPU'
+    version = torch.__version__
+    installed_pytorch = True
+except Exception:
+    cuda, arch, supported = False, '', True
+    device, version, installed_pytorch = 'Unavailable', 'Unavailable', False
+try:
+    import rife_ncnn_vulkan_python
+    installed_ncnn = ncnn_packages.issubset(distributions)
+except Exception:
+    installed_ncnn = False
+try:
+    import tensorrt
+    installed_tensorrt = tensorrt_packages.issubset(distributions)
+except Exception:
+    installed_tensorrt = False
+print('opencv=' + str(opencv))
+print('torch=' + version)
+print('device=' + device)
 print('cuda_arch=' + arch)
 print('cuda_supported=' + str(supported))
-print('installed_pytorch=True')
-print('installed_ncnn=' + str(ncnn_packages.issubset(distributions)))
-print('installed_tensorrt=' + str(tensorrt_packages.issubset(distributions)))
+print('installed_pytorch=' + str(installed_pytorch))
+print('installed_ncnn=' + str(installed_ncnn))
+print('installed_tensorrt=' + str(installed_tensorrt))
 """
         probe = subprocess.run([PYTHON, "-c", probe_code], capture_output=True, text=True, timeout=120, **hidden_subprocess_kwargs())
         result["opencv_available"] = probe.returncode == 0 and "opencv=True" in probe.stdout
@@ -707,12 +743,14 @@ print('installed_tensorrt=' + str(tensorrt_packages.issubset(distributions)))
                 "directml_supported": False,
                 "tensorrt_supported": True,
             }
-            if lines.get("cuda_supported", "True").lower() == "true":
-                result["available_backends"] = ["pytorch"]
-                result["recommended_backend_label"] = f"PyTorch {lines.get('torch', '')} ({lines.get('device', 'CPU')})"
-            else:
+            result["available_backends"] = available_backends_from_probe(
+                result["opencv_available"], installed_backends
+            )
+            if "pytorch" in result["available_backends"] and lines.get("cuda_supported", "True").lower() == "false":
                 result["backend_probe_output"] = f"Installed PyTorch does not include kernels for {lines.get('cuda_arch', 'this GPU')}. Install the recommended CUDA 12.8 backend."
-                result["recommended_backend_label"] = f"PyTorch CUDA 12.8 required for {lines.get('device', 'this GPU')}"
+                result["recommended_backend_label"] = f"PyTorch CPU available · CUDA 12.8 recommended for {lines.get('device', 'this GPU')}"
+            elif result["available_backends"]:
+                result["recommended_backend_label"] = f"{', '.join(result['available_backends'])} · {lines.get('device', 'CPU')}"
         else:
             result["backend_probe_output"] = probe.stderr.strip()[-1200:]
             result["backend_management"] = {
@@ -1484,9 +1522,9 @@ def build_rve_command(payload):
     # Bootstrap has already made this expensive first-import probe. Reusing it
     # avoids launching two more Python processes and timing out on CUDA startup.
     capabilities = python_capabilities()
-    if not capabilities.get("opencv_available") or "pytorch" not in capabilities.get("available_backends", []):
-        detail = capabilities.get("backend_probe_output") or "The managed runtime did not report PyTorch and OpenCV."
-        raise ValueError("RVE rendering cannot start: " + detail)
+    if not selected_backend_is_available(capabilities, backend):
+        detail = capabilities.get("backend_probe_output") or f"The managed runtime did not report {backend} and OpenCV."
+        raise ValueError(f"RVE rendering cannot start with {backend}: " + detail)
     cmd = [python, str(BACKEND), "--input", input_path, "--backend", backend, "--cwd", str(APP_DATA)]
     ffmpeg = find_ffmpeg_path()
     if ffmpeg:
@@ -1637,6 +1675,64 @@ def build_animescripter_command(payload, info):
     if payload.get("end_time") not in (None, ""): cmd += ["--outpoint", str(payload["end_time"])]
     render["output_file"] = str(output)
     return animescripter_invocation(cmd[0], cmd[1:])
+
+
+def prepare_and_start_render(payload, engine, output_file):
+    pause_memory = None
+    preview_memory = None
+    try:
+        if engine != "animescripter":
+            capabilities = python_capabilities()
+            backend = str(payload.get("backend") or "pytorch").lower()
+            if backend == "auto":
+                backend = "pytorch"
+            if not selected_backend_is_available(capabilities, backend):
+                probe = str(capabilities.get("backend_probe_output") or f"{backend} and OpenCV were not detected in the managed Python runtime.").strip()
+                raise RuntimeError(f"The selected {backend} backend is unavailable. Open Runtime and install or select an available backend. Details: " + probe)
+        ensure_render_models(payload)
+        with state_lock:
+            if render.get("status") != "preparing":
+                return
+            if engine == "animescripter":
+                info = animescripter_status()
+                if not info["available"]:
+                    raise RuntimeError(info["detail"])
+                cmd = build_animescripter_command(payload, info)
+            else:
+                cmd = build_rve_command(payload)
+            preview_enabled = bool((payload.get("settings") or {}).get("preview_enabled", True))
+            if engine != "animescripter":
+                pause_memory = shared_memory.SharedMemory(create=True, size=1, name="rve_pause_" + uuid.uuid4().hex)
+                pause_memory.buf[0] = 0
+                cmd += ["--pause_shared_memory_id", pause_memory.name]
+                if preview_enabled:
+                    # The renderer downsizes live frames into a bounded shared-memory packet.
+                    preview_memory = shared_memory.SharedMemory(create=True, size=8 * 1024 * 1024 + 16, name="rve_preview_" + uuid.uuid4().hex)
+                    preview_memory.buf[:16] = bytes(16)
+                    cmd += ["--preview_shared_memory_id", preview_memory.name]
+            APP_DATA.mkdir(parents=True, exist_ok=True)
+            proc = subprocess.Popen(cmd, cwd=APP_DATA, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, encoding="utf-8", errors="replace", bufsize=1,
+                                    **hidden_subprocess_kwargs())
+            render.update(status="running", error="", paused=False, process=proc,
+                          pause_memory=pause_memory, preview_memory=preview_memory, preview_jpeg=None,
+                          preview_size=8 * 1024 * 1024 + 16 if preview_memory else 0,
+                          preview_enabled=preview_enabled, engine=engine,
+                          log_lines=[f"Starting {engine} renderer...", "Command: " + subprocess.list2cmdline(cmd)],
+                          current_frame=0, gen_fps=None, eta="--", output_file=str(output_file) if output_file else None)
+        threading.Thread(target=read_render_output, args=(proc, pause_memory, preview_memory), daemon=True).start()
+    except Exception as exc:
+        for memory in (pause_memory, preview_memory):
+            if memory is not None:
+                try:
+                    memory.close()
+                    memory.unlink()
+                except (FileNotFoundError, BufferError):
+                    pass
+        with state_lock:
+            render.update(status="error", error=str(exc), paused=False, process=None,
+                          pause_memory=None, preview_memory=None, preview_size=0)
+            render["log_lines"] = (render.get("log_lines") or []) + [str(exc)]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1804,6 +1900,12 @@ class Handler(BaseHTTPRequestHandler):
                                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 respond_json(self, {"ok": proc.returncode == 0, "command": f"{PYTHON} -m pip {command}",
                                     "output": (proc.stdout + proc.stderr)[-20000:], "returncode": proc.returncode}); return
+            if path == "/api/video/inspect":
+                selected = str(payload.get("path") or "").strip()
+                if not selected:
+                    respond_json(self, {"error": "Choose a video file first."}, 400); return
+                info = inspect_video(selected)
+                respond_json(self, {**info, "path": str(Path(selected).expanduser().resolve())}); return
             if path == "/api/dialog/select_input":
                 selected = choose_path("input", load_settings().get("advanced", {}).get("last_input_folder_location"))
                 info = {}
@@ -1811,8 +1913,11 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         info = inspect_video(selected)
                     except Exception as exc:
-                        respond_json(self, {"error": f"Could not import the selected video: {exc}"}, 422)
-                        return
+                        # Keep the user's file selection even when optional
+                        # metadata probing is unavailable. The render endpoint
+                        # performs its own validation and returns the actionable
+                        # error there; probing must not make the picker unusable.
+                        info = {"error": f"Video metadata is unavailable: {exc}"}
                     settings = load_settings()
                     advanced = settings.get("advanced", {})
                     advanced["last_input_folder_location"] = str(Path(selected).parent)
@@ -1869,51 +1974,19 @@ class Handler(BaseHTTPRequestHandler):
                 output_file = requested_output_file(payload)
                 if output_file and output_file.exists() and not (payload.get("settings") or {}).get("overwrite"):
                     raise OutputFileExistsError(output_file)
-                if engine != "animescripter":
-                    capabilities = python_capabilities()
-                    if not capabilities.get("opencv_available") or "pytorch" not in capabilities.get("available_backends", []):
-                        probe = str(capabilities.get("backend_probe_output") or "PyTorch and OpenCV were not detected in the managed Python runtime.").strip()
-                        message = "No compatible rendering backend is installed. Open Runtime and choose Install Recommended. Details: " + probe
-                        respond_json(self, {"ok": False, "code": "BACKEND_NOT_INSTALLED", "error": message}, 503); return
-                ensure_render_models(payload)
                 with state_lock:
-                    if render.get("process") and render["process"].poll() is None:
+                    if render.get("status") in ("preparing", "running", "paused") or (
+                        render.get("process") is not None and render["process"].poll() is None
+                    ):
                         respond_json(self, {"ok": False, "error": "A render is already running."}, 409); return
-                    render["output_file"] = None
-                    if engine == "animescripter":
-                        info = animescripter_status()
-                        if not info["available"]:
-                            respond_json(self, {"ok": False, "error": info["detail"]}, 503); return
-                        cmd = build_animescripter_command(payload, info)
-                    else:
-                        cmd = build_rve_command(payload)
-                    pause_memory = None
-                    preview_memory = None
-                    preview_enabled = bool((payload.get("settings") or {}).get("preview_enabled", True))
-                    if engine != "animescripter":
-                        pause_memory = shared_memory.SharedMemory(create=True, size=1, name="rve_pause_" + uuid.uuid4().hex)
-                        pause_memory.buf[0] = 0
-                        cmd += ["--pause_shared_memory_id", pause_memory.name]
-                        if preview_enabled:
-                            # Header + bounded 8 MiB JPEG payload; renderer downsizes
-                            # each live frame before publishing it.
-                            preview_memory = shared_memory.SharedMemory(create=True, size=8 * 1024 * 1024 + 16, name="rve_preview_" + uuid.uuid4().hex)
-                            preview_memory.buf[:16] = bytes(16)
-                            cmd += ["--preview_shared_memory_id", preview_memory.name]
-                    render.update(status="running", error="", paused=False, pause_memory=pause_memory, preview_memory=preview_memory, preview_jpeg=None, preview_size=8 * 1024 * 1024 + 16 if preview_memory else 0, preview_enabled=preview_enabled, engine=engine, log_lines=[f"Starting {engine} renderer...", "Command: " + subprocess.list2cmdline(cmd)], started=time.time(), current_frame=0, gen_fps=None, eta="--", output_file=render.get("output_file"))
-                    try:
-                        APP_DATA.mkdir(parents=True, exist_ok=True)
-                        proc = subprocess.Popen(cmd, cwd=APP_DATA, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1, **hidden_subprocess_kwargs())
-                    except Exception:
-                        if pause_memory is not None:
-                            pause_memory.close(); pause_memory.unlink()
-                        if preview_memory is not None:
-                            preview_memory.close(); preview_memory.unlink()
-                        render.update(status="error", pause_memory=None, preview_memory=None, preview_size=0)
-                        raise
-                    render["process"] = proc
-                    threading.Thread(target=read_render_output, args=(proc, pause_memory, preview_memory), daemon=True).start()
-                    respond_json(self, {"ok": True, "status": "running", "pid": proc.pid}); return
+                    render.update(status="preparing", error="", paused=False, process=None,
+                                  pause_memory=None, preview_memory=None, preview_jpeg=None,
+                                  preview_size=0, current_frame=0, gen_fps=None, eta="--",
+                                  started=time.time(), output_file=str(output_file) if output_file else None,
+                                  log_lines=["Preparing renderer and selected models…"])
+                threading.Thread(target=prepare_and_start_render, args=(payload, engine, output_file),
+                                 name="rve-render-prepare", daemon=True).start()
+                respond_json(self, {"ok": True, "status": "preparing"}, 202); return
             if path in ("/api/render/pause", "/api/render/stop"):
                 proc = render.get("process")
                 if not proc or proc.poll() is not None:
@@ -2037,6 +2110,15 @@ class SingleOwnerHTTPServer(ThreadingHTTPServer):
 
 def run_server():
     APP_DATA.mkdir(parents=True, exist_ok=True)
+    try:
+        server = SingleOwnerHTTPServer(("127.0.0.1", PORT), Handler)
+    except OSError as exc:
+        # Packaged Windows services run without a console. Letting this escape
+        # PyInstaller's entry point displays an unhandled-exception dialog when
+        # another app instance already owns the fixed loopback port.
+        print(f"RVE local engine could not bind 127.0.0.1:{PORT}: {exc}", flush=True)
+        return
+
     if os.name == "nt" and os.environ.get("RVE_AUTO_SETUP_MODELS", "1") != "0":
         initial_mode = os.environ.get("RVE_MODEL_STORAGE", "wsl").lower()
         if initial_mode in ("wsl", "windows"):
@@ -2045,7 +2127,6 @@ def run_server():
     if (os.name == "nt" and FROZEN and os.environ.get("RVE_AUTO_SETUP_RUNTIME", "1") != "0"
             and not managed_runtime_ready):
         begin_runtime_operation("recommended", "pytorch")
-    server = SingleOwnerHTTPServer(("127.0.0.1", PORT), Handler)
     address, port = server.server_address[:2]
     print(f"RVE local engine service listening on http://{address}:{port}/", flush=True)
     try:
