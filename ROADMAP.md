@@ -8,13 +8,15 @@ This roadmap describes the direction of the B1progame fork. The upstream Python 
 - Existing Python rendering engine and runtime setup connected through a local-only service.
 - Windows or WSL Ubuntu model storage selection and guided model preparation.
 - Appearance selection, locally persisted accent color, and reduced-motion preference.
-- GitHub release check, verified installer download, and installer launch from Settings. Private release access uses the signed-in GitHub CLI.
+- Shared native design tokens, Lucide navigation, responsive screen layouts, and theme-matched Windows title bar.
+- Source-frame previews and metadata in Process, plus searchable local model catalog in Downloads.
+- GitHub release check plus a verified in-app download, silent install, and automatic restart that keeps app data. Private release access uses the signed-in GitHub CLI.
 - Inno Setup 7 Windows installer and an uninstaller choice to remove managed models and runtime data.
 
 ## In progress
 
-- Complete the shared visual system and tune every page against actual window-size and DPI scenarios.
-- Improve Process workflow validation and make selected models, output details, and render readiness clearer.
+- Tune every page against more Windows DPI settings and machines where the local engine is available.
+- Exercise model search, source preview, theme persistence, and render readiness against a fully installed runtime.
 - Add rendered screenshots and interaction checks to the release review process.
 - Keep setup and update failures actionable, including private repository authentication and WSL startup states.
 

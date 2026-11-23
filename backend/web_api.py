@@ -69,7 +69,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.37")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.40")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -1578,9 +1578,14 @@ if not ok or width < 1 or height < 1 or frames <= 1:
     raise RuntimeError("This file does not contain a decodable video with more than one frame.")
 result = {"width": width, "height": height, "fps": fps, "frames": frames,
           "duration_seconds": frames / fps if fps > 0 else 0, "codec": codec or None,
-          "container": path.rsplit('.', 1)[-1].lower() if '.' in path else None}
+          "container": path.rsplit('.', 1)[-1].lower() if '.' in path else None,
+          "size_bytes": __import__('os').path.getsize(path)}
 if len(sys.argv) > 2 and sys.argv[2] == "frame":
     if ok:
+        height, width = frame.shape[:2]
+        scale = min(1.0, 1280 / width, 720 / height)
+        if scale < 1.0:
+            frame = cv2.resize(frame, (round(width * scale), round(height * scale)), interpolation=cv2.INTER_AREA)
         encoded, buffer = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
         if encoded:
             result["frame"] = base64.b64encode(buffer.tobytes()).decode('ascii')

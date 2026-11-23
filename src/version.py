@@ -1,2 +1,2 @@
-version = "2.4.37"
+version = "2.4.40"
 backend_dev_version = "2.4.1-dev23"  # has to match version of backend, update this wehenver updating pre release

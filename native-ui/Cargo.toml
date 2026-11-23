@@ -1,19 +1,24 @@
 [package]
 name = "rve-native"
-version = "2.4.37"
+version = "2.4.40"
 edition = "2024"
 publish = false
 license = "AGPL-3.0-only"
 
 [dependencies]
 eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
-egui_extras = { version = "0.37", default-features = false, features = ["svg"] }
+egui_extras = { version = "0.37", default-features = false, features = ["image", "svg"] }
 egui-lucide = "0.2"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 serde_json = "1.0"
 ureq = { version = "3.5", default-features = false, features = ["rustls", "json"] }
 
 [target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
 tray-icon = { version = "0.26.1", default-features = false }
+
+[build-dependencies]
+winres = "0.1.12"
 
 [profile.release]
 lto = "thin"

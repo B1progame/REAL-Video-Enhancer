@@ -1,6 +1,6 @@
 #define MyAppName "REAL Video Enhancer"
 #ifndef MyAppVersion
-#define MyAppVersion "2.4.37"
+#define MyAppVersion "2.4.40"
 #endif
 #define MyAppPublisher "B1progame"
 #define MyAppURL "https://github.com/B1progame/REAL-Video-Enhancer"
@@ -57,16 +57,38 @@ Source: "release-stage\REAL-Video-Enhancer\*"; DestDir: "{app}"; Flags: recurses
 Source: "icons\logo-v3.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\logo-v3.ico"; IconIndex: 0; AppUserModelID: "B1progame.REALVideoEnhancer"
 Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; WorkingDir: "{app}"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; WorkingDir: "{app}"; IconFilename: "{app}\logo-v3.ico"; IconIndex: 0; AppUserModelID: "B1progame.REALVideoEnhancer"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch REAL Video Enhancer"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch REAL Video Enhancer"; Flags: nowait
 
 [Code]
 var
   RemoveAppDataOnUninstall: Boolean;
+
+function InitializeSetup(): Boolean;
+var
+  SetupPath, UpdateFolder, Params: String;
+  ResultCode: Integer;
+begin
+  Result := True;
+  SetupPath := ExpandConstant('{srcexe}');
+  UpdateFolder := AddBackslash(ExpandConstant('{localappdata}\REAL-Video-Enhancer\updates'));
+
+  { Older app versions start the verified download without silent flags. Detect
+    that updater cache path, then relaunch after this setup process exits. }
+  if (not WizardSilent) and
+     (CompareText(AddBackslash(ExtractFileDir(SetupPath)), UpdateFolder) = 0) then
+  begin
+    Params := '/c ping 127.0.0.1 -n 2 >nul & start "" "' + SetupPath +
+      '" /VERYSILENT /NORESTART /CLOSEAPPLICATIONS /SP-';
+    if Exec(ExpandConstant('{sys}\cmd.exe'), Params, UpdateFolder,
+      SW_HIDE, ewNoWait, ResultCode) then
+      Result := False;
+  end;
+end;
 
 function InitializeUninstall(): Boolean;
 begin

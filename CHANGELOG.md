@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.4.40 — 2026-11-23
+
+- Update from Settings now installs the checksum-verified download automatically in silent mode and reopens the app when it finishes.
+- Keep existing settings, Python runtime, models, and WSL data during an app update; the regular uninstaller still offers a separate data cleanup choice.
+
+## 2.4.39 — 2026-11-23
+
+- Fix Windows taskbar identity and installer shortcuts so the app consistently displays the REAL Video Enhancer icon.
+
+## 2.4.38 — 2026-11-23
+
+- Refined all six native Rust screens with a shared graphite theme, clearer hierarchy, responsive layouts, and a consistent Lucide icon set.
+- Added a real source-frame preview with video metadata and a searchable model catalog with live installed counts.
+- Improved the Process empty state, render readiness feedback, reduced-motion behavior, and keyboard-operable enhancement switches.
+- Embedded the branded Windows executable icon and matched the native Windows title bar to the selected appearance.
+
 ## 2.4.37 — 2026-11-23
 
 - Cancel now terminates the active WSL model-library installer process directly.

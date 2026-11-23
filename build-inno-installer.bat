@@ -7,13 +7,11 @@ set "ISCC=%ProgramFiles(x86)%\Inno Setup 7\ISCC.exe"
 set "PYTHON_EXE=%APP_DIR%.venv\Scripts\python.exe"
 
 if not exist "%ISCC%" set "ISCC=%ProgramFiles%\Inno Setup 7\ISCC.exe"
-if not exist "%ISCC%" set "ISCC=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
-if not exist "%ISCC%" set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
 if not exist "%PYTHON_EXE%" set "PYTHON_EXE=%APP_DIR%venv\Scripts\python.exe"
 if not exist "%PYTHON_EXE%" set "PYTHON_EXE=python"
 
 if not exist "%ISCC%" (
-    echo Inno Setup Compiler not found. Install Inno Setup 6 or 7 and rerun this script.
+    echo Inno Setup 7 compiler not found. Install Inno Setup 7 and rerun this script.
     exit /b 1
 )
 if not exist "%SCRIPT%" (
@@ -50,7 +48,7 @@ set "RVE_VERSION_FILE=%TEMP%\rve-version-%RANDOM%-%RANDOM%.txt"
 if errorlevel 1 goto :build_failed
 set /p "RVE_VERSION="<"%RVE_VERSION_FILE%"
 del "%RVE_VERSION_FILE%" >nul 2>&1
-if not defined RVE_VERSION set "RVE_VERSION=2.4.37"
+if not defined RVE_VERSION set "RVE_VERSION=2.4.40"
 set "RVE_APP_VERSION=%RVE_VERSION%"
 
 echo [2/3] Compiling the Rust desktop interface...

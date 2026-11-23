@@ -1,6 +1,8 @@
 #![windows_subsystem = "windows"]
 
 use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke, Vec2};
+#[cfg(windows)]
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -20,7 +22,7 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
 mod ui;
-use ui::theme::{accent_for_theme, border_color, contrast_text, secondary_text_color};
+use ui::theme::{accent_for_theme, border_color, secondary_text_color};
 use ui::{components, icons, theme};
 
 static API_PORT: AtomicU16 = AtomicU16::new(51837);
@@ -37,9 +39,14 @@ const PAGES: [(&str, &str); 6] = [
     ("Settings", "settings"),
 ];
 const PROCESS_PAGE: usize = 1;
+const PROCESS_COLUMN_THRESHOLD: f32 = 860.0;
 
 fn settings_uses_two_columns(available_width: f32) -> bool {
     available_width >= 960.0
+}
+
+fn process_uses_two_columns(available_width: f32) -> bool {
+    available_width >= PROCESS_COLUMN_THRESHOLD
 }
 
 #[derive(Clone)]
@@ -51,6 +58,7 @@ enum ApiCommand {
 struct ApiEvent {
     endpoint: String,
     value: Result<Value, String>,
+    image: Option<Result<Vec<u8>, String>>,
 }
 
 struct ApiBridge {
@@ -80,8 +88,8 @@ fn active_task_from(
         Some("Runtime setup")
     } else if matches!(storage, "starting" | "installing") {
         Some("Model storage setup")
-    } else if update == "downloading" {
-        Some("An app update download")
+    } else if matches!(update, "downloading" | "installing") {
+        Some("An app update")
     } else if anime == "running" {
         Some("AnimeScripter setup")
     } else {
@@ -208,6 +216,31 @@ fn api_get(client: &ureq::Agent, endpoint: &str) -> Result<Value, String> {
         .map_err(|error| error.to_string())
 }
 
+fn api_get_image(client: &ureq::Agent, endpoint: &str) -> Result<Vec<u8>, String> {
+    client
+        .get(format!(
+            "http://127.0.0.1:{}{endpoint}",
+            API_PORT.load(Ordering::Relaxed)
+        ))
+        .call()
+        .map_err(|error| error.to_string())?
+        .body_mut()
+        .read_to_vec()
+        .map_err(|error| error.to_string())
+}
+
+fn encode_query_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
 fn api_post(client: &ureq::Agent, endpoint: &str, payload: &Value) -> Result<Value, String> {
     client
         .post(format!(
@@ -233,16 +266,39 @@ fn start_api_worker(ctx: egui::Context) -> ApiBridge {
             loop {
                 match command_receive.recv_timeout(Duration::from_millis(120)) {
                     Ok(ApiCommand::Get(endpoint)) => {
-                        let value = api_get(&client, &endpoint);
+                        let image = if endpoint.starts_with("/api/video/first_frame?") {
+                            Some(api_get_image(&client, &endpoint))
+                        } else {
+                            None
+                        };
+                        let value = if image.is_some() {
+                            image
+                                .as_ref()
+                                .and_then(|result| match result {
+                                    Ok(_) => None,
+                                    Err(error) => Some(Err(error.clone())),
+                                })
+                                .unwrap_or(Ok(Value::Null))
+                        } else {
+                            api_get(&client, &endpoint)
+                        };
                         if endpoint == "/api/bootstrap" && value.is_ok() {
                             connected = true;
                         }
-                        let _ = event_send.send(ApiEvent { endpoint, value });
+                        let _ = event_send.send(ApiEvent {
+                            endpoint,
+                            value,
+                            image,
+                        });
                         ctx.request_repaint();
                     }
                     Ok(ApiCommand::Post(endpoint, payload)) => {
                         let value = api_post(&client, &endpoint, &payload);
-                        let _ = event_send.send(ApiEvent { endpoint, value });
+                        let _ = event_send.send(ApiEvent {
+                            endpoint,
+                            value,
+                            image: None,
+                        });
                         ctx.request_repaint();
                     }
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -272,6 +328,7 @@ fn start_api_worker(ctx: egui::Context) -> ApiBridge {
                             let _ = event_send.send(ApiEvent {
                                 endpoint: "/api/connection".to_owned(),
                                 value: Err(error.clone()),
+                                image: None,
                             });
                             connected = false;
                             ctx.request_repaint();
@@ -280,6 +337,7 @@ fn start_api_worker(ctx: egui::Context) -> ApiBridge {
                         let _ = event_send.send(ApiEvent {
                             endpoint: (*endpoint).to_owned(),
                             value,
+                            image: None,
                         });
                         ctx.request_repaint();
                     }
@@ -409,8 +467,64 @@ fn start_engine(model_storage: &str, first_setup: bool) -> Result<Option<Child>,
         .map_err(|error| format!("Could not start local engine `{program}`: {error}"))
 }
 
-fn apply_theme(ctx: &egui::Context, accent: Color32, appearance: &str) {
-    theme::apply(ctx, accent, appearance);
+fn apply_theme(ctx: &egui::Context, accent: Color32, appearance: &str, reduce_motion: bool) {
+    theme::apply(ctx, accent, appearance, reduce_motion);
+}
+
+#[cfg(windows)]
+fn apply_native_titlebar(window: &impl HasWindowHandle, light: bool) {
+    use std::ffi::c_void;
+
+    let Ok(window_handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(window_handle) = window_handle.as_raw() else {
+        return;
+    };
+    let hwnd = window_handle.hwnd.get() as *mut c_void;
+    let dark_mode: i32 = if light { 0 } else { 1 };
+    let (caption, text, border) = if light {
+        (0x00F7_F5F2_u32, 0x0026_2020_u32, 0x00DB_E3E7_u32)
+    } else {
+        (0x0015_1110_u32, 0x00F7_F5F2_u32, 0x0042_3830_u32)
+    };
+
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmSetWindowAttribute(
+            hwnd: *mut c_void,
+            attribute: u32,
+            value: *const c_void,
+            size: u32,
+        ) -> i32;
+    }
+
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            20,
+            (&dark_mode as *const i32).cast(),
+            std::mem::size_of::<i32>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            35,
+            (&caption as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            36,
+            (&text as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            34,
+            (&border as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
 }
 
 fn color_from_array(rgb: [u8; 3]) -> Color32 {
@@ -571,9 +685,15 @@ struct NativeApp {
     accent: Color32,
     appearance: String,
     reduce_motion: bool,
+    #[cfg(windows)]
+    native_titlebar_light: bool,
     connected: bool,
     engine_error: Option<String>,
     input_info: Value,
+    source_preview: Option<egui::TextureHandle>,
+    source_preview_path: String,
+    source_preview_loading: bool,
+    source_preview_error: Option<String>,
     bootstrap: Value,
     models: Value,
     render: Value,
@@ -583,11 +703,13 @@ struct NativeApp {
     python: Value,
     storage_status: Value,
     update: Value,
+    update_install_started: bool,
     saved_settings: Value,
     encoding: Value,
     model_storage: String,
     first_setup: bool,
     backend: String,
+    model_search: String,
     input_path: String,
     output_folder: String,
     output_to_mpv: bool,
@@ -618,6 +740,10 @@ impl NativeApp {
         let accent = saved_accent();
         let appearance = saved_appearance();
         let reduce_motion = saved_reduce_motion();
+        #[cfg(windows)]
+        apply_native_titlebar(ctx, appearance == "light");
+        #[cfg(windows)]
+        let native_titlebar_light = appearance == "light";
         let model_storage = saved_model_storage();
         let first_setup = !model_storage_configured();
         let (engine, engine_error) = match start_engine(&model_storage, first_setup) {
@@ -625,7 +751,7 @@ impl NativeApp {
             Err(error) => (None, Some(error)),
         };
         egui_extras::install_image_loaders(&ctx.egui_ctx);
-        apply_theme(&ctx.egui_ctx, accent, &appearance);
+        apply_theme(&ctx.egui_ctx, accent, &appearance, reduce_motion);
         let mut toggles = HashMap::new();
         for key in [
             "interpolate",
@@ -651,9 +777,15 @@ impl NativeApp {
             accent,
             appearance,
             reduce_motion,
+            #[cfg(windows)]
+            native_titlebar_light,
             connected: false,
             engine_error,
             input_info: Value::Null,
+            source_preview: None,
+            source_preview_path: String::new(),
+            source_preview_loading: false,
+            source_preview_error: None,
             bootstrap: Value::Null,
             models: Value::Null,
             render: Value::Null,
@@ -663,11 +795,13 @@ impl NativeApp {
             python: Value::Null,
             storage_status: Value::Null,
             update: Value::Null,
+            update_install_started: false,
             saved_settings: json!({}),
             encoding: default_encoding(),
             model_storage,
             first_setup,
             backend: "pytorch".to_owned(),
+            model_search: String::new(),
             input_path: String::new(),
             output_folder: String::new(),
             output_to_mpv: false,
@@ -785,6 +919,25 @@ impl NativeApp {
         let _ = self.api.send.send(ApiCommand::Get(endpoint.to_owned()));
     }
 
+    fn request_source_preview(&mut self) {
+        let path = self.input_path.trim();
+        if path.is_empty() {
+            self.source_preview = None;
+            self.source_preview_path.clear();
+            self.source_preview_loading = false;
+            self.source_preview_error = None;
+            return;
+        }
+        self.source_preview = None;
+        self.source_preview_path = path.to_owned();
+        self.source_preview_loading = true;
+        self.source_preview_error = None;
+        self.get(&format!(
+            "/api/video/first_frame?path={}",
+            encode_query_component(path)
+        ));
+    }
+
     fn post(&mut self, endpoint: &str, payload: Value) {
         self.busy = true;
         let _ = self
@@ -808,6 +961,54 @@ impl NativeApp {
             self.update["status"].as_str().unwrap_or_default(),
             self.anime["status"].as_str().unwrap_or_default(),
         )
+    }
+
+    fn other_task_active(&self) -> bool {
+        (!self.connected && self.engine_error.is_none())
+            || self.busy
+            || active_task_from(
+                self.render["status"].as_str().unwrap_or_default(),
+                self.download["active"].as_bool() == Some(true),
+                self.install["status"].as_str().unwrap_or_default(),
+                self.storage_status["status"].as_str().unwrap_or_default(),
+                "",
+                self.anime["status"].as_str().unwrap_or_default(),
+            )
+            .is_some()
+    }
+
+    fn install_downloaded_update(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.update["installer_path"].as_str().map(str::to_owned) else {
+            self.update["status"] = json!("error");
+            self.update["detail"] = json!(
+                "The downloaded update has no installer path. Check for updates and download it again."
+            );
+            return;
+        };
+
+        let result = Command::new(&path)
+            .args(["/VERYSILENT", "/NORESTART", "/CLOSEAPPLICATIONS", "/SP-"])
+            .current_dir(Path::new(&path).parent().unwrap_or_else(|| Path::new(".")))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+
+        match result {
+            Ok(_installer) => {
+                self.update_install_started = true;
+                self.update["status"] = json!("installing");
+                self.update["detail"] = json!(
+                    "Update downloaded. Installing quietly and reopening REAL Video Enhancer…"
+                );
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Err(error) => {
+                self.update["status"] = json!("error");
+                self.update["detail"] =
+                    json!(format!("Could not start the downloaded update: {error}"));
+            }
+        }
     }
 
     fn tray_available(&self) -> bool {
@@ -864,6 +1065,34 @@ impl NativeApp {
 
     fn consume_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.api.receive.try_recv() {
+            if let Some(image) = event.image {
+                if self.source_preview_path == self.input_path.trim() {
+                    self.source_preview_loading = false;
+                    match image {
+                        Ok(bytes) => match image::load_from_memory(&bytes) {
+                            Ok(decoded) => {
+                                let rgba = decoded.to_rgba8();
+                                let size = [rgba.width() as usize, rgba.height() as usize];
+                                let color_image =
+                                    egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                                self.source_preview = Some(ctx.load_texture(
+                                    "rve-source-preview",
+                                    color_image,
+                                    egui::TextureOptions::LINEAR,
+                                ));
+                                self.source_preview_error = None;
+                            }
+                            Err(error) => {
+                                self.source_preview_error =
+                                    Some(format!("Could not decode the video preview: {error}"));
+                            }
+                        },
+                        Err(error) => self.source_preview_error = Some(error),
+                    }
+                }
+                ctx.request_repaint();
+                continue;
+            }
             self.busy = false;
             match event.value {
                 Ok(value) => match event.endpoint.as_str() {
@@ -884,7 +1113,16 @@ impl NativeApp {
                     "/api/startup/install_status" => self.install = value,
                     "/api/animescripter/status" => self.anime = value,
                     "/api/python/info" => self.python = value,
-                    "/api/video/inspect" => self.input_info = value,
+                    "/api/video/inspect" => {
+                        self.input_info = value;
+                        if self.input_info["error"].is_null() {
+                            self.request_source_preview();
+                        } else {
+                            self.source_preview = None;
+                            self.source_preview_loading = false;
+                            self.source_preview_error = None;
+                        }
+                    }
                     "/api/python/pip" => {
                         let command = value["command"].as_str().unwrap_or("pip");
                         let output = value["output"]
@@ -909,6 +1147,7 @@ impl NativeApp {
                     "/api/dialog/select_input" => {
                         self.input_path = value["path"].as_str().unwrap_or_default().to_owned();
                         self.input_info = value["video_info"].clone();
+                        self.request_source_preview();
                         if let Some(parent) = Path::new(&self.input_path).parent() {
                             self.output_folder = parent.to_string_lossy().into_owned();
                         }
@@ -988,28 +1227,27 @@ impl NativeApp {
         changed
     }
 
-    fn source_drop_target(&mut self, ui: &mut egui::Ui) {
+    fn source_drop_target(&mut self, ui: &mut egui::Ui, height: f32) {
         let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        let available = ui.available_width().max(180.0);
+        let available = ui.available_width().max(1.0);
         let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(available, 100.0), egui::Sense::click());
+            ui.allocate_exact_size(Vec2::new(available, height), egui::Sense::click());
         let files_hovered = ui.input(|input| !input.raw.hovered_files.is_empty());
-        let fill = if response.hovered() || files_hovered {
-            palette.accent.gamma_multiply(0.12)
+        let highlighted = response.hovered() || files_hovered;
+        let fill = if highlighted {
+            palette
+                .accent
+                .gamma_multiply(if ui.visuals().dark_mode { 0.12 } else { 0.08 })
         } else {
-            palette.elevated
+            palette.surface
         };
         ui.painter().rect_filled(rect, 12.0, fill);
         ui.painter().rect_stroke(
             rect,
-            12.0,
+            14.0,
             Stroke::new(
-                if response.hovered() || files_hovered {
-                    1.5
-                } else {
-                    1.0
-                },
-                if response.hovered() || files_hovered {
+                if highlighted { 1.6 } else { 1.0 },
+                if highlighted {
                     palette.accent
                 } else {
                     palette.border
@@ -1017,66 +1255,40 @@ impl NativeApp {
             ),
             egui::StrokeKind::Inside,
         );
-        let title = if self.input_path.is_empty() {
-            "Drop a video here or choose a file"
+        let title = if files_hovered {
+            "Release to add your video"
+        } else if self.input_path.is_empty() {
+            "Drop a video here"
         } else {
-            "Replace the source video"
+            "Replace source video"
         };
-        let detail = if self.input_path.is_empty() {
-            "MP4 · MKV · MOV · AVI"
-        } else {
-            Path::new(&self.input_path)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("Selected video")
-        };
-        let upload_center = rect.center() - Vec2::new(0.0, 21.0);
-        ui.painter()
-            .circle_stroke(upload_center, 11.0, Stroke::new(1.6, palette.accent));
-        ui.painter().line_segment(
-            [
-                upload_center - Vec2::new(0.0, 5.0),
-                upload_center + Vec2::new(0.0, 4.0),
-            ],
-            Stroke::new(1.6, palette.accent),
-        );
-        ui.painter().line_segment(
-            [
-                upload_center + Vec2::new(0.0, 4.0),
-                upload_center + Vec2::new(4.0, 0.0),
-            ],
-            Stroke::new(1.6, palette.accent),
-        );
-        ui.painter().line_segment(
-            [
-                upload_center + Vec2::new(0.0, 4.0),
-                upload_center - Vec2::new(4.0, 0.0),
-            ],
-            Stroke::new(1.6, palette.accent),
-        );
-        ui.painter().line_segment(
-            [
-                upload_center + Vec2::new(-5.0, 6.0),
-                upload_center + Vec2::new(5.0, 6.0),
-            ],
-            Stroke::new(1.6, palette.accent),
-        );
+        let icon_rect =
+            egui::Rect::from_center_size(rect.center() - Vec2::new(0.0, 45.0), Vec2::splat(36.0));
+        ui.place(icon_rect, icons::styled("video", palette.accent, 30.0));
         ui.painter().text(
-            rect.center() + Vec2::new(0.0, 5.0),
+            rect.center() + Vec2::new(0.0, 4.0),
             egui::Align2::CENTER_CENTER,
             title,
-            egui::FontId::proportional(14.0),
+            egui::FontId::proportional(15.0),
             palette.text,
         );
         ui.painter().text(
-            rect.center() + Vec2::new(0.0, 27.0),
+            rect.center() + Vec2::new(0.0, 28.0),
             egui::Align2::CENTER_CENTER,
-            detail,
-            egui::FontId::proportional(11.0),
+            "Choose a file or drag it into this window",
+            egui::FontId::proportional(12.0),
             palette.secondary,
         );
         if response.clicked() {
             self.get("/api/dialog/select_input");
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                14.0,
+                Stroke::new(1.5, palette.accent),
+                egui::StrokeKind::Inside,
+            );
         }
         response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, title));
     }
@@ -1225,12 +1437,17 @@ impl NativeApp {
     fn home_page(&mut self, ui: &mut egui::Ui) {
         let light = !ui.visuals().dark_mode;
         let palette = theme::palette(light, self.accent);
-        let system = &self.bootstrap["system"];
-        let backends = system["available_backends"]
+        let backends = self.bootstrap["system"]["available_backends"]
             .as_array()
-            .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
-        let selected_backend_ready = backends.iter().any(|backend| *backend == self.backend);
+        let selected_backend_ready = backends.contains(&self.backend);
         let model_count = self.models.as_object().map_or(0, |categories| {
             categories
                 .values()
@@ -1238,7 +1455,7 @@ impl NativeApp {
                 .map(Vec::len)
                 .sum::<usize>()
         });
-        let disk_space = system["available_disk_gb"].as_f64();
+        let disk_space = self.bootstrap["system"]["available_disk_gb"].as_f64();
 
         egui::Frame::new()
             .fill(palette.surface)
@@ -1249,59 +1466,88 @@ impl NativeApp {
                 ui.columns(2, |columns| {
                     let left = &mut columns[0];
                     left.label(
-                        RichText::new("VIDEO RESTORATION WORKSPACE")
-                            .size(10.0)
+                        RichText::new("REAL VIDEO ENHANCER")
+                            .size(11.0)
                             .strong()
                             .color(palette.accent),
                     );
                     left.add_space(theme::space::SM);
                     left.label(
-                        RichText::new("Bring your footage
-back into focus.")
-                            .size(30.0)
+                        RichText::new("Make more of\nevery frame.")
+                            .size(34.0)
                             .strong()
                             .color(palette.text),
                     );
                     left.add_space(theme::space::SM);
                     left.label(
-                        RichText::new("Upscale, interpolate, and restore video with the models and engine you choose.")
-                            .size(14.0)
+                        RichText::new("Upscale, smooth motion, and restore detail in a clear, local workflow.")
+                            .size(15.0)
                             .color(palette.secondary),
                     );
                     left.add_space(theme::space::LG);
-                    if components::primary_button(left, "Start a new enhancement").clicked() {
+                    if components::primary_button(left, "Choose a video").clicked() {
                         self.page = 1;
+                        self.get("/api/dialog/select_input");
                     }
                     left.add_space(theme::space::SM);
                     left.label(
-                        RichText::new("Native Windows app  ·  Local Python engine")
+                        RichText::new("Your footage stays on your device.")
                             .size(11.0)
                             .color(palette.muted),
                     );
 
                     let right = &mut columns[1];
-                    right.vertical_centered(|ui| {
-                        ui.add_space(theme::space::MD);
-                        ui.add(icons::styled("process", palette.accent, 38.0));
-                        ui.add_space(theme::space::MD);
-                        ui.label(
-                            RichText::new("Enhancement pipeline")
-                                .size(15.0)
-                                .strong()
-                                .color(palette.text),
+                    let width = right.available_width().max(1.0);
+                    let size = Vec2::new(width, (width * 9.0 / 16.0).clamp(150.0, 245.0));
+                    let (rect, _) = right.allocate_exact_size(size, egui::Sense::hover());
+                    right.painter().rect_filled(rect, 12.0, palette.elevated);
+                    if let Some(texture) = self
+                        .source_preview
+                        .as_ref()
+                        .filter(|_| self.source_preview_path == self.input_path.trim())
+                    {
+                        right.place(
+                            rect,
+                            egui::Image::new(texture)
+                                .fit_to_exact_size(size)
+                                .maintain_aspect_ratio(true)
+                                .corner_radius(12.0),
                         );
-                        ui.add_space(theme::space::SM);
-                        ui.label(
-                            RichText::new("Upscale  ·  Interpolate  ·  Restore")
-                                .size(12.0)
-                                .color(palette.secondary),
+                    } else {
+                        let icon_rect = egui::Rect::from_center_size(
+                            rect.center() - Vec2::new(0.0, 13.0),
+                            Vec2::splat(36.0),
                         );
-                        ui.add_space(theme::space::MD);
-                        ui.label(
-                            RichText::new(format!("{} model options in the selected backend catalog", model_count))
-                                .size(11.0)
-                                .color(palette.muted),
+                        right.place(icon_rect, icons::styled("video", palette.accent, 30.0));
+                        right.painter().text(
+                            rect.center() + Vec2::new(0.0, 27.0),
+                            egui::Align2::CENTER_CENTER,
+                            if self.input_path.is_empty() {
+                                "Your video preview appears here"
+                            } else {
+                                "Preparing your video preview…"
+                            },
+                            egui::FontId::proportional(12.0),
+                            palette.secondary,
                         );
+                    }
+                    right.add_space(theme::space::SM);
+                    right.horizontal(|ui| {
+                        let file_name = Path::new(&self.input_path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("No source selected");
+                        ui.label(RichText::new(file_name).strong().color(palette.text));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let count = if !self.connected {
+                                "Catalog unavailable".to_owned()
+                            } else if model_count == 1 {
+                                "1 model option".to_owned()
+                            } else {
+                                format!("{model_count} model options")
+                            };
+                            ui.label(RichText::new(count).size(11.0).color(palette.muted));
+                        });
                     });
                 });
             });
@@ -1413,36 +1659,97 @@ back into focus.")
     }
 
     fn source_and_output_card(&mut self, ui: &mut egui::Ui) {
-        Self::card(ui, "Source and output", |ui| {
-            ui.label("Source video");
-            self.source_drop_target(ui);
-            ui.add_space(theme::space::SM);
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        let compact_source =
+            ui.available_width() < 760.0 || ui.ctx().content_rect().height() < 700.0;
+        Self::card(ui, "Source video", |ui| {
             ui.horizontal(|ui| {
-                let path_width = (ui.available_width() - 82.0).max(100.0);
-                let path_response = ui.add_sized(
-                    Vec2::new(path_width, 38.0),
-                    egui::TextEdit::singleline(&mut self.input_path)
-                        .hint_text("Choose a video file…"),
+                ui.label(
+                    RichText::new("Original footage")
+                        .strong()
+                        .color(palette.text),
                 );
-                if path_response.changed() {
-                    self.input_info = Value::Null;
-                }
-                if !self.input_path.trim().is_empty()
-                    && ui
-                        .button("Inspect")
-                        .on_hover_text("Read video metadata")
-                        .clicked()
-                {
-                    self.post(
-                        "/api/video/inspect",
-                        json!({"path": self.input_path.trim()}),
-                    );
-                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if !self.input_path.is_empty() && ui.button("Replace video").clicked() {
+                        self.get("/api/dialog/select_input");
+                    }
+                    if self.source_preview_loading {
+                        components::status_dot(ui, palette.accent, "Analyzing");
+                    } else if !self.input_path.is_empty() && self.input_info["error"].is_null() {
+                        components::status_dot(ui, palette.success, "Ready");
+                    }
+                });
             });
+            ui.add_space(theme::space::SM);
+            if !compact_source {
+                self.manual_video_path(ui);
+            }
+            ui.add_space(theme::space::SM);
+            let preview_width = ui.available_width().max(1.0);
+            let preview_size = Vec2::new(
+                preview_width,
+                (preview_width * 9.0 / 16.0).clamp(152.0, 270.0),
+            );
+            if let Some(texture) = self
+                .source_preview
+                .as_ref()
+                .filter(|_| self.source_preview_path == self.input_path.trim())
+            {
+                let (rect, _) = ui.allocate_exact_size(preview_size, egui::Sense::hover());
+                ui.painter().rect_filled(rect, 12.0, Color32::BLACK);
+                ui.place(
+                    rect,
+                    egui::Image::new(texture)
+                        .fit_to_exact_size(preview_size)
+                        .maintain_aspect_ratio(true)
+                        .corner_radius(12.0),
+                );
+            } else if self.input_path.trim().is_empty() {
+                self.source_drop_target(ui, if compact_source { 152.0 } else { 218.0 });
+            } else {
+                let (rect, _) = ui.allocate_exact_size(preview_size, egui::Sense::hover());
+                ui.painter().rect_filled(rect, 12.0, palette.elevated);
+                let message = if self.source_preview_loading {
+                    "Preparing a frame from your video…"
+                } else if self.input_info["error"].is_string() {
+                    "This video could not be previewed"
+                } else {
+                    "Video preview unavailable"
+                };
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    message,
+                    egui::FontId::proportional(13.0),
+                    palette.secondary,
+                );
+            }
+            if !self.input_path.trim().is_empty() {
+                let file_name = Path::new(self.input_path.trim())
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(self.input_path.trim());
+                ui.add_space(theme::space::SM);
+                ui.label(
+                    RichText::new(file_name)
+                        .size(14.0)
+                        .strong()
+                        .color(palette.text),
+                );
+                ui.label(
+                    RichText::new(self.input_path.trim())
+                        .size(11.0)
+                        .color(palette.muted),
+                );
+            }
+            if compact_source {
+                ui.add_space(theme::space::SM);
+                self.manual_video_path(ui);
+            }
             if let Some(error) = self.input_info["error"].as_str() {
                 ui.colored_label(
                     theme::palette(!ui.visuals().dark_mode, self.accent).warning,
-                    error,
+                    format!("Video details could not be read: {error}"),
                 );
             } else if let (Some(width), Some(height)) = (
                 self.input_info["width"].as_u64(),
@@ -1451,96 +1758,253 @@ back into focus.")
                 let fps = self.input_info["fps"].as_f64().unwrap_or(0.0);
                 let duration = self.input_info["duration_seconds"].as_f64().unwrap_or(0.0);
                 let codec = self.input_info["codec"].as_str().unwrap_or("unknown codec");
-                ui.label(
-                    RichText::new(format!(
-                        "{width} × {height}  ·  {fps:.2} fps  ·  {duration:.1}s  ·  {codec}"
-                    ))
-                    .size(12.0)
-                    .color(secondary_text_color(!ui.visuals().dark_mode)),
-                );
+                let duration_label = if duration >= 3600.0 {
+                    format!(
+                        "{:02}:{:02}:{:02}",
+                        (duration / 3600.0) as u32,
+                        (duration / 60.0) as u32 % 60,
+                        duration as u32 % 60
+                    )
+                } else {
+                    format!(
+                        "{:02}:{:02}",
+                        (duration / 60.0) as u32,
+                        duration as u32 % 60
+                    )
+                };
+                ui.add_space(theme::space::SM);
+                ui.horizontal_wrapped(|ui| {
+                    components::metadata_chip(ui, &format!("{width} × {height}"), self.accent);
+                    components::metadata_chip(ui, &format!("{fps:.2} fps"), self.accent);
+                    components::metadata_chip(ui, &duration_label, self.accent);
+                    components::metadata_chip(ui, &codec.to_uppercase(), self.accent);
+                    if let Some(bytes) = self.input_info["size_bytes"].as_u64() {
+                        let size = if bytes >= 1_073_741_824 {
+                            format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+                        } else {
+                            format!("{:.0} MB", bytes as f64 / 1_048_576.0)
+                        };
+                        components::metadata_chip(ui, &size, self.accent);
+                    }
+                });
             }
-            ui.add_space(8.0);
-            if self.output_to_mpv {
-                ui.label("Output is sent directly to MPV.");
-            } else {
-                ui.label("Save enhanced video to");
+            if let Some(error) = self.source_preview_error.as_deref() {
+                ui.colored_label(palette.warning, format!("Preview: {error}"));
+            }
+        });
+    }
+
+    fn manual_video_path(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Enter a video path manually")
+            .id_salt("manual-video-path")
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    let path_width = (ui.available_width() - 96.0).max(100.0);
+                    let path_response = ui.add_sized(
+                        Vec2::new((ui.available_width() - 72.0).max(120.0), 38.0),
+                        egui::TextEdit::singleline(&mut self.input_path)
+                            .hint_text("Paste a video file path"),
+                    );
+                    if path_response.changed() {
+                        self.input_info = Value::Null;
+                        self.source_preview = None;
+                        self.source_preview_path.clear();
+                        self.source_preview_loading = false;
+                        self.source_preview_error = None;
+                    }
+                    if ui.button("Inspect").clicked() {
+                        self.input_info = json!({"status": "inspecting"});
+                        self.post(
+                            "/api/video/inspect",
+                            json!({"path": self.input_path.trim()}),
+                        );
+                    }
+                });
+            });
+    }
+
+    fn output_configuration_card(&mut self, ui: &mut egui::Ui) {
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        Self::card(ui, "Output", |ui| {
+            if self.output_to_mpv {
+                components::status_dot(ui, palette.accent, "Send enhanced video to MPV");
+            } else {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new("Save location").strong());
+                        ui.label(
+                            RichText::new("The engine creates the enhanced file here.")
+                                .size(11.0)
+                                .color(palette.secondary),
+                        );
+                    });
+                    ui.add_space(theme::space::MD);
+                    let path_width = (ui.available_width() - 84.0).max(110.0);
                     ui.add_sized(
                         Vec2::new(path_width, 38.0),
                         egui::TextEdit::singleline(&mut self.output_folder)
-                            .hint_text("Choose an output folder…"),
+                            .hint_text("Choose an output folder"),
                     );
-                    if ui.button("Browse…").clicked() {
+                    if ui.button("Browse").clicked() {
                         self.get("/api/dialog/select_output");
                     }
                 });
             }
-            ui.add_space(10.0);
-            egui::ComboBox::from_label("Processing backend")
-                .selected_text(&self.backend)
-                .show_ui(ui, |ui| {
-                    for backend in ["pytorch", "ncnn", "tensorrt"] {
-                        if ui
-                            .selectable_value(&mut self.backend, backend.to_owned(), backend)
-                            .changed()
-                        {
-                            self.save_render_defaults();
-                            self.get(&format!("/api/models?backend={}", self.backend));
+            ui.add_space(theme::space::SM);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Processing engine").color(palette.secondary));
+                egui::ComboBox::from_id_salt("process-backend")
+                    .selected_text(self.backend.to_uppercase())
+                    .show_ui(ui, |ui| {
+                        for backend in ["pytorch", "ncnn", "tensorrt"] {
+                            if ui
+                                .selectable_value(
+                                    &mut self.backend,
+                                    backend.to_owned(),
+                                    backend.to_uppercase(),
+                                )
+                                .changed()
+                            {
+                                self.save_render_defaults();
+                                self.get(&format!("/api/models?backend={}", self.backend));
+                            }
                         }
-                    }
-                });
+                    });
+                ui.label(
+                    RichText::new("Choose an installed backend in Runtime.")
+                        .size(11.0)
+                        .color(palette.muted),
+                );
+            });
         });
     }
 
     fn enhancement_models_card(&mut self, ui: &mut egui::Ui) {
         let mut selection_changed = false;
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        let has_model_options = self.models.as_object().is_some_and(|categories| {
+            categories.iter().any(|(key, value)| {
+                key != "model_status" && value.as_array().is_some_and(|models| !models.is_empty())
+            })
+        });
         Self::card(ui, "Enhancement models", |ui| {
-            for (key, label) in [
-                ("upscale", "Upscale"),
-                ("interpolate", "Interpolate"),
-                ("decompress", "Decompress"),
-                ("denoise", "Denoise"),
-                ("deblur", "Deblur"),
-            ] {
-                ui.horizontal(|ui| {
-                    let enabled = self.toggles.entry(key.to_owned()).or_insert(false);
-                    selection_changed |= ui.checkbox(enabled, label).changed();
-                    selection_changed |= self.model_picker(ui, key);
-                });
-            }
-            let interpolate_enabled = self.toggles.get("interpolate").copied().unwrap_or(false);
-            let upscale_enabled = self.toggles.get("upscale").copied().unwrap_or(false);
-            if interpolate_enabled {
-                ui.add(
-                    egui::Slider::new(&mut self.interpolate_factor, 2.0..=8.0)
-                        .text("Frame multiplier"),
+            ui.label(
+                RichText::new("Choose the improvements for this render.")
+                    .size(12.0)
+                    .color(palette.secondary),
+            );
+            if !self.connected || !has_model_options {
+                ui.add_space(theme::space::XS);
+                ui.label(
+                    RichText::new(if !self.connected {
+                        "Model choices will appear when the local engine connects."
+                    } else {
+                        "No models are available for this backend. Check Downloads."
+                    })
+                    .size(11.0)
+                    .color(palette.warning),
                 );
             }
-            if upscale_enabled {
-                ui.add(egui::Slider::new(&mut self.upscale_scale, 0..=4).text("Scale override"));
+            ui.add_space(theme::space::SM);
+            for (key, label, detail) in [
+                ("upscale", "Upscale", "Increase image resolution"),
+                ("interpolate", "Interpolate", "Create smoother motion"),
+                ("decompress", "Decompress", "Restore compression detail"),
+                ("denoise", "Denoise", "Reduce image noise"),
+                ("deblur", "Deblur", "Recover edge definition"),
+            ] {
+                egui::Frame::new()
+                    .fill(palette.surface)
+                    .stroke(Stroke::new(1.0, palette.border))
+                    .corner_radius(10.0)
+                    .inner_margin(egui::Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            egui::Frame::new()
+                                .fill(palette.accent.gamma_multiply(if ui.visuals().dark_mode {
+                                    0.14
+                                } else {
+                                    0.10
+                                }))
+                                .corner_radius(8.0)
+                                .inner_margin(egui::Margin::same(7))
+                                .show(ui, |ui| {
+                                    ui.add(icons::styled(key, palette.accent, 19.0));
+                                });
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(label).strong().color(palette.text));
+                                ui.label(RichText::new(detail).size(11.0).color(palette.secondary));
+                            });
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let enabled = self.toggles.entry(key.to_owned()).or_insert(false);
+                                selection_changed |= components::toggle(
+                                    ui,
+                                    enabled,
+                                    label,
+                                    self.accent,
+                                    self.reduce_motion,
+                                )
+                                .changed();
+                            });
+                        });
+                        let enabled = self.toggles.get(key).copied().unwrap_or(false);
+                        let options = self.model_choices(key);
+                        if !options.is_empty() {
+                            ui.add_space(theme::space::XS);
+                            selection_changed |= self.model_picker(ui, key);
+                            let selected = self
+                                .selected_models
+                                .get(key)
+                                .map(String::as_str)
+                                .unwrap_or_default();
+                            if !selected.is_empty() {
+                                let installed = self.models["model_status"][key][selected]
+                                    .as_bool()
+                                    == Some(true);
+                                let (status, color) = if installed {
+                                    ("Installed", palette.success)
+                                } else {
+                                    ("Download required", palette.warning)
+                                };
+                                components::status_dot(ui, color, status);
+                            }
+                        }
+                        if enabled && key == "interpolate" {
+                            ui.add(
+                                egui::Slider::new(&mut self.interpolate_factor, 2.0..=8.0)
+                                    .text("Frame multiplier"),
+                            );
+                        }
+                        if enabled && key == "upscale" {
+                            ui.add(
+                                egui::Slider::new(&mut self.upscale_scale, 0..=4)
+                                    .text("Scale override"),
+                            );
+                        }
+                    });
+                ui.add_space(theme::space::XS);
             }
-            ui.checkbox(
-                self.toggles.entry("slomo".to_owned()).or_insert(false),
-                "Slow motion output",
-            );
+            ui.horizontal(|ui| {
+                ui.add(icons::styled("slomo", palette.secondary, 18.0));
+                ui.label(RichText::new("Slow motion output").color(palette.text));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let enabled = self.toggles.entry("slomo".to_owned()).or_insert(false);
+                    selection_changed |= components::toggle(
+                        ui,
+                        enabled,
+                        "Slow motion output",
+                        self.accent,
+                        self.reduce_motion,
+                    )
+                    .changed();
+                });
+            });
         });
         if selection_changed {
             self.save_render_defaults();
         }
     }
 
-    fn process_page(&mut self, ui: &mut egui::Ui) {
-        if self.first_setup {
-            Self::card(ui, "Set up your first enhancement", |ui| {
-                ui.label("Choose WSL Ubuntu or Windows for model storage, then prepare the runtime and models before rendering.");
-                ui.add_space(theme::space::SM);
-                if components::primary_button(ui, "Choose model storage").clicked() {
-                    self.page = 5;
-                }
-            });
-            ui.add_space(theme::space::MD);
-        }
+    fn render_blockers(&self) -> Vec<String> {
         let ready_backends = self.bootstrap["system"]["available_backends"]
             .as_array()
             .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
@@ -1548,7 +2012,6 @@ back into focus.")
         let backend_ready = ready_backends
             .iter()
             .any(|backend| *backend == self.backend);
-        let render_preparing = self.render["status"] == "preparing";
         let active = matches!(
             self.render["status"].as_str(),
             Some("preparing" | "running" | "paused" | "stopping")
@@ -1564,6 +2027,10 @@ back into focus.")
             blockers.push("Choose an input video.".to_owned());
         } else if !Path::new(self.input_path.trim()).is_file() {
             blockers.push("The selected input path is not an existing file.".to_owned());
+        } else if self.input_info["error"].is_string() {
+            blockers.push("Choose a supported video file and inspect it first.".to_owned());
+        } else if self.input_info["width"].as_u64().is_none() {
+            blockers.push("Inspect the selected video before rendering.".to_owned());
         }
         if !self.output_to_mpv && self.output_folder.trim().is_empty() {
             blockers.push("Choose an output folder.".to_owned());
@@ -1587,9 +2054,235 @@ back into focus.")
         if missing_model {
             blockers.push("Choose a model for each enabled enhancement.".to_owned());
         }
-        let can_start = blockers.is_empty() && !active && !self.busy;
+        if active {
+            blockers.push("A render is already active.".to_owned());
+        }
+        if self.busy {
+            blockers.push("Waiting for the engine to finish its current action.".to_owned());
+        }
+        blockers
+    }
 
-        if ui.available_width() < 860.0 {
+    fn workflow_steps(&self, ui: &mut egui::Ui) {
+        let source_ready = self.input_info["width"].as_u64().is_some();
+        let has_enhancement = ["upscale", "interpolate", "decompress", "denoise", "deblur"]
+            .iter()
+            .any(|key| self.toggles.get(*key).copied().unwrap_or(false));
+        let output_ready = self.output_to_mpv || !self.output_folder.trim().is_empty();
+        let states = [source_ready, has_enhancement, output_ready];
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        ui.horizontal_wrapped(|ui| {
+            for (index, (label, complete)) in ["Source", "Enhance", "Output"]
+                .into_iter()
+                .zip(states)
+                .enumerate()
+            {
+                let color = if complete {
+                    palette.success
+                } else {
+                    palette.secondary
+                };
+                egui::Frame::new()
+                    .fill(if complete {
+                        palette.success.gamma_multiply(0.10)
+                    } else {
+                        palette.elevated
+                    })
+                    .corner_radius(20.0)
+                    .inner_margin(egui::Margin::symmetric(12, 7))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if complete {
+                                ui.add(icons::styled("check", color, 14.0));
+                            } else {
+                                ui.label(
+                                    RichText::new((index + 1).to_string()).strong().color(color),
+                                );
+                            }
+                            ui.label(RichText::new(label).strong().color(palette.text));
+                        });
+                    });
+                if index < 2 {
+                    ui.label(RichText::new("›").color(palette.muted));
+                }
+            }
+        });
+    }
+
+    fn render_action_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        active: bool,
+        preparing: bool,
+        paused: bool,
+        status: &str,
+        can_start: bool,
+    ) {
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if active {
+                if !preparing && status != "stopping" {
+                    if ui.button(if paused { "Resume" } else { "Pause" }).clicked() {
+                        self.post("/api/render/pause", json!({"paused": !paused}));
+                    }
+                    if ui.button("Cancel render").clicked() {
+                        self.post("/api/render/stop", json!({}));
+                    }
+                }
+                let label = if preparing {
+                    "Preparing…"
+                } else if status == "stopping" {
+                    "Stopping…"
+                } else {
+                    "Render in progress"
+                };
+                ui.add_enabled(
+                    false,
+                    egui::Button::new(label).min_size(Vec2::new(190.0, 44.0)),
+                );
+            } else {
+                let response =
+                    components::primary_button_enabled(ui, "Start render", can_start, 190.0);
+                if response.clicked() {
+                    self.start_render();
+                }
+            }
+        });
+    }
+
+    fn render_action_bar(&mut self, ui: &mut egui::Ui) {
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        let status = self.render["status"].as_str().unwrap_or("idle").to_owned();
+        let preparing = status == "preparing";
+        let active = matches!(
+            status.as_str(),
+            "preparing" | "running" | "paused" | "stopping"
+        );
+        let paused = status == "paused";
+        let blockers = self.render_blockers();
+        let can_start = blockers.is_empty() && !active;
+        let title = if preparing {
+            "Preparing render"
+        } else if paused {
+            "Render paused"
+        } else if active {
+            "Rendering video"
+        } else if status == "completed" {
+            "Render complete"
+        } else if status == "error" {
+            "Render needs attention"
+        } else if !blockers.is_empty() {
+            "Setup required"
+        } else {
+            "Ready to render"
+        };
+        let compact = ui.available_width() < 960.0;
+        if compact {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).size(14.0).strong().color(palette.text));
+                self.render_action_controls(ui, active, preparing, paused, &status, can_start);
+            });
+            if active {
+                let frame = self.render["current_frame"].as_u64().unwrap_or(0);
+                let fps = self.render["gen_fps"].as_f64();
+                let eta = self.render["eta"].as_str().unwrap_or("--");
+                let mut details = Vec::new();
+                if frame > 0 {
+                    details.push(format!("Frame {frame}"));
+                }
+                if let Some(fps) = fps {
+                    details.push(format!("{fps:.1} fps"));
+                }
+                if eta != "--" && !eta.is_empty() {
+                    details.push(format!("ETA {eta}"));
+                }
+                ui.label(
+                    RichText::new(if details.is_empty() {
+                        "The renderer is starting…".to_owned()
+                    } else {
+                        details.join("  ·  ")
+                    })
+                    .size(11.0)
+                    .color(palette.secondary),
+                );
+            } else if let Some(blocker) = blockers.first() {
+                ui.label(RichText::new(blocker).size(11.0).color(palette.warning));
+            }
+        } else {
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(title).size(14.0).strong().color(palette.text));
+                    if active {
+                        let frame = self.render["current_frame"].as_u64().unwrap_or(0);
+                        let fps = self.render["gen_fps"].as_f64();
+                        let eta = self.render["eta"].as_str().unwrap_or("--");
+                        let mut details = Vec::new();
+                        if frame > 0 {
+                            details.push(format!("Frame {frame}"));
+                        }
+                        if let Some(fps) = fps {
+                            details.push(format!("{fps:.1} fps"));
+                        }
+                        if eta != "--" && !eta.is_empty() {
+                            details.push(format!("ETA {eta}"));
+                        }
+                        ui.label(
+                            RichText::new(if details.is_empty() {
+                                "The renderer is starting…".to_owned()
+                            } else {
+                                details.join("  ·  ")
+                            })
+                            .size(11.0)
+                            .color(palette.secondary),
+                        );
+                    } else if let Some(blocker) = blockers.first() {
+                        ui.label(RichText::new(blocker).size(11.0).color(palette.warning));
+                    } else {
+                        ui.label(
+                            RichText::new("Your source, enhancements, and output are set.")
+                                .size(11.0)
+                                .color(palette.secondary),
+                        );
+                    }
+                });
+                self.render_action_controls(ui, active, preparing, paused, &status, can_start);
+            });
+        }
+        if let Some(error) = self.render["error"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        {
+            ui.colored_label(palette.error, error);
+        }
+    }
+
+    fn process_page(&mut self, ui: &mut egui::Ui) {
+        if self.first_setup {
+            let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+            egui::Frame::new()
+                .fill(palette.warning.gamma_multiply(0.10))
+                .stroke(Stroke::new(1.0, palette.warning.gamma_multiply(0.35)))
+                .corner_radius(10.0)
+                .inner_margin(egui::Margin::symmetric(14, 10))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("First setup").strong().color(palette.text));
+                        ui.label(
+                            RichText::new(
+                                "Choose model storage and prepare the runtime before rendering.",
+                            )
+                            .color(palette.secondary),
+                        );
+                        if ui.button("Set up now").clicked() {
+                            self.page = 5;
+                        }
+                    });
+                });
+            ui.add_space(theme::space::MD);
+        }
+        self.workflow_steps(ui);
+        ui.add_space(theme::space::MD);
+
+        if !process_uses_two_columns(ui.available_width()) {
             self.source_and_output_card(ui);
             ui.add_space(theme::space::MD);
             self.enhancement_models_card(ui);
@@ -1600,86 +2293,20 @@ back into focus.")
             });
         }
         ui.add_space(theme::space::MD);
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        Self::card(ui, "Render", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let response = components::primary_button_enabled(
-                    ui,
-                    if active {
-                        if render_preparing {
-                            "Preparing render…"
-                        } else {
-                            "Render in progress"
-                        }
-                    } else {
-                        "Start render"
-                    },
-                    can_start,
-                    220.0,
-                );
-                if response.clicked() {
-                    self.start_render();
-                }
-                if active && !render_preparing {
-                    let paused = self.render["paused"].as_bool().unwrap_or(false);
-                    if ui.button(if paused { "Resume" } else { "Pause" }).clicked() {
-                        self.post("/api/render/pause", json!({"paused": !paused}));
-                    }
-                    if ui.button("Stop render").clicked() {
-                        self.post("/api/render/stop", json!({}));
-                    }
-                }
-                if self.busy && !active {
-                    ui.label(RichText::new("Preparing request…").color(palette.secondary));
-                }
-            });
-            if !can_start {
-                let message = if render_preparing {
-                    "Preparing the renderer and selected models."
-                } else if active {
-                    "A render is already running."
-                } else if self.busy {
-                    "Waiting for the engine to finish its current action."
-                } else {
-                    blockers
-                        .first()
-                        .map(String::as_str)
-                        .unwrap_or("Complete the setup before rendering.")
-                };
-                ui.label(RichText::new(message).color(palette.warning));
-                if blockers.len() > 1 && !active && !self.busy {
-                    ui.label(
-                        RichText::new(blockers[1..].join("  "))
-                            .size(12.0)
-                            .color(palette.secondary),
-                    );
-                }
-            }
-            ui.add_space(theme::space::MD);
-            self.render_summary(ui);
-            if let Some(error) = self.render["error"]
-                .as_str()
-                .filter(|value| !value.is_empty())
-            {
-                ui.colored_label(
-                    theme::palette(!ui.visuals().dark_mode, self.accent).error,
-                    error,
-                );
-            }
-            if let Some(lines) = self.render["log_lines"].as_array() {
-                egui::CollapsingHeader::new("Render activity")
-                    .id_salt("render-activity")
-                    .show(ui, |ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(140.0)
-                            .show(ui, |ui| {
-                                for line in lines.iter().rev().take(8).filter_map(Value::as_str) {
-                                    ui.label(RichText::new(line).monospace().size(11.0));
-                                }
-                            });
-                    });
-            }
-        });
+        self.output_configuration_card(ui);
+        if let Some(lines) = self.render["log_lines"].as_array() {
+            egui::CollapsingHeader::new("Render activity")
+                .id_salt("render-activity")
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(140.0)
+                        .show(ui, |ui| {
+                            for line in lines.iter().rev().take(8).filter_map(Value::as_str) {
+                                ui.label(RichText::new(line).monospace().size(11.0));
+                            }
+                        });
+                });
+        }
     }
 
     fn render_summary(&self, ui: &mut egui::Ui) {
@@ -1734,16 +2361,7 @@ back into focus.")
                         .filter_map(Value::as_str)
                         .map(str::to_owned)
                         .collect::<Vec<_>>();
-                    let installed =
-                        self.models["model_status"][name]
-                            .as_object()
-                            .map_or(0, |status| {
-                                status
-                                    .values()
-                                    .filter(|value| value.as_bool() == Some(true))
-                                    .count()
-                            });
-                    (name.replace('_', " "), name.clone(), names, installed)
+                    (name.replace('_', " "), name.clone(), names)
                 })
                 .collect::<Vec<_>>()
         });
@@ -1859,34 +2477,119 @@ back into focus.")
                     .size(12.0)
                     .color(palette.secondary),
             );
+            ui.add_space(theme::space::SM);
+            let query = self.model_search.trim().to_lowercase();
+            ui.horizontal(|ui| {
+                ui.add(icons::styled("search", palette.muted, 16.0));
+                ui.add_sized(
+                    Vec2::new(ui.available_width().min(420.0), 38.0),
+                    egui::TextEdit::singleline(&mut self.model_search)
+                        .hint_text("Search model names or categories…")
+                        .margin(Vec2::new(12.0, 9.0)),
+                );
+                let visible = catalog
+                    .iter()
+                    .map(|(display, _, names)| {
+                        if query.is_empty() || display.to_lowercase().contains(&query) {
+                            names.len()
+                        } else {
+                            names
+                                .iter()
+                                .filter(|name| name.to_lowercase().contains(&query))
+                                .count()
+                        }
+                    })
+                    .sum::<usize>();
+                ui.label(
+                    RichText::new(format!("{visible} shown"))
+                        .size(11.0)
+                        .color(palette.muted),
+                );
+            });
             egui::ScrollArea::vertical()
-                .max_height(280.0)
+                .max_height(420.0)
                 .show(ui, |ui| {
                     if catalog.is_empty() {
-                        ui.label("The catalog is loading from the selected backend.");
+                        ui.label(if self.connected {
+                            "No model categories are available for this backend."
+                        } else {
+                            "The model catalog appears when the local engine connects."
+                        });
+                    } else if !query.is_empty()
+                        && catalog.iter().all(|(display, _, names)| {
+                            !display.to_lowercase().contains(&query)
+                                && names
+                                    .iter()
+                                    .all(|name| !name.to_lowercase().contains(&query))
+                        })
+                    {
+                        ui.label("No models match this search.");
                     }
-                    for (display, key, names, installed) in &catalog {
+                    for (display, key, names) in &catalog {
+                        let filtered = names
+                            .iter()
+                            .filter(|name| {
+                                query.is_empty()
+                                    || name.to_lowercase().contains(&query)
+                                    || display.to_lowercase().contains(&query)
+                            })
+                            .collect::<Vec<_>>();
+                        if filtered.is_empty() {
+                            continue;
+                        }
+                        let installed_visible = filtered
+                            .iter()
+                            .filter(|name| {
+                                self.models["model_status"][key][name.as_str()].as_bool()
+                                    == Some(true)
+                            })
+                            .count();
                         egui::CollapsingHeader::new(format!(
-                            "{display}  ·  {installed}/{} installed",
-                            names.len()
+                            "{display}  ·  {installed_visible}/{} installed",
+                            filtered.len()
                         ))
                         .id_salt(("model-category", key))
                         .show(ui, |ui| {
-                            for name in names {
-                                let ready =
-                                    self.models["model_status"][key][name].as_bool() == Some(true);
-                                ui.horizontal(|ui| {
-                                    components::status_dot(
-                                        ui,
-                                        if ready {
-                                            palette.success
-                                        } else {
-                                            palette.muted
-                                        },
-                                        if ready { "Installed" } else { "Available" },
-                                    );
-                                    ui.label(name);
-                                });
+                            for name in filtered {
+                                let ready = self.models["model_status"][key][name.as_str()]
+                                    .as_bool()
+                                    == Some(true);
+                                egui::Frame::new()
+                                    .fill(palette.elevated)
+                                    .corner_radius(8.0)
+                                    .inner_margin(egui::Margin::symmetric(10, 6))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            components::status_dot(
+                                                ui,
+                                                if ready {
+                                                    palette.success
+                                                } else {
+                                                    palette.muted
+                                                },
+                                                if ready { "Installed" } else { "Available" },
+                                            );
+                                            ui.label(RichText::new(name).strong());
+                                            ui.with_layout(
+                                                Layout::right_to_left(Align::Center),
+                                                |ui| {
+                                                    if !ready
+                                                        && !active
+                                                        && !busy
+                                                        && ui.small_button("Download").clicked()
+                                                    {
+                                                        self.post(
+                                                            "/api/models/download",
+                                                            json!({
+                                                                "backend": self.backend,
+                                                                "selections": {key: name}
+                                                            }),
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    });
                             }
                         });
                     }
@@ -2004,30 +2707,34 @@ back into focus.")
         Self::card(ui, "Hardware and compatibility", |ui| {
             ui.columns(2, |columns| {
                 columns[0].vertical(|ui| {
-                    for (key, label) in [("os", "Operating system"), ("cuda_version", "CUDA")] {
-                        ui.label(RichText::new(label).size(11.0).color(palette.muted));
-                        ui.label(system[key].as_str().unwrap_or_else(|| {
-                            if system[key].is_null() {
-                                "Not detected"
-                            } else {
-                                "Unknown"
-                            }
-                        }));
+                    for (key, label) in
+                        [("os", "Operating system"), ("cuda_version", "CUDA version")]
+                    {
+                        egui::Frame::new()
+                            .fill(palette.elevated)
+                            .corner_radius(8.0)
+                            .inner_margin(egui::Margin::symmetric(12, 9))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(label).size(11.0).color(palette.muted));
+                                let value = system[key].as_str().unwrap_or("Not detected");
+                                ui.label(RichText::new(value).strong().color(palette.text));
+                            });
                     }
                 });
                 columns[1].vertical(|ui| {
-                    for (key, label) in [
-                        ("gpu_name", "Graphics device"),
-                        ("available_backends", "Available backends"),
+                    let gpu = system["gpu_name"].as_str().unwrap_or("Not detected");
+                    for (label, value) in [
+                        ("Graphics device", gpu),
+                        ("Available backends", available.as_str()),
                     ] {
-                        ui.label(RichText::new(label).size(11.0).color(palette.muted));
-                        ui.label(system[key].as_str().unwrap_or_else(|| {
-                            if system[key].is_null() {
-                                "Not detected"
-                            } else {
-                                "Unknown"
-                            }
-                        }));
+                        egui::Frame::new()
+                            .fill(palette.elevated)
+                            .corner_radius(8.0)
+                            .inner_margin(egui::Margin::symmetric(12, 9))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(label).size(11.0).color(palette.muted));
+                                ui.label(RichText::new(value).strong().color(palette.text));
+                            });
                     }
                 });
             });
@@ -2127,66 +2834,128 @@ back into focus.")
     }
 
     fn appearance_settings(&mut self, ui: &mut egui::Ui) {
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
         Self::card(ui, "Appearance", |ui| {
-            let light = !ui.visuals().dark_mode;
-            ui.label("Interface theme");
+            ui.label(
+                RichText::new("Choose a comfortable look for long editing sessions.")
+                    .size(12.0)
+                    .color(palette.secondary),
+            );
+            ui.add_space(theme::space::SM);
+            ui.label(
+                RichText::new("Theme")
+                    .size(11.0)
+                    .strong()
+                    .color(palette.muted),
+            );
             ui.horizontal(|ui| {
                 for (label, value) in [("Light", "light"), ("Dark", "dark")] {
-                    if ui
-                        .selectable_label(self.appearance == value, label)
-                        .clicked()
-                    {
+                    let selected = self.appearance == value;
+                    let response = ui.add_sized(
+                        Vec2::new(90.0, 38.0),
+                        egui::Button::new(label)
+                            .fill(if selected {
+                                palette.accent.gamma_multiply(0.16)
+                            } else {
+                                palette.elevated
+                            })
+                            .stroke(Stroke::new(
+                                if selected { 1.4 } else { 1.0 },
+                                if selected {
+                                    palette.accent
+                                } else {
+                                    palette.border
+                                },
+                            )),
+                    );
+                    if response.clicked() {
                         self.appearance = value.to_owned();
                         update_ui_setting("appearance", json!(self.appearance));
-                        apply_theme(ui.ctx(), self.accent, &self.appearance);
+                        apply_theme(ui.ctx(), self.accent, &self.appearance, self.reduce_motion);
                     }
                 }
             });
-            let mut reduce_motion = self.reduce_motion;
-            if ui
-                .checkbox(&mut reduce_motion, "Reduce animation")
-                .changed()
-            {
-                self.reduce_motion = reduce_motion;
-                update_ui_setting("reduce_motion", json!(reduce_motion));
-            }
-            ui.add_space(8.0);
-            ui.label("Accent color");
+            ui.add_space(theme::space::MD);
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Reduce motion").strong());
+                    ui.label(
+                        RichText::new("Shorten transitions and loading animation.")
+                            .size(11.0)
+                            .color(palette.secondary),
+                    );
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if components::toggle(
+                        ui,
+                        &mut self.reduce_motion,
+                        "Reduce motion",
+                        self.accent,
+                        true,
+                    )
+                    .changed()
+                    {
+                        update_ui_setting("reduce_motion", json!(self.reduce_motion));
+                        apply_theme(ui.ctx(), self.accent, &self.appearance, self.reduce_motion);
+                    }
+                });
+            });
+            ui.add_space(theme::space::MD);
+            ui.label(
+                RichText::new("Accent color")
+                    .size(11.0)
+                    .strong()
+                    .color(palette.muted),
+            );
             ui.horizontal_wrapped(|ui| {
                 for (label, rgb) in theme::ACCENTS {
                     let color = color_from_array(rgb);
+                    let selected = self.accent == color;
                     let response = ui.add_sized(
-                        Vec2::new(118.0, 42.0),
-                        egui::Button::new(
-                            RichText::new(label).strong().color(contrast_text(color)),
-                        )
-                        .fill(color)
-                        .stroke(Stroke::new(
-                            if self.accent == color { 2.0 } else { 1.0 },
-                            if self.accent == color {
-                                ui.visuals().text_color()
-                            } else {
-                                color
-                            },
-                        )),
+                        Vec2::new(88.0, 38.0),
+                        egui::Button::new(label)
+                            .fill(palette.elevated)
+                            .stroke(Stroke::new(
+                                if selected { 1.6 } else { 1.0 },
+                                if selected { color } else { palette.border },
+                            )),
+                    );
+                    ui.painter().circle_filled(
+                        egui::pos2(response.rect.left() + 11.0, response.rect.center().y),
+                        4.0,
+                        color,
                     );
                     if response.clicked() {
                         self.accent = color;
                         save_accent(color);
-                        apply_theme(ui.ctx(), color, &self.appearance);
+                        apply_theme(ui.ctx(), color, &self.appearance, self.reduce_motion);
                     }
+                    response.on_hover_text(format!("Use the {label} accent"));
                 }
-                if ui.color_edit_button_srgba(&mut self.accent).changed() {
-                    save_accent(self.accent);
-                    apply_theme(ui.ctx(), self.accent, &self.appearance);
-                }
+                ui.horizontal(|ui| {
+                    if ui.color_edit_button_srgba(&mut self.accent).changed() {
+                        save_accent(self.accent);
+                        apply_theme(ui.ctx(), self.accent, &self.appearance, self.reduce_motion);
+                    }
+                    ui.label(
+                        RichText::new("Custom accent")
+                            .size(11.0)
+                            .color(palette.secondary),
+                    );
+                });
             });
+            if self.reduce_motion {
+                ui.add_space(theme::space::SM);
+                ui.label(
+                    RichText::new("Reduced motion is on.")
+                        .size(11.0)
+                        .color(palette.secondary),
+                );
+            }
             ui.label(
-                RichText::new(
-                    "Your color is saved locally and updates the Rust interface immediately.",
-                )
-                .size(11.0)
-                .color(secondary_text_color(light)),
+                RichText::new("Your accent color is saved on this device.")
+                    .size(11.0)
+                    .color(palette.secondary),
             );
         });
     }
@@ -2196,16 +2965,12 @@ back into focus.")
             ui.label("Choose where model weights are installed and read from.");
             egui::ComboBox::from_label("Storage location")
                 .selected_text(if self.model_storage == "wsl" {
-                    "WSL Ubuntu · Ubuntai"
+                    "WSL Ubuntu"
                 } else {
                     "This PC · Windows"
                 })
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.model_storage,
-                        "wsl".to_owned(),
-                        "WSL Ubuntu · Ubuntai",
-                    );
+                    ui.selectable_value(&mut self.model_storage, "wsl".to_owned(), "WSL Ubuntu");
                     ui.selectable_value(
                         &mut self.model_storage,
                         "windows".to_owned(),
@@ -2313,8 +3078,11 @@ back into focus.")
             if self.update["status"] == "downloaded" {
                 ui.colored_label(
                     theme::palette(!ui.visuals().dark_mode, self.accent).success,
-                    "Installer downloaded and ready",
+                    "Update downloaded · starting installation…",
                 );
+            }
+            if self.update["status"] == "installing" {
+                ui.label("Installing quietly and reopening REAL Video Enhancer…");
             }
             if let Some(url) = self.update["release_url"].as_str() {
                 ui.hyperlink_to("View release notes on GitHub", url);
@@ -2349,25 +3117,18 @@ back into focus.")
                 if self.update["update_available"].as_bool() == Some(true)
                     && self.update["status"] != "downloading"
                     && self.update["status"] != "downloaded"
-                    && ui.button("Download update").clicked()
+                    && self.update["status"] != "installing"
+                    && ui
+                        .add_enabled(
+                            !self.other_task_active(),
+                            egui::Button::new("Download & install"),
+                        )
+                        .clicked()
                 {
                     self.post("/api/app/update/download", json!({}));
                 }
                 if downloading && ui.button("Cancel download").clicked() {
                     self.post("/api/actions/cancel", json!({}));
-                }
-                if self.update["status"] == "downloaded"
-                    && ui.button("Install downloaded update").clicked()
-                    && let Some(path) = self.update["installer_path"].as_str().map(str::to_owned)
-                {
-                    match Command::new(path).spawn() {
-                        Ok(_) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
-                        Err(error) => {
-                            self.update["status"] = json!("error");
-                            self.update["detail"] =
-                                json!(format!("Could not start the update installer: {error}"));
-                        }
-                    }
                 }
             });
         });
@@ -2601,12 +3362,23 @@ impl eframe::App for NativeApp {
 
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
+        #[cfg(windows)]
+        if self.native_titlebar_light != (self.appearance == "light") {
+            apply_native_titlebar(_frame, self.appearance == "light");
+            self.native_titlebar_light = self.appearance == "light";
+        }
         self.process_tray_commands(&ctx);
-        if ctx.input(|input| input.viewport().close_requested()) && self.active_task().is_some() {
+        if ctx.input(|input| input.viewport().close_requested())
+            && self.active_task().is_some()
+            && !self.update_install_started
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.close_confirmation = true;
         }
         self.consume_events(&ctx);
+        if self.update["status"] == "downloaded" && !self.update_install_started {
+            self.install_downloaded_update(&ctx);
+        }
         if let Some(path) = ctx.input(|input| {
             input
                 .raw
@@ -2756,7 +3528,7 @@ impl eframe::App for NativeApp {
                     } else {
                         egui::pos2(rect.left() + 21.0, rect.center().y)
                     };
-                    ui.put(
+                    ui.place(
                         egui::Rect::from_center_size(icon_center, Vec2::splat(22.0)),
                         icons::styled(icon, icon_color, 18.0),
                     );
@@ -2796,27 +3568,45 @@ impl eframe::App for NativeApp {
                     ui.add_space(3.0);
                 }
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                    let state = if self.connected {
-                        "● Engine ready"
+                    let palette = theme::palette(light, self.accent);
+                    let (state, color) = if self.connected {
+                        ("Engine ready", palette.success)
+                    } else if self.engine_error.is_some() {
+                        ("Engine unavailable", palette.error)
                     } else {
-                        "● Starting"
+                        ("Starting engine", palette.warning)
                     };
-                    let response = ui.label(
-                        RichText::new(if compact_sidebar { "●" } else { state })
-                            .size(11.0)
-                            .color(if self.connected {
-                                theme::palette(light, self.accent).success
-                            } else {
-                                self.accent
-                            }),
-                    );
-                    let _ = response.on_hover_text(if compact_sidebar {
-                        state
+                    if compact_sidebar {
+                        let (rect, response) =
+                            ui.allocate_exact_size(Vec2::new(48.0, 24.0), egui::Sense::hover());
+                        ui.painter().circle_filled(rect.center(), 4.0, color);
+                        let _ = response.on_hover_text(state);
                     } else {
-                        "Engine status"
-                    });
+                        components::status_dot(ui, color, state);
+                    }
                 });
             });
+
+        if self.page == PROCESS_PAGE {
+            let palette = theme::palette(light, self.accent);
+            let footer_height = if root_ui.available_width() < 1200.0 {
+                98.0
+            } else {
+                82.0
+            };
+            egui::Panel::bottom("process-render-bar")
+                .resizable(false)
+                .default_size(footer_height)
+                .min_size(footer_height)
+                .max_size(footer_height)
+                .frame(
+                    egui::Frame::new()
+                        .fill(palette.sidebar)
+                        .stroke(Stroke::new(1.0, palette.border))
+                        .inner_margin(egui::Margin::symmetric(24, 10)),
+                )
+                .show(root_ui, |ui| self.render_action_bar(ui));
+        }
 
         egui::CentralPanel::default()
             .frame(
@@ -2828,8 +3618,7 @@ impl eframe::App for NativeApp {
                     )),
             )
             .show(root_ui, |ui| {
-                ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                    ui.set_max_width(1400.0);
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     if self.quit_when_idle {
                         let palette = theme::palette(light, self.accent);
                         egui::Frame::new()
@@ -2941,6 +3730,7 @@ impl eframe::App for NativeApp {
 }
 
 fn main() -> eframe::Result<()> {
+    set_windows_app_identity();
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../docs/assets/rve-logo.png"))
         .unwrap_or_default();
     let options = eframe::NativeOptions {
@@ -2958,9 +3748,43 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+#[cfg(windows)]
+fn set_windows_app_identity() {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn SetCurrentProcessExplicitAppUserModelID(app_id: *const u16) -> i32;
+    }
+
+    let app_id: Vec<u16> = std::ffi::OsStr::new("B1progame.REALVideoEnhancer")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // Windows uses this stable identity to group the app with its own shortcut
+    // and icon in the taskbar, instead of reusing a generic cached Python icon.
+    unsafe {
+        let _ = SetCurrentProcessExplicitAppUserModelID(app_id.as_ptr());
+    }
+}
+
+#[cfg(not(windows))]
+fn set_windows_app_identity() {}
+
 #[cfg(test)]
 mod tests {
-    use super::{PROCESS_PAGE, active_task_from, settings_uses_two_columns};
+    use super::{
+        PROCESS_PAGE, active_task_from, encode_query_component, process_uses_two_columns,
+        settings_uses_two_columns,
+    };
+
+    #[test]
+    fn preview_query_encodes_windows_paths_safely() {
+        assert_eq!(
+            encode_query_component(r"C:\Videos\Family trip 01.mp4"),
+            "C%3A%5CVideos%5CFamily%20trip%2001.mp4"
+        );
+    }
 
     #[test]
     fn app_starts_in_process_workspace() {
@@ -2972,6 +3796,12 @@ mod tests {
         assert!(!settings_uses_two_columns(959.0));
         assert!(settings_uses_two_columns(960.0));
         assert!(settings_uses_two_columns(1440.0));
+    }
+
+    #[test]
+    fn process_switches_to_one_column_when_space_is_tight() {
+        assert!(!process_uses_two_columns(859.0));
+        assert!(process_uses_two_columns(860.0));
     }
 
     #[test]
@@ -2998,7 +3828,11 @@ mod tests {
         );
         assert_eq!(
             active_task_from("idle", false, "", "", "downloading", ""),
-            Some("An app update download")
+            Some("An app update")
+        );
+        assert_eq!(
+            active_task_from("idle", false, "", "", "installing", ""),
+            Some("An app update")
         );
     }
 

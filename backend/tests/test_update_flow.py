@@ -1,5 +1,8 @@
 """Focused tests for selecting a safe in-app Windows update."""
 
+import json
+import sys
+from subprocess import CompletedProcess
 from unittest.mock import patch
 import unittest
 from pathlib import Path
@@ -33,6 +36,37 @@ def _release(digest="sha256:" + "a" * 64):
 
 
 class UpdateFlowTests(unittest.TestCase):
+    def test_video_preview_uses_a_bounded_real_frame(self):
+        with TemporaryDirectory() as directory:
+            video = Path(directory) / "source clip.mp4"
+            video.write_bytes(b"video data")
+            payload = {
+                "width": 1920,
+                "height": 1080,
+                "fps": 24,
+                "frames": 24,
+                "duration_seconds": 1,
+                "codec": "h264",
+                "container": "mp4",
+                "size_bytes": video.stat().st_size,
+                "frame": "encoded-jpeg",
+            }
+            with (
+                patch.object(web_api, "PYTHON", sys.executable),
+                patch.object(
+                    web_api.subprocess,
+                    "run",
+                    return_value=CompletedProcess([], 0, json.dumps(payload), ""),
+                ) as run,
+            ):
+                result = web_api.inspect_video(video, include_frame=True)
+
+            script = run.call_args.args[0][2]
+            self.assertEqual(result["size_bytes"], video.stat().st_size)
+            self.assertIn("cv2.resize", script)
+            self.assertIn("1280 / width", script)
+            self.assertIn("720 / height", script)
+
     def test_managed_files_cannot_be_deleted_while_render_is_stopping(self):
         with patch.dict(web_api.render, {"status": "stopping"}):
             with self.assertRaisesRegex(ValueError, "active work"):
