@@ -15,6 +15,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import zipfile
 import tempfile
 import threading
 import time
@@ -42,6 +43,7 @@ LEGACY_PROGRAMS = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "Programs"
 managed_python_name = "python.exe" if os.name == "nt" else "bin/python3"
 runtime_candidates = [
     LOCAL_DATA / "python" / "python" / managed_python_name,
+    LOCAL_DATA / "python" / "python" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"),
     LEGACY_PROGRAMS / "REAL Video Enhancer" / "python" / "python" / managed_python_name,
     LEGACY_PROGRAMS / "REAL Video Enhancer-old" / "python" / "python" / managed_python_name,
     ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"),
@@ -60,13 +62,14 @@ state_lock = threading.RLock()
 capability_cache_lock = threading.RLock()
 capability_cache = {"checked_at": 0.0, "value": None}
 render = {"status": "idle", "paused": False, "process": None, "pause_memory": None, "preview_memory": None, "preview_jpeg": None, "preview_size": 0, "preview_enabled": False, "engine": "rve", "log_lines": [], "started": 0.0, "output_file": None, "current_frame": 0, "gen_fps": None, "eta": "--"}
+render_cancel_event = threading.Event()
 install_state = {"status": "not_started", "progress": 0, "stage": "Runtime check", "detail": "Runtime setup has not been started."}
 install_lock = threading.RLock()
 PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.34")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.36")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -99,6 +102,14 @@ def custom_models_dir():
 MODEL_DOWNLOAD_BASE = "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/"
 download_lock = threading.RLock()
 download_job = {"id": None, "status": "idle", "active": False, "progress": 0, "label": "", "detail": "", "error": "", "results": [], "bytes_received": 0, "bytes_total": 0, "stage": ""}
+cancel_event = threading.Event()
+runtime_process_lock = threading.RLock()
+runtime_process = None
+UV_VERSION = "0.13.7"
+UV_SHA256_X64 = "0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021"
+update_cancel_event = threading.Event()
+update_process_lock = threading.RLock()
+update_process = None
 
 
 def hidden_subprocess_kwargs():
@@ -209,13 +220,36 @@ def download_update_installer(release):
             temporary_folder = folder / f".download-{uuid.uuid4().hex}"
             temporary_folder.mkdir(parents=True, exist_ok=True)
             try:
-                result = subprocess.run(
-                    [gh, "release", "download", tag, "--repo", UPDATE_REPOSITORY,
-                     "--pattern", name, "--dir", str(temporary_folder), "--clobber"],
-                    capture_output=True, text=True, timeout=600, **hidden_subprocess_kwargs(),
-                )
-                if result.returncode:
-                    detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "GitHub CLI download failed."
+                global update_process
+                log_path = temporary_folder / "gh-download.log"
+                with log_path.open("w", encoding="utf-8") as log_stream:
+                    proc = subprocess.Popen(
+                        [gh, "release", "download", tag, "--repo", UPDATE_REPOSITORY,
+                         "--pattern", name, "--dir", str(temporary_folder), "--clobber"],
+                        stdout=log_stream, stderr=subprocess.STDOUT, **hidden_subprocess_kwargs(),
+                    )
+                    with update_process_lock:
+                        update_process = proc
+                    started = time.monotonic()
+                    timed_out = False
+                    while proc.poll() is None:
+                        if update_cancel_event.is_set():
+                            proc.terminate()
+                        if time.monotonic() - started > 600:
+                            proc.terminate()
+                            timed_out = True
+                            break
+                        time.sleep(0.1)
+                    code = proc.wait()
+                    with update_process_lock:
+                        update_process = None
+                if timed_out:
+                    raise TimeoutError("GitHub CLI update download exceeded ten minutes.")
+                if update_cancel_event.is_set():
+                    raise InterruptedError("Update download cancelled.")
+                if code:
+                    log = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
+                    detail = log[-1] if log else "GitHub CLI download failed."
                     raise RuntimeError(f"Could not download the private release with GitHub CLI: {detail}")
                 downloaded = temporary_folder / name
                 if not downloaded.is_file():
@@ -225,6 +259,8 @@ def download_update_installer(release):
                 shutil.rmtree(temporary_folder, ignore_errors=True)
             with partial.open("rb") as source:
                 while True:
+                    if update_cancel_event.is_set():
+                        raise InterruptedError("Update download cancelled.")
                     block = source.read(1024 * 1024)
                     if not block:
                         break
@@ -241,6 +277,8 @@ def download_update_installer(release):
                 if total and total != expected_size:
                     raise IOError(f"GitHub reported {total} bytes, but the release metadata says {expected_size}.")
                 while True:
+                    if update_cancel_event.is_set():
+                        raise InterruptedError("Update download cancelled.")
                     block = response.read(1024 * 1024)
                     if not block:
                         break
@@ -267,7 +305,9 @@ def download_update_installer(release):
         except (UnboundLocalError, OSError):
             pass
         with update_lock:
-            update_state.update(status="error", detail=f"Update download failed: {exc}")
+            update_state.update(status="cancelled" if isinstance(exc, InterruptedError) else "error",
+                                detail="Update download cancelled." if isinstance(exc, InterruptedError) else f"Update download failed: {exc}")
+        update_cancel_event.clear()
 
 
 def begin_update_download():
@@ -280,6 +320,7 @@ def begin_update_download():
                                 detail="Check for a newer release first. There is no newer Windows installer to download.")
             return dict(update_state)
         update_state.update(status="downloading", progress=0, detail="Downloading the GitHub Windows installer…")
+        update_cancel_event.clear()
         threading.Thread(target=download_update_installer, args=(release,), name="rve-update-download", daemon=True).start()
         return dict(update_state)
 
@@ -392,16 +433,22 @@ def download_one_model(label, spec, index=1, count=1):
     partial = target.with_name(target.name + ".part")
     url = MODEL_DOWNLOAD_BASE + urllib.parse.quote(download_name)
     _download_progress(label, index, count)
-    with urllib.request.urlopen(url, timeout=30) as response, partial.open("wb") as output:
-        total = int(response.headers.get("Content-Length", "0") or 0)
-        received = 0
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            output.write(chunk)
-            received += len(chunk)
-            _download_progress(label, index, count, received, total)
+    try:
+        with urllib.request.urlopen(url, timeout=30) as response, partial.open("wb") as output:
+            total = int(response.headers.get("Content-Length", "0") or 0)
+            received = 0
+            while True:
+                if cancel_event.is_set():
+                    raise InterruptedError("Model download cancelled.")
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+                received += len(chunk)
+                _download_progress(label, index, count, received, total)
+    except Exception:
+        partial.unlink(missing_ok=True)
+        raise
     _download_progress(label, index, count, received, total, "Installing")
     if target.suffixes[-2:] == [".tar", ".gz"]:
         try:
@@ -459,15 +506,19 @@ def run_model_download(job_id, backend, selections=None, categories=None):
                 result = download_one_model(label, spec, index, total)
                 results.append(result)
             except Exception as exc:
+                if isinstance(exc, InterruptedError):
+                    break
                 errors.append(f"{label}: {exc}")
             with download_lock:
                 download_job["results"] = results[:]
                 download_job.update(progress=round(index * 100 / total) if total else 100,
                                     detail=f"Model {index} of {total} ready", stage="Installing")
         with download_lock:
-            download_job.update(active=False, status="error" if errors else "completed", error="; ".join(errors),
-                                detail=f"{len(results)} model(s) ready" + (f"; {len(errors)} failed" if errors else ""), progress=100,
+            cancelled = cancel_event.is_set()
+            download_job.update(active=False, status="cancelled" if cancelled else "error" if errors else "completed", error="; ".join(errors),
+                                detail="Model download cancelled. Partial files were removed." if cancelled else f"{len(results)} model(s) ready" + (f"; {len(errors)} failed" if errors else ""), progress=100 if not cancelled else download_job.get("progress", 0),
                                 results=results)
+            cancel_event.clear()
     except Exception as exc:
         with download_lock:
             download_job.update(active=False, status="error", error=str(exc), detail=str(exc), progress=0)
@@ -477,6 +528,9 @@ def start_model_download(backend, selections=None, categories=None):
     with download_lock:
         if download_job.get("active"):
             raise ValueError("A model download is already in progress.")
+        if install_state.get("status") == "running" or (storage_job.get("status") in ("starting", "installing") and threading.current_thread().name != "rve-model-storage"):
+            raise ValueError("Wait for runtime or storage setup to finish before downloading models.")
+        cancel_event.clear()
         job_id = uuid.uuid4().hex
         download_job.update(id=job_id, active=True, status="queued", progress=0, label="", detail="Preparing model download…", error="", results=[])
     threading.Thread(target=run_model_download, args=(job_id, backend, selections, categories), daemon=True).start()
@@ -513,13 +567,18 @@ def ensure_render_models(payload):
             try:
                 download_one_model(label, spec, index, len(missing))
             except Exception as exc:
+                if isinstance(exc, InterruptedError):
+                    break
                 errors.append(f"{label}: {exc}")
             with download_lock:
                 download_job.update(progress=round(index * 100 / len(missing), 1), detail=f"Model {index} of {len(missing)} ready", stage="Installing")
     finally:
         with download_lock:
-            download_job.update(active=False, status="error" if errors else "completed", error="; ".join(errors), progress=100,
-                                detail="; ".join(errors) if errors else f"{len(missing)} required model(s) ready", stage="Failed" if errors else "Complete")
+            cancelled = cancel_event.is_set()
+            download_job.update(active=False, status="cancelled" if cancelled else "error" if errors else "completed", error="; ".join(errors), progress=download_job.get("progress", 0) if cancelled else 100,
+                                detail="Required model download cancelled." if cancelled else "; ".join(errors) if errors else f"{len(missing)} required model(s) ready", stage="Cancelled" if cancelled else "Failed" if errors else "Complete")
+            if cancelled:
+                cancel_event.clear()
     if errors:
         raise ValueError("Unable to prepare selected model(s): " + "; ".join(errors))
 
@@ -558,6 +617,53 @@ def _set_storage_status(**updates):
         storage_job.update(updates)
 
 
+def delete_managed_data(kind):
+    global PYTHON
+    if kind not in ("python", "models"):
+        raise ValueError("Choose Python or models for removal.")
+    if render.get("status") in ("preparing", "running", "paused") or download_job.get("active") or install_state.get("status") == "running" or storage_job.get("status") in ("starting", "installing"):
+        raise ValueError("Wait for active work to stop before removing managed files.")
+    if kind == "python":
+        root = (LOCAL_DATA / "python").resolve()
+        expected = (LOCAL_DATA / "python").resolve()
+        if root != expected or root.name.lower() != "python" or root.parent != LOCAL_DATA.resolve():
+            raise ValueError("Managed Python path failed its safety check.")
+        if root.exists():
+            shutil.rmtree(root)
+        uv_cache = LOCAL_DATA / "uv-cache"
+        if uv_cache.exists():
+            shutil.rmtree(uv_cache)
+        PYTHON = ""
+        capability_cache.update(checked_at=0.0, value=None)
+        return {"ok": True, "detail": "Managed Python and its installed Python packages were removed. Use Runtime setup to install them again."}
+
+    if os.name == "nt" and storage_job.get("mode") == "wsl":
+        distro = os.environ.get("RVE_WSL_DISTRO", "Ubuntai")
+        if not all(ch.isalnum() or ch in "._-" for ch in distro):
+            raise ValueError("The configured WSL name is not safe to use for model cleanup.")
+        wsl = shutil.which("wsl.exe") or "wsl.exe"
+        home_result = subprocess.run([wsl, "--distribution", distro, "--exec", "bash", "-lc", "printf %s \"$HOME\""],
+                                     capture_output=True, text=True, timeout=60, **hidden_subprocess_kwargs())
+        linux_home = home_result.stdout.strip().replace("\r", "")
+        if home_result.returncode or not linux_home.startswith("/home/") or ".." in Path(linux_home).parts:
+            raise RuntimeError("Could not safely locate the WSL user's home directory for model cleanup.")
+        linux_path = linux_home.rstrip("/") + "/.local/share/REAL-Video-Enhancer/models"
+        result = subprocess.run([wsl, "--distribution", distro, "--exec", "rm", "-rf", "--", linux_path, linux_path + "/custom_models"],
+                                capture_output=True, text=True, timeout=180, **hidden_subprocess_kwargs())
+        if result.returncode:
+            raise RuntimeError((result.stderr or "WSL could not remove the managed model folder.").strip())
+    else:
+        root = (APP_DATA / "models").resolve()
+        if root.name.lower() != "models" or root.parent != APP_DATA.resolve():
+            raise ValueError("Managed model path failed its safety check.")
+        if root.exists():
+            shutil.rmtree(root)
+        custom = APP_DATA / "custom_models"
+        if custom.exists():
+            shutil.rmtree(custom)
+    return {"ok": True, "detail": "The managed model library and custom model files were removed. You can download models again from Downloads."}
+
+
 def prepare_model_storage(mode):
     global MODEL_DIR
     try:
@@ -572,6 +678,10 @@ def prepare_model_storage(mode):
                     current = dict(download_job)
                 _set_storage_status(progress=current.get("progress", 0), detail=current.get("detail", "Installing models"))
                 if not current.get("active"):
+                    if current.get("status") == "cancelled":
+                        _set_storage_status(status="cancelled", stage="Setup cancelled", detail="Model setup was cancelled.", error="")
+                        cancel_event.clear()
+                        return
                     if current.get("status") == "error":
                         raise RuntimeError(current.get("error") or "One or more models could not be installed.")
                     break
@@ -614,6 +724,8 @@ def prepare_model_storage(mode):
         with storage_lock:
             storage_job["status"] = "installing"
         for line in process.stdout or []:
+            if cancel_event.is_set() and process.poll() is None:
+                process.terminate()
             detail = line.strip()
             if detail:
                 progress = storage_job.get("progress", 2)
@@ -625,6 +737,10 @@ def prepare_model_storage(mode):
                         pass
                 _set_storage_status(progress=progress, detail=detail)
         code = process.wait()
+        if cancel_event.is_set():
+            _set_storage_status(status="cancelled", stage="Setup cancelled", detail="WSL model setup was cancelled.", error="")
+            cancel_event.clear()
+            return
         if code:
             raise RuntimeError(f"WSL model installation exited with code {code}. See the setup log for details.")
         if not MODEL_DIR.is_dir():
@@ -632,7 +748,8 @@ def prepare_model_storage(mode):
         _set_storage_status(status="ready", progress=100, stage="Model storage ready",
                             detail=f"All available models are ready in WSL · {MODEL_DIR}.", error="")
     except Exception as exc:
-        _set_storage_status(status="error", stage="Model storage setup failed", error=str(exc), detail=str(exc))
+        _set_storage_status(status="cancelled" if isinstance(exc, InterruptedError) else "error", stage="Setup cancelled" if isinstance(exc, InterruptedError) else "Model storage setup failed", error="" if isinstance(exc, InterruptedError) else str(exc), detail=str(exc))
+        cancel_event.clear()
 
 
 def begin_model_storage_setup(mode):
@@ -642,6 +759,7 @@ def begin_model_storage_setup(mode):
     with storage_lock:
         if storage_job.get("status") in ("starting", "installing"):
             return storage_snapshot()
+        cancel_event.clear()
         storage_job.update(status="starting", mode=mode, progress=0, stage="Preparing model storage", detail="Setup queued.", error="")
     threading.Thread(target=prepare_model_storage, args=(mode,), name="rve-model-storage", daemon=True).start()
     return storage_snapshot()
@@ -867,8 +985,55 @@ def install_log(message):
 
 def managed_python_path():
     if os.name == "nt":
-        return LOCAL_DATA / "python" / "python" / "python.exe"
+        return LOCAL_DATA / "python" / "python" / "Scripts" / "python.exe"
     return LOCAL_DATA / "python" / "python" / "bin" / "python3"
+
+
+def managed_uv_path():
+    return APP_DATA / "bin" / ("uv.exe" if os.name == "nt" else "uv")
+
+
+def ensure_uv():
+    uv = managed_uv_path()
+    if uv.is_file():
+        return uv
+    if os.name == "nt":
+        asset = "uv-x86_64-pc-windows-msvc.zip" if platform.machine().lower() in ("amd64", "x86_64") else "uv-aarch64-pc-windows-msvc.zip"
+        expected = UV_SHA256_X64 if "x86_64" in asset else None
+        if not expected:
+            raise RuntimeError("Automatic uv setup currently supports x64 Windows only.")
+    elif sys.platform.startswith("linux"):
+        asset = "uv-x86_64-unknown-linux-gnu.tar.gz" if platform.machine().lower() in ("amd64", "x86_64") else "uv-aarch64-unknown-linux-gnu.tar.gz"
+        expected = None
+    else:
+        raise RuntimeError("Automatic uv setup is not available for this platform.")
+    version = UV_VERSION
+    archive = APP_DATA / "temp" / asset
+    url = f"https://github.com/astral-sh/uv/releases/download/{version}/{asset}"
+    set_install_state(stage="Downloading uv", progress=3, detail="Preparing the app-local Python package manager.")
+    download_runtime_file(url, archive)
+    if expected:
+        import hashlib
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if digest != expected:
+            archive.unlink(missing_ok=True)
+            raise RuntimeError("The uv download did not match Astral’s published SHA-256 checksum.")
+    uv.parent.mkdir(parents=True, exist_ok=True)
+    if asset.endswith(".zip"):
+        with zipfile.ZipFile(archive) as bundle:
+            member = next((item for item in bundle.namelist() if item == "uv.exe" or item.endswith("/uv.exe")), None)
+            if not member:
+                raise RuntimeError("The uv archive did not contain uv.exe.")
+            uv.write_bytes(bundle.read(member))
+    else:
+        with tarfile.open(archive, "r:gz") as bundle:
+            member = next((item for item in bundle.getmembers() if item.name.endswith("/uv") and item.isfile()), None)
+            if not member:
+                raise RuntimeError("The uv archive did not contain its executable.")
+            uv.write_bytes(bundle.extractfile(member).read())
+        uv.chmod(0o755)
+    archive.unlink(missing_ok=True)
+    return uv
 
 
 def download_runtime_file(url, target):
@@ -878,6 +1043,9 @@ def download_runtime_file(url, target):
     with urllib.request.urlopen(url, timeout=45) as response, partial.open("wb") as stream:
         total = int(response.headers.get("Content-Length", "0") or 0)
         while True:
+            if cancel_event.is_set():
+                partial.unlink(missing_ok=True)
+                raise InterruptedError("Setup cancelled.")
             block = response.read(1024 * 1024)
             if not block:
                 break
@@ -895,50 +1063,56 @@ def ensure_managed_python():
         PYTHON = str(python)
         os.environ["PYTHONNOUSERSITE"] = "1"
         return
-    if os.name == "nt":
-        archive_name = f"cpython-{PYTHON_VERSION}+20250317-x86_64-pc-windows-msvc-install_only.tar.gz"
-    elif sys.platform == "darwin":
-        arch = "x86_64" if platform.machine() == "x86_64" else "aarch64"
-        archive_name = f"cpython-{PYTHON_VERSION}+20250317-{arch}-apple-darwin-install_only.tar.gz"
-    else:
-        arch = "x86_64" if platform.machine() in ("AMD64", "x86_64") else "aarch64"
-        archive_name = f"cpython-{PYTHON_VERSION}+20250317-{arch}-unknown-linux-gnu-install_only.tar.gz"
-    archive = LOCAL_DATA / "python" / "python.tar.gz"
-    set_install_state(stage=f"Downloading Python {PYTHON_VERSION}", progress=2)
-    download_runtime_file("https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/" + archive_name, archive)
-    set_install_state(stage="Extracting managed Python", progress=38)
-    target_root = (LOCAL_DATA / "python").resolve()
-    with tarfile.open(archive, "r:gz") as package:
-        for member in package.getmembers():
-            destination = (target_root / member.name).resolve()
-            if destination != target_root and target_root not in destination.parents:
-                raise ValueError(f"Python archive contains an unsafe path: {member.name}")
-        package.extractall(target_root)
-    archive.unlink(missing_ok=True)
+    legacy_python = LOCAL_DATA / "python" / "python" / "python.exe"
+    if os.name == "nt" and legacy_python.is_file():
+        PYTHON = str(legacy_python)
+        os.environ["PYTHONNOUSERSITE"] = "1"
+        return
+    uv = ensure_uv()
+    env = os.environ.copy()
+    env["UV_PYTHON_INSTALL_DIR"] = str(LOCAL_DATA / "python" / "managed")
+    set_install_state(stage=f"Installing Python {PYTHON_VERSION} with uv", progress=10)
+    run_runtime_command([uv, "python", "install", PYTHON_VERSION, "--managed-python"], f"Installing Python {PYTHON_VERSION}", env=env)
+    python.parent.mkdir(parents=True, exist_ok=True)
+    run_runtime_command([uv, "venv", "--python", PYTHON_VERSION, "--managed-python", str(python.parent)], "Creating managed Python environment", env=env)
     if not python.is_file():
         raise RuntimeError(f"Python download extracted, but the runtime executable is missing: {python}")
     PYTHON = str(python)
     os.environ["PYTHONNOUSERSITE"] = "1"
-    set_install_state(stage="Preparing pip", progress=43)
-    run_runtime_command([PYTHON, "-m", "ensurepip", "--upgrade"], "Preparing pip")
+    set_install_state(stage="Preparing Python packages", progress=43)
 
 
-def run_runtime_command(command, stage, progress=None):
+def run_runtime_command(command, stage, progress=None, env=None):
     if progress is not None:
         set_install_state(stage=stage, progress=progress)
-    env = os.environ.copy()
-    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
-    env["PYTHONNOUSERSITE"] = "1"
-    env["TMP"] = str(APP_DATA / "temp")
-    env["TEMP"] = str(APP_DATA / "temp")
-    Path(env["TEMP"]).mkdir(parents=True, exist_ok=True)
+    command_env = os.environ.copy()
+    if env:
+        command_env.update(env)
+    command_env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    command_env["PYTHONNOUSERSITE"] = "1"
+    command_env["TMP"] = str(APP_DATA / "temp")
+    command_env["TEMP"] = str(APP_DATA / "temp")
+    command_env["UV_CACHE_DIR"] = str(LOCAL_DATA / "uv-cache")
+    Path(command_env["TEMP"]).mkdir(parents=True, exist_ok=True)
+    command = [str(item) for item in command]
     install_log("$ " + subprocess.list2cmdline([str(x) for x in command]))
-    proc = subprocess.Popen(command, cwd=str(APP_DATA), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    proc = subprocess.Popen(command, cwd=str(APP_DATA), env=command_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace", bufsize=1,
                             **hidden_subprocess_kwargs())
-    for line in proc.stdout:
-        install_log(line)
-    code = proc.wait()
+    global runtime_process
+    with runtime_process_lock:
+        runtime_process = proc
+    try:
+        for line in proc.stdout:
+            if cancel_event.is_set() and proc.poll() is None:
+                proc.terminate()
+            install_log(line)
+    finally:
+        code = proc.wait()
+        with runtime_process_lock:
+            runtime_process = None
+    if cancel_event.is_set():
+        raise InterruptedError("Runtime setup cancelled.")
     if code:
         raise RuntimeError(f"{stage} failed with exit code {code}. See the download manager output for details.")
 
@@ -986,7 +1160,8 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
         (APP_DATA / "temp").mkdir(parents=True, exist_ok=True)
         if action == "recommended":
             ensure_managed_python()
-            common = [PYTHON, "-m", "pip", "install", "--isolated", "--no-warn-script-location", "--extra-index-url", "https://download.pytorch.org/whl/", "--extra-index-url", "https://download.pytorch.org/whl/test/", "--trusted-host", "download.pytorch.org"]
+            uv = ensure_uv()
+            common = [str(uv), "pip", "install", "--python", PYTHON, "--no-progress", "--extra-index-url", "https://download.pytorch.org/whl/", "--extra-index-url", "https://download.pytorch.org/whl/test/"]
             run_runtime_command(common + RUNTIME_COMMON, "Installing RVE runtime dependencies", 46)
             apple_silicon = sys.platform == "darwin" and platform.machine().lower() in ("arm64", "aarch64")
             use_cuda = bool(shutil.which("nvidia-smi"))
@@ -996,7 +1171,7 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
             run_runtime_command(common + packages, f"Installing {backend} backend", 74)
             if backend == "torch":
                 tv_suffix = "+cu128" if torch_flavor.startswith("cu") else ""
-                run_runtime_command([PYTHON, "-m", "pip", "install", "--isolated", "--no-deps", "--extra-index-url", "https://download.pytorch.org/whl/", "--trusted-host", "download.pytorch.org", f"torchvision==0.22.0{tv_suffix}"], "Installing compatible torchvision", 86)
+                run_runtime_command([str(uv), "pip", "install", "--python", PYTHON, "--no-progress", "--no-deps", "--extra-index-url", "https://download.pytorch.org/whl/", f"torchvision==0.22.0{tv_suffix}"], "Installing compatible torchvision", 86)
             ffmpeg = APP_DATA / "bin" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
             if not ffmpeg.exists():
                 if os.name == "nt": asset = "ffmpeg.exe" if platform.machine() in ("AMD64", "x86_64") else "ffmpeg-windows-arm64.exe"
@@ -1020,14 +1195,15 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
         else:
             ensure_managed_python()
             packages = backend_packages(backend, payload)
-            pip = [PYTHON, "-m", "pip"]
+            uv = ensure_uv()
+            pip = [str(uv), "pip"]
             if action == "install":
-                command = pip + ["install", "--isolated", "--no-warn-script-location", "--extra-index-url", "https://download.pytorch.org/whl/", "--extra-index-url", "https://download.pytorch.org/whl/test/", "--trusted-host", "download.pytorch.org"] + packages
+                command = pip + ["install", "--python", PYTHON, "--no-progress", "--extra-index-url", "https://download.pytorch.org/whl/", "--extra-index-url", "https://download.pytorch.org/whl/test/"] + packages
             else:
                 names = [str(pkg).split("==", 1)[0] for pkg in packages]
                 if backend in ("torch", "pytorch", "tensorrt"):
                     names.append("torchvision")
-                command = pip + ["uninstall", "-y"] + names
+                command = pip + ["uninstall", "--python", PYTHON, "-y"] + names
             run_runtime_command(command, f"{action.capitalize()} {backend} backend", 20)
             if action == "install" and backend in ("torch", "pytorch", "tensorrt"):
                 version = str(payload.get("torch_version") or "2.7.0")
@@ -1037,11 +1213,12 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
                 flavor = {"cuda": {"2.6.0": "cu118", "2.7.0": "cu128", "2.8.0": "cu129", "2.9.0": "cu130"}.get(version, "cu128")}.get(flavor, flavor)
                 suffix = "" if flavor == "cpu" else "+" + flavor
                 if tv_version:
-                    run_runtime_command(pip + ["install", "--isolated", "--no-deps", "--extra-index-url", "https://download.pytorch.org/whl/", "--trusted-host", "download.pytorch.org", f"torchvision=={tv_version}{suffix}"], "Installing compatible torchvision", 80)
+                    run_runtime_command(pip + ["install", "--python", PYTHON, "--no-progress", "--no-deps", "--extra-index-url", "https://download.pytorch.org/whl/", f"torchvision=={tv_version}{suffix}"], "Installing compatible torchvision", 80)
             set_install_state(status="completed", progress=100, stage="Backend operation complete", detail=f"{backend} {action} completed. Refresh backend status to see the result.")
     except Exception as exc:
         install_log(f"ERROR: {exc}")
-        set_install_state(status="error", stage="Runtime setup failed", detail=str(exc))
+        set_install_state(status="cancelled" if isinstance(exc, InterruptedError) else "error", stage="Setup cancelled" if isinstance(exc, InterruptedError) else "Runtime setup failed", detail=str(exc))
+        cancel_event.clear()
 
 
 def install_animescripter_cli():
@@ -1078,6 +1255,9 @@ def install_animescripter_cli():
                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace", bufsize=1,
                             **hidden_subprocess_kwargs())
+    global runtime_process
+    with runtime_process_lock:
+        runtime_process = proc
     try:
         if proc.stdin:
             proc.stdin.write("N\r\n")
@@ -1089,7 +1269,11 @@ def install_animescripter_cli():
     finally:
         if proc.stdin:
             proc.stdin.close()
+        with runtime_process_lock:
+            runtime_process = None
     script_path.unlink(missing_ok=True)
+    if cancel_event.is_set():
+        raise InterruptedError("AnimeScripter setup cancelled.")
     if code:
         raise RuntimeError(f"The official AnimeScripter CLI installer failed with exit code {code}.")
 
@@ -1098,6 +1282,9 @@ def begin_runtime_operation(action="recommended", backend="pytorch", payload=Non
     with install_lock:
         if install_state.get("status") == "running":
             raise ValueError("A runtime installation is already in progress.")
+        if download_job.get("active") or storage_job.get("status") in ("starting", "installing"):
+            raise ValueError("Wait for model or storage setup to finish before changing the runtime.")
+        cancel_event.clear()
         install_state.update(status="running", progress=0, stage="Queued", detail="Runtime operation queued.", output=[])
     threading.Thread(target=setup_runtime_worker, args=(action, backend, payload or {}), daemon=True).start()
     return {**install_state}
@@ -1106,8 +1293,8 @@ def begin_runtime_operation(action="recommended", backend="pytorch", payload=Non
 def status_snapshot():
     with state_lock:
         proc = render.get("process")
-        if proc is not None and proc.poll() is not None and render["status"] in ("running", "paused"):
-            render["status"] = "completed" if proc.returncode == 0 else "error"
+        if proc is not None and proc.poll() is not None and render["status"] in ("running", "paused", "stopping"):
+            render["status"] = "stopped" if render.get("status") == "stopping" else "completed" if proc.returncode == 0 else "error"
             render["paused"] = False
             if proc.returncode:
                 render["log_lines"].append(f"Renderer exited with code {proc.returncode}.")
@@ -1681,6 +1868,8 @@ def prepare_and_start_render(payload, engine, output_file):
     pause_memory = None
     preview_memory = None
     try:
+        if render_cancel_event.is_set():
+            raise InterruptedError("Render cancelled before engine startup.")
         if engine != "animescripter":
             capabilities = python_capabilities()
             backend = str(payload.get("backend") or "pytorch").lower()
@@ -1690,6 +1879,8 @@ def prepare_and_start_render(payload, engine, output_file):
                 probe = str(capabilities.get("backend_probe_output") or f"{backend} and OpenCV were not detected in the managed Python runtime.").strip()
                 raise RuntimeError(f"The selected {backend} backend is unavailable. Open Runtime and install or select an available backend. Details: " + probe)
         ensure_render_models(payload)
+        if render_cancel_event.is_set():
+            raise InterruptedError("Render cancelled before the engine started.")
         with state_lock:
             if render.get("status") != "preparing":
                 return
@@ -1730,9 +1921,9 @@ def prepare_and_start_render(payload, engine, output_file):
                 except (FileNotFoundError, BufferError):
                     pass
         with state_lock:
-            render.update(status="error", error=str(exc), paused=False, process=None,
+            render.update(status="stopped" if isinstance(exc, InterruptedError) else "error", error="" if isinstance(exc, InterruptedError) else str(exc), paused=False, process=None,
                           pause_memory=None, preview_memory=None, preview_size=0)
-            render["log_lines"] = (render.get("log_lines") or []) + [str(exc)]
+            render["log_lines"] = (render.get("log_lines") or []) + ["Render cancelled." if isinstance(exc, InterruptedError) else str(exc)]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1885,6 +2076,34 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/startup/install":
                 result = begin_runtime_operation("recommended", "pytorch", payload)
                 respond_json(self, result, 202); return
+            if path == "/api/actions/cancel":
+                cancel_event.set()
+                render_cancel_event.set()
+                update_cancel_event.set()
+                with update_process_lock:
+                    update_proc = update_process
+                if update_proc and update_proc.poll() is None:
+                    try:
+                        update_proc.terminate()
+                    except OSError:
+                        pass
+                with runtime_process_lock:
+                    proc = runtime_process
+                if proc and proc.poll() is None:
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+                render_proc = render.get("process")
+                if render_proc and render_proc.poll() is None:
+                    try:
+                        render_proc.terminate()
+                        render.update(status="stopping", paused=False)
+                    except OSError:
+                        pass
+                respond_json(self, {"ok": True, "detail": "Cancellation requested for active work."}); return
+            if path == "/api/data/delete":
+                respond_json(self, delete_managed_data(str(payload.get("kind") or ""))); return
             if path == "/api/animescripter/install":
                 result = begin_runtime_operation("animescripter", payload=payload)
                 respond_json(self, result, 202); return
@@ -1894,11 +2113,15 @@ class Handler(BaseHTTPRequestHandler):
                 command = str(payload.get("command") or "--version").strip()
                 allowed = {"--version", "list", "freeze"}
                 if command not in allowed:
-                    respond_json(self, {"ok": False, "error": "Only pip --version, pip list and pip freeze are available from this screen."}, 400); return
-                proc = subprocess.run([PYTHON, "-m", "pip"] + (command.split() if command.startswith("--") else [command]),
+                    respond_json(self, {"ok": False, "error": "Only uv --version, uv pip list and uv pip freeze are available from this screen."}, 400); return
+                uv = managed_uv_path()
+                if not uv.is_file():
+                    respond_json(self, {"ok": False, "error": "The app-managed uv tool is not installed yet. Run Runtime setup first."}, 409); return
+                uv_command = [str(uv), "--version"] if command == "--version" else [str(uv), "pip", command, "--python", PYTHON]
+                proc = subprocess.run(uv_command,
                                       capture_output=True, text=True, timeout=min(int(payload.get("timeout", 30)), 120),
                                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                respond_json(self, {"ok": proc.returncode == 0, "command": f"{PYTHON} -m pip {command}",
+                respond_json(self, {"ok": proc.returncode == 0, "command": subprocess.list2cmdline(uv_command),
                                     "output": (proc.stdout + proc.stderr)[-20000:], "returncode": proc.returncode}); return
             if path == "/api/video/inspect":
                 selected = str(payload.get("path") or "").strip()
@@ -1979,6 +2202,8 @@ class Handler(BaseHTTPRequestHandler):
                         render.get("process") is not None and render["process"].poll() is None
                     ):
                         respond_json(self, {"ok": False, "error": "A render is already running."}, 409); return
+                    render_cancel_event.clear()
+                    cancel_event.clear()
                     render.update(status="preparing", error="", paused=False, process=None,
                                   pause_memory=None, preview_memory=None, preview_jpeg=None,
                                   preview_size=0, current_frame=0, gen_fps=None, eta="--",
@@ -1989,6 +2214,10 @@ class Handler(BaseHTTPRequestHandler):
                 respond_json(self, {"ok": True, "status": "preparing"}, 202); return
             if path in ("/api/render/pause", "/api/render/stop"):
                 proc = render.get("process")
+                if path.endswith("stop") and render.get("status") == "preparing":
+                    render_cancel_event.set()
+                    cancel_event.set()
+                    respond_json(self, {"ok": True, "status": "preparing"}); return
                 if not proc or proc.poll() is not None:
                     respond_json(self, {"ok": True, "paused": False, "status": render["status"]}); return
                 if path.endswith("pause"):
@@ -1999,7 +2228,7 @@ class Handler(BaseHTTPRequestHandler):
                     memory.buf[0] = 1 if paused else 0
                     render.update(paused=paused, status="paused" if paused else "running")
                     respond_json(self, {"ok": True, "paused": paused, "status": render["status"]}); return
-                proc.terminate(); render.update(status="stopped", paused=False); respond_json(self, {"ok": True, "status": "stopped"}); return
+                proc.terminate(); render.update(status="stopping", paused=False); respond_json(self, {"ok": True, "status": "stopping"}); return
             if path == "/api/actions/verify_backend":
                 sysinfo = python_capabilities(refresh=True); ok = bool(sysinfo.get("available_backends")); respond_json(self, {"ok": ok, "backend": payload.get("backend", "auto"), "checks": [{"name": name, "ok": name in sysinfo["available_backends"], "detail": "Available in the managed Python runtime." if name in sysinfo["available_backends"] else "Not installed or unavailable."} for name in ("pytorch", "ncnn", "tensorrt")], "output": "Detected: " + ", ".join(sysinfo["available_backends"]) if ok else "No rendering backend is importable in the managed runtime."}); return
             if path == "/api/actions/refresh_backends":
@@ -2038,9 +2267,9 @@ class Handler(BaseHTTPRequestHandler):
             respond_json(self, {"ok": False, "error": str(exc)}, 409)
         except OSError as exc:
             respond_json(self, {"ok": False, "error": f"Model import failed: {exc}"}, 500)
+        except RuntimeError as exc:
+            respond_json(self, {"ok": False, "error": str(exc)}, 500)
         except Exception as exc:
-            with state_lock:
-                render.update(status="error", log_lines=(render.get("log_lines") or []) + [str(exc)])
             respond_json(self, {"ok": False, "error": str(exc)}, 500)
 
 

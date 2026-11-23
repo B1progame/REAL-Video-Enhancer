@@ -36,6 +36,11 @@ const PAGES: [(&str, &str); 6] = [
     ("Python", "python"),
     ("Settings", "settings"),
 ];
+const PROCESS_PAGE: usize = 1;
+
+fn settings_uses_two_columns(available_width: f32) -> bool {
+    available_width >= 960.0
+}
 
 #[derive(Clone)]
 enum ApiCommand {
@@ -67,7 +72,7 @@ fn active_task_from(
     update: &str,
     anime: &str,
 ) -> Option<&'static str> {
-    if matches!(render, "preparing" | "running" | "paused") {
+    if matches!(render, "preparing" | "running" | "paused" | "stopping") {
         Some("A video render")
     } else if download_active {
         Some("A model download")
@@ -560,6 +565,7 @@ struct NativeApp {
     tray_events: Receiver<TrayCommand>,
     tray_error: Option<String>,
     close_confirmation: bool,
+    destructive_confirmation: Option<String>,
     quit_when_idle: bool,
     page: usize,
     accent: Color32,
@@ -639,8 +645,9 @@ impl NativeApp {
             tray_events,
             tray_error,
             close_confirmation: false,
+            destructive_confirmation: None,
             quit_when_idle: false,
-            page: if first_setup { 5 } else { 0 },
+            page: PROCESS_PAGE,
             accent,
             appearance,
             reduce_motion,
@@ -790,6 +797,9 @@ impl NativeApp {
         if !self.connected && self.engine_error.is_none() {
             return Some("Local engine startup");
         }
+        if self.busy {
+            return Some("An engine operation");
+        }
         active_task_from(
             self.render["status"].as_str().unwrap_or_default(),
             self.download["active"].as_bool() == Some(true),
@@ -838,7 +848,7 @@ impl NativeApp {
                 }
                 TrayCommand::Quit => {
                     if self.active_task().is_some() {
-                        self.quit_when_idle = true;
+                        self.close_confirmation = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
                     } else {
@@ -883,6 +893,16 @@ impl NativeApp {
                         self.logs.push(format!("$ {command}\n{output}"));
                     }
                     "/api/storage/status" => self.storage_status = value,
+                    "/api/data/delete" => {
+                        self.logs.push(
+                            value["detail"]
+                                .as_str()
+                                .unwrap_or("Managed files removed.")
+                                .to_owned(),
+                        );
+                        self.get(&format!("/api/models?backend={}", self.backend));
+                        self.get("/api/python/info");
+                    }
                     "/api/app/update/status"
                     | "/api/app/update/check"
                     | "/api/app/update/download" => self.update = value,
@@ -1511,6 +1531,16 @@ back into focus.")
     }
 
     fn process_page(&mut self, ui: &mut egui::Ui) {
+        if self.first_setup {
+            Self::card(ui, "Set up your first enhancement", |ui| {
+                ui.label("Choose WSL Ubuntu or Windows for model storage, then prepare the runtime and models before rendering.");
+                ui.add_space(theme::space::SM);
+                if components::primary_button(ui, "Choose model storage").clicked() {
+                    self.page = 5;
+                }
+            });
+            ui.add_space(theme::space::MD);
+        }
         let ready_backends = self.bootstrap["system"]["available_backends"]
             .as_array()
             .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
@@ -1521,7 +1551,7 @@ back into focus.")
         let render_preparing = self.render["status"] == "preparing";
         let active = matches!(
             self.render["status"].as_str(),
-            Some("preparing" | "running" | "paused")
+            Some("preparing" | "running" | "paused" | "stopping")
         );
         let mut blockers: Vec<String> = Vec::new();
         if !self.connected {
@@ -1816,6 +1846,9 @@ back into focus.")
                 {
                     ui.colored_label(palette.error, error);
                 }
+                if active && ui.button("Cancel model download").clicked() {
+                    self.post("/api/actions/cancel", json!({}));
+                }
             }
         });
 
@@ -1886,7 +1919,9 @@ back into focus.")
             .unwrap_or(0.0)
             .clamp(0.0, 100.0) as f32;
         let installing = matches!(status.as_str(), "running" | "installing" | "downloading")
-            || (progress > 0.0 && progress < 100.0);
+            || (progress > 0.0
+                && progress < 100.0
+                && !matches!(status.as_str(), "cancelled" | "error" | "completed"));
         let system = self.bootstrap["system"].clone();
         let available = system["available_backends"]
             .as_array()
@@ -1958,6 +1993,9 @@ back into focus.")
                             json!({"action": "install", "backend": backend}),
                         );
                     }
+                }
+                if installing && ui.button("Cancel setup").clicked() {
+                    self.post("/api/actions/cancel", json!({}));
                 }
             });
         });
@@ -2088,7 +2126,7 @@ back into focus.")
         });
     }
 
-    fn settings_page(&mut self, ui: &mut egui::Ui) {
+    fn appearance_settings(&mut self, ui: &mut egui::Ui) {
         Self::card(ui, "Appearance", |ui| {
             let light = !ui.visuals().dark_mode;
             ui.label("Interface theme");
@@ -2151,7 +2189,9 @@ back into focus.")
                 .color(secondary_text_color(light)),
             );
         });
-        ui.add_space(12.0);
+    }
+
+    fn model_storage_settings(&mut self, ui: &mut egui::Ui) {
         Self::card(ui, "Model storage", |ui| {
             ui.label("Choose where model weights are installed and read from.");
             egui::ComboBox::from_label("Storage location")
@@ -2186,11 +2226,23 @@ back into focus.")
             if self.first_setup {
                 ui.label("First launch: choose where to keep the models, then start setup. WSL starts automatically if selected.");
             }
-            let status = self.storage_status["status"].as_str().unwrap_or("waiting");
+            let status = self.storage_status["status"]
+                .as_str()
+                .unwrap_or("waiting")
+                .to_owned();
+            if matches!(status.as_str(), "starting" | "installing")
+                && ui.button("Cancel model setup").clicked()
+            {
+                self.post("/api/actions/cancel", json!({}));
+            }
             let stage = self.storage_status["stage"]
                 .as_str()
-                .unwrap_or("Waiting for engine status");
-            let detail = self.storage_status["detail"].as_str().unwrap_or("");
+                .unwrap_or("Waiting for engine status")
+                .to_owned();
+            let detail = self.storage_status["detail"]
+                .as_str()
+                .unwrap_or("")
+                .to_owned();
             ui.add_space(6.0);
             ui.label(format!("{stage} · {status}"));
             if !detail.is_empty() {
@@ -2225,7 +2277,9 @@ back into focus.")
                 .monospace(),
             );
         });
-        ui.add_space(12.0);
+    }
+
+    fn update_settings(&mut self, ui: &mut egui::Ui) {
         Self::card(ui, "Updates", |ui| {
             ui.horizontal(|ui| {
                 ui.label(
@@ -2275,6 +2329,7 @@ back into focus.")
             }
             ui.horizontal_wrapped(|ui| {
                 let checking = self.update["status"] == "checking";
+                let downloading = self.update["status"] == "downloading";
                 let check_label = if checking {
                     "Checking for updates…"
                 } else {
@@ -2298,6 +2353,9 @@ back into focus.")
                 {
                     self.post("/api/app/update/download", json!({}));
                 }
+                if downloading && ui.button("Cancel download").clicked() {
+                    self.post("/api/actions/cancel", json!({}));
+                }
                 if self.update["status"] == "downloaded"
                     && ui.button("Install downloaded update").clicked()
                     && let Some(path) = self.update["installer_path"].as_str().map(str::to_owned)
@@ -2313,7 +2371,38 @@ back into focus.")
                 }
             });
         });
-        ui.add_space(12.0);
+    }
+
+    fn data_management_settings(&mut self, ui: &mut egui::Ui) {
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        Self::card(ui, "Managed downloads", |ui| {
+            ui.label("Remove app-managed Python packages or model weights to reclaim disk space. Your videos and the app itself stay in place.");
+            ui.add_space(theme::space::SM);
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_enabled(
+                        self.active_task().is_none(),
+                        egui::Button::new("Delete Python and packages"),
+                    )
+                    .clicked()
+                {
+                    self.destructive_confirmation = Some("python".to_owned());
+                }
+                if ui
+                    .add_enabled(
+                        self.active_task().is_none(),
+                        egui::Button::new("Delete models"),
+                    )
+                    .clicked()
+                {
+                    self.destructive_confirmation = Some("models".to_owned());
+                }
+            });
+            ui.label(RichText::new("Python can be installed again from Runtime. Models can be downloaded again from Downloads.").size(11.0).color(palette.secondary));
+        });
+    }
+
+    fn render_default_settings(&mut self, ui: &mut egui::Ui) -> bool {
         let mut render_defaults_changed = false;
         Self::card(ui, "Render defaults", |ui| {
             egui::ComboBox::from_label("Precision")
@@ -2370,6 +2459,46 @@ back into focus.")
                     .changed();
             });
         });
+        render_defaults_changed
+    }
+
+    fn settings_page(&mut self, ui: &mut egui::Ui) {
+        let mut render_defaults_changed = false;
+        if !settings_uses_two_columns(ui.available_width()) {
+            if self.first_setup {
+                self.model_storage_settings(ui);
+                ui.add_space(theme::space::MD);
+                self.appearance_settings(ui);
+            } else {
+                self.appearance_settings(ui);
+                ui.add_space(theme::space::MD);
+                self.model_storage_settings(ui);
+            }
+            ui.add_space(theme::space::MD);
+            self.update_settings(ui);
+            ui.add_space(theme::space::MD);
+            render_defaults_changed = self.render_default_settings(ui);
+            ui.add_space(theme::space::MD);
+            self.data_management_settings(ui);
+        } else {
+            ui.columns(2, |columns| {
+                if self.first_setup {
+                    self.model_storage_settings(&mut columns[0]);
+                    columns[0].add_space(theme::space::MD);
+                    render_defaults_changed = self.render_default_settings(&mut columns[0]);
+                    self.appearance_settings(&mut columns[1]);
+                } else {
+                    self.appearance_settings(&mut columns[0]);
+                    columns[0].add_space(theme::space::MD);
+                    render_defaults_changed = self.render_default_settings(&mut columns[0]);
+                    self.model_storage_settings(&mut columns[1]);
+                }
+                columns[1].add_space(theme::space::MD);
+                self.update_settings(&mut columns[1]);
+                columns[1].add_space(theme::space::MD);
+                self.data_management_settings(&mut columns[1]);
+            });
+        }
         if render_defaults_changed {
             self.save_render_defaults();
         }
@@ -2699,37 +2828,40 @@ impl eframe::App for NativeApp {
                     )),
             )
             .show(root_ui, |ui| {
-                if self.quit_when_idle {
-                    let palette = theme::palette(light, self.accent);
-                    egui::Frame::new()
-                        .fill(palette.elevated)
-                        .corner_radius(theme::radius::CONTROL)
-                        .inner_margin(egui::Margin::symmetric(12, 8))
-                        .show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label(
-                                    RichText::new("Will quit after current work finishes.")
-                                        .color(palette.warning),
-                                );
-                                if ui.small_button("Cancel exit").clicked() {
-                                    self.quit_when_idle = false;
-                                }
+                ui.with_layout(Layout::top_down(Align::Center), |ui| {
+                    ui.set_max_width(1400.0);
+                    if self.quit_when_idle {
+                        let palette = theme::palette(light, self.accent);
+                        egui::Frame::new()
+                            .fill(palette.elevated)
+                            .corner_radius(theme::radius::CONTROL)
+                            .inner_margin(egui::Margin::symmetric(12, 8))
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label(
+                                        RichText::new("Will quit after current work finishes.")
+                                            .color(palette.warning),
+                                    );
+                                    if ui.small_button("Cancel exit").clicked() {
+                                        self.quit_when_idle = false;
+                                    }
+                                });
                             });
+                        ui.add_space(theme::space::SM);
+                    }
+                    self.header(ui);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| match self.page {
+                            0 => self.home_page(ui),
+                            1 => self.process_page(ui),
+                            2 => self.downloads_page(ui),
+                            3 => self.runtime_page(ui),
+                            4 => self.python_page(ui),
+                            5 => self.settings_page(ui),
+                            _ => self.home_page(ui),
                         });
-                    ui.add_space(theme::space::SM);
-                }
-                self.header(ui);
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| match self.page {
-                        0 => self.home_page(ui),
-                        1 => self.process_page(ui),
-                        2 => self.downloads_page(ui),
-                        3 => self.runtime_page(ui),
-                        4 => self.python_page(ui),
-                        5 => self.settings_page(ui),
-                        _ => self.home_page(ui),
-                    });
+                });
             });
 
         if self.close_confirmation {
@@ -2757,6 +2889,48 @@ impl eframe::App for NativeApp {
                         if ui.button("Keep app open").clicked() {
                             self.close_confirmation = false;
                             self.quit_when_idle = false;
+                        }
+                        if ui.button("Cancel work and quit").clicked() {
+                            self.close_confirmation = false;
+                            self.quit_when_idle = true;
+                            self.post("/api/actions/cancel", json!({}));
+                        }
+                    });
+                });
+        }
+
+        if let Some(kind) = self.destructive_confirmation.clone() {
+            let title = if kind == "python" {
+                "Delete managed Python?"
+            } else {
+                "Delete all managed models?"
+            };
+            let detail = if kind == "python" {
+                "This removes the app-managed Python runtime and its installed packages. Runtime setup can install them again."
+            } else {
+                "This removes downloaded model weights, including custom models, from the selected Windows or WSL storage location. You can download them again later."
+            };
+            egui::Window::new(title)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+                .show(&ctx, |ui| {
+                    ui.set_min_width(390.0);
+                    ui.label(detail);
+                    ui.add_space(theme::space::MD);
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() {
+                            self.destructive_confirmation = None;
+                        }
+                        if ui
+                            .add_enabled(
+                                self.active_task().is_none(),
+                                egui::Button::new("Delete files"),
+                            )
+                            .clicked()
+                        {
+                            self.destructive_confirmation = None;
+                            self.post("/api/data/delete", json!({"kind": kind.clone()}));
                         }
                     });
                 });
@@ -2786,7 +2960,19 @@ fn main() -> eframe::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::active_task_from;
+    use super::{PROCESS_PAGE, active_task_from, settings_uses_two_columns};
+
+    #[test]
+    fn app_starts_in_process_workspace() {
+        assert_eq!(PROCESS_PAGE, 1);
+    }
+
+    #[test]
+    fn settings_switch_to_two_columns_at_wide_sizes() {
+        assert!(!settings_uses_two_columns(959.0));
+        assert!(settings_uses_two_columns(960.0));
+        assert!(settings_uses_two_columns(1440.0));
+    }
 
     #[test]
     fn active_render_prevents_a_full_close() {

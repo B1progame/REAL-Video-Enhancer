@@ -24,7 +24,10 @@ REAL Video Enhancer is a Windows desktop application with a **native Rust interf
 - Choose **WSL Ubuntu** or **Windows** for model storage. In WSL mode, the Windows app starts the selected distribution when needed.
 - Choose a light or dark appearance, select an accent color, and adjust render defaults in Settings.
 - Check for a newer release, download its Windows installer, and launch the installer from **Settings → Updates**.
-- If you close the window during a render, download, or installation, keep the work running in the system tray and reopen the app when you need it.
+- Cancel active renders, model downloads, runtime installs, WSL model setup, or update downloads. When closing during work, keep it in the tray or cancel the work and quit.
+- Remove the managed Python runtime and model library from Settings when you want to reclaim disk space; reinstall them from the app later.
+- Install the Python runtime and its packages with app-managed `uv`; `uv` does not need to be installed globally.
+- Start directly in the Process workspace; first-run setup remains available from its setup prompt and Settings.
 
 The app does not bundle model weights. It downloads them during setup into the storage location you choose.
 
@@ -41,7 +44,7 @@ For WSL setup details and manual model installation, see [WSL-UBUNTU.md](WSL-UBU
 
 Open **Settings → Updates** and use **Check for updates**. If a newer Windows installer is available, select **Download update**, then **Install downloaded update**. The app downloads the installer from this repository's published GitHub release and starts it for you; after setup finishes, the updated app launches again.
 
-**Existing 2.4.29 installs need one manual update first.** That build checks the original upstream release feed, so it cannot discover releases published by this fork. Install 2.4.34 once from [GitHub Releases](https://github.com/B1progame/REAL-Video-Enhancer/releases/latest); later versions can update through Settings. Because this fork is private, install GitHub CLI and sign in to B1progame with `gh auth login -h github.com`; the app uses `gh` for release access and never stores your GitHub token.
+**Existing 2.4.29 installs need one manual update first.** That build checks the original upstream release feed, so it cannot discover releases published by this fork. Install the current version once from [GitHub Releases](https://github.com/B1progame/REAL-Video-Enhancer/releases/latest); later versions can update through Settings. Because this fork is private, install GitHub CLI and sign in to B1progame with `gh auth login -h github.com`; the app uses `gh` for release access and never stores your GitHub token.
 
 The installer updates the application files. It does not remove your model library or settings. When you uninstall, the uninstaller asks whether to also remove the managed runtime, downloaded models, and app data from Windows and WSL.
 

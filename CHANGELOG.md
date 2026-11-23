@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.4.36 — 2026-11-23
+
+- Added cancellation for active render, model, runtime, WSL storage, and app update work, with a cancel-and-quit action when closing during work.
+- Added confirmed Settings actions to remove the managed Python runtime and model weights from the selected storage location.
+- Switched managed Python and package installation to an app-local, checksum-verified uv runtime.
+
+## 2.4.35 — 2026-11-22
+
+- Open directly into the Process workspace on first launch and show a clear first-run setup prompt there.
+- Arrange Settings in adaptive columns on wider windows and keep it single-column at compact sizes.
+
 ## 2.4.34 — 2026-11-22
 
 - Closing the window during a render, model download, runtime setup, storage setup, or app update now offers to keep the work running in the system tray.
