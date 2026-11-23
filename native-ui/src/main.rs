@@ -40,7 +40,7 @@ const PAGES: [(&str, &str); 6] = [
 ];
 const PROCESS_PAGE: usize = 1;
 const RUNTIME_PAGE: usize = 3;
-const PROCESS_COLUMN_THRESHOLD: f32 = 1360.0;
+const PROCESS_COLUMN_THRESHOLD: f32 = 1040.0;
 const HOME_HERO_COLUMN_THRESHOLD: f32 = 840.0;
 const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 880.0;
 
@@ -734,6 +734,7 @@ struct NativeApp {
     first_setup: bool,
     backend: String,
     model_search: String,
+    model_picker_search: HashMap<String, String>,
     input_path: String,
     output_folder: String,
     output_to_mpv: bool,
@@ -826,6 +827,7 @@ impl NativeApp {
             first_setup,
             backend: "pytorch".to_owned(),
             model_search: String::new(),
+            model_picker_search: HashMap::new(),
             input_path: String::new(),
             output_folder: String::new(),
             output_to_mpv: false,
@@ -975,6 +977,25 @@ impl NativeApp {
         {
             self.busy = false;
         }
+    }
+
+    fn start_recommended_runtime_setup(&mut self) {
+        if self.busy {
+            return;
+        }
+        self.install = json!({
+            "status": "running",
+            "progress": 1,
+            "stage": "Preparing runtime",
+            "detail": "Starting managed runtime setup.",
+            "output": []
+        });
+        self.python = json!({
+            "python_available": false,
+            "python_managed": false,
+            "python_detail": "Setting up the app-managed Python runtime."
+        });
+        self.post("/api/startup/install", json!({"backend": "pytorch"}));
     }
 
     fn active_task(&self) -> Option<&'static str> {
@@ -1141,7 +1162,20 @@ impl NativeApp {
                     }
                     "/api/render/status" => self.render = value,
                     "/api/models/download_status" => self.download = value,
-                    "/api/startup/install_status" => self.install = value,
+                    "/api/startup/install_status" => {
+                        let status = value["status"].as_str().unwrap_or_default().to_owned();
+                        let previous = self.install["status"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned();
+                        self.install = value;
+                        if previous != status
+                            && matches!(status.as_str(), "completed" | "error" | "cancelled")
+                        {
+                            self.get("/api/python/info");
+                            self.get("/api/bootstrap");
+                        }
+                    }
                     "/api/animescripter/status" => self.anime = value,
                     "/api/python/info" => self.python = value,
                     "/api/video/inspect" => {
@@ -1200,6 +1234,14 @@ impl NativeApp {
                         self.connected = false;
                         self.engine_error = Some(error.clone());
                     }
+                    if event.endpoint == "/api/python/info" {
+                        self.python = json!({
+                            "python_available": false,
+                            "python_managed": false,
+                            "python_detail": format!("Could not query the app-managed Python environment: {error}"),
+                            "error": error
+                        });
+                    }
                     if matches!(
                         event.endpoint.as_str(),
                         "/api/app/update/check"
@@ -1237,25 +1279,20 @@ impl NativeApp {
 
     fn model_picker(&mut self, ui: &mut egui::Ui, category: &str) -> bool {
         let options = self.model_choices(category);
+        let installed = self.models["model_status"][category].clone();
         let selected = self.selected_models.entry(category.to_owned()).or_default();
-        let display = if selected.is_empty() {
-            "Choose model".to_owned()
-        } else {
-            selected.clone()
-        };
-        let picker_width = ui.available_width().clamp(120.0, 310.0);
-        let mut changed = false;
-        egui::ComboBox::from_id_salt(("model-picker", category))
-            .selected_text(display)
-            .width(picker_width)
-            .show_ui(ui, |ui| {
-                for option in options {
-                    changed |= ui
-                        .selectable_value(selected, option.clone(), option)
-                        .changed();
-                }
-            });
-        changed
+        let search = self
+            .model_picker_search
+            .entry(category.to_owned())
+            .or_default();
+        components::searchable_select(
+            ui,
+            egui::Id::unique(("model-picker", category)),
+            selected,
+            search,
+            &options,
+            |name| installed[name].as_bool() == Some(true),
+        )
     }
 
     fn source_drop_target(&mut self, ui: &mut egui::Ui, height: f32) {
@@ -1439,12 +1476,7 @@ impl NativeApp {
                 } else {
                     ("Starting engine", palette.warning)
                 };
-                egui::Frame::new()
-                    .fill(color.gamma_multiply(if light { 0.10 } else { 0.13 }))
-                    .stroke(Stroke::new(1.0, color.gamma_multiply(0.35)))
-                    .corner_radius(12)
-                    .inner_margin(egui::Margin::symmetric(12, 8))
-                    .show(ui, |ui| components::status_dot(ui, color, status));
+                components::status_badge(ui, status, color);
             });
         });
         ui.add_space(theme::space::LG);
@@ -1711,8 +1743,11 @@ impl NativeApp {
         ui.add_space(theme::space::LG);
         Self::card(ui, "Quick actions", |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Install runtime").clicked() {
-                    self.post("/api/startup/install", json!({"backend": "pytorch"}));
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Install runtime"))
+                    .clicked()
+                {
+                    self.start_recommended_runtime_setup();
                     self.page = 3;
                 }
                 if ui.button("Manage models").clicked() {
@@ -2839,7 +2874,7 @@ impl NativeApp {
                     .add_enabled(enabled, egui::Button::new("Install recommended runtime"))
                     .clicked()
                 {
-                    self.post("/api/startup/install", json!({"backend": "pytorch"}));
+                    self.start_recommended_runtime_setup();
                 }
                 for backend in ["ncnn", "pytorch", "tensorrt"] {
                     let label = format!("Install {}", backend.to_uppercase());
@@ -2907,6 +2942,8 @@ impl NativeApp {
 
     fn python_page(&mut self, ui: &mut egui::Ui) {
         let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        let python_info_pending = self.connected && self.python.is_null();
+        let python_installing = self.install["status"].as_str() == Some("running");
         let interpreter_available = self.python["python_available"].as_bool().unwrap_or(false);
         let available = self.python["python_managed"].as_bool() == Some(true);
         let install_failed = self.install["status"].as_str() == Some("error");
@@ -2934,11 +2971,15 @@ impl NativeApp {
                     self.get("/api/python/info");
                 }
             });
-            ui.label(
+            ui.label(if python_info_pending {
+                "Checking the app-managed Python environment…"
+            } else if python_installing {
+                "Setting up the app-managed Python runtime…"
+            } else {
                 self.python["python_detail"]
                     .as_str()
-                    .unwrap_or("The Runtime page prepares the local Python engine."),
-            );
+                    .unwrap_or("The Runtime page prepares the local Python engine.")
+            });
             if !available {
                 ui.horizontal_wrapped(|ui| {
                     if ui
@@ -2950,7 +2991,7 @@ impl NativeApp {
                         .clicked()
                     {
                         self.page = RUNTIME_PAGE;
-                        self.post("/api/startup/install", json!({"backend": "pytorch"}));
+                        self.start_recommended_runtime_setup();
                     }
                     if install_failed {
                         ui.label(
@@ -2980,8 +3021,14 @@ impl NativeApp {
             components::copyable_path(
                 ui,
                 &python_path,
-                if self.connected {
-                    "No Python interpreter detected"
+                if python_info_pending {
+                    "Checking interpreter…"
+                } else if python_installing {
+                    "Installing Python…"
+                } else if self.connected {
+                    "App-managed Python is not installed"
+                } else if self.engine_error.is_some() {
+                    "Engine unavailable"
                 } else {
                     "Waiting for engine…"
                 },
@@ -3737,7 +3784,7 @@ impl eframe::App for NativeApp {
                     };
                     ui.place(
                         egui::Rect::from_center_size(icon_center, Vec2::splat(22.0)),
-                        icons::styled(icon, icon_color, if compact_sidebar { 20.0 } else { 18.0 }),
+                        icons::styled(icon, icon_color, if compact_sidebar { 22.0 } else { 20.0 }),
                     );
                     if !compact_sidebar {
                         painter.text(
@@ -4009,9 +4056,11 @@ mod tests {
 
     #[test]
     fn process_switches_to_one_column_when_space_is_tight() {
-        assert!(!process_uses_two_columns(1100.0));
-        assert!(!process_uses_two_columns(1359.0));
-        assert!(process_uses_two_columns(1360.0));
+        assert!(!process_uses_two_columns(996.0));
+        assert!(!process_uses_two_columns(1039.0));
+        assert!(process_uses_two_columns(1040.0));
+        // At 1366 px the sidebar and margins leave roughly 1090 px for Process.
+        assert!(process_uses_two_columns(1090.0));
     }
 
     #[test]

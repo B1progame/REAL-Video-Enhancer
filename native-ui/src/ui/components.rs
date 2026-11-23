@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, RichText, Stroke, Ui, Vec2};
+use eframe::egui::{self, Color32, Id, RichText, Stroke, Ui, Vec2};
 
 use super::theme;
 
@@ -8,10 +8,15 @@ pub fn card<R>(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui) -> R) -> 
         .fill(palette.surface)
         .stroke(Stroke::new(1.0, palette.border))
         .corner_radius(theme::radius::CARD)
-        .inner_margin(egui::Margin::same(20))
+        .inner_margin(egui::Margin::same(theme::space::XL as i8))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(RichText::new(title).size(16.0).strong().color(palette.text));
+            ui.label(
+                RichText::new(title)
+                    .size(theme::type_scale::SECTION)
+                    .strong()
+                    .color(palette.text),
+            );
             ui.add_space(theme::space::SM);
             content(ui)
         })
@@ -136,6 +141,7 @@ pub fn primary_button_enabled(
 ) -> egui::Response {
     let accent = ui.visuals().selection.stroke.color;
     let text = theme::contrast_text(accent);
+    let width = width.min(ui.available_width().max(1.0));
     ui.add_enabled(
         enabled,
         egui::Button::new(label.into().strong().color(text))
@@ -145,6 +151,96 @@ pub fn primary_button_enabled(
     )
 }
 
+pub fn searchable_select(
+    ui: &mut Ui,
+    id: Id,
+    selected: &mut String,
+    search: &mut String,
+    options: &[String],
+    installed: impl Fn(&str) -> bool,
+) -> bool {
+    let picker_width = ui.available_width().clamp(120.0, 360.0);
+    let label = if selected.is_empty() {
+        "Choose a model"
+    } else {
+        selected.as_str()
+    };
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label)
+        .width(picker_width)
+        .show_ui(ui, |ui| {
+            ui.add_sized(
+                Vec2::new(ui.available_width(), 38.0),
+                egui::TextEdit::singleline(search)
+                    .hint_text("Search models…")
+                    .margin(Vec2::new(10.0, 8.0)),
+            );
+            ui.separator();
+            let query = search.trim().to_lowercase();
+            let visible = options
+                .iter()
+                .filter(|option| model_option_matches(option, &query))
+                .collect::<Vec<_>>();
+            egui::ScrollArea::vertical()
+                .id_salt(id.with("results"))
+                .max_height(264.0)
+                .show(ui, |ui| {
+                    if visible.is_empty() {
+                        ui.label(
+                            RichText::new("No models match this search.")
+                                .size(theme::type_scale::CAPTION)
+                                .color(
+                                    theme::palette(
+                                        !ui.visuals().dark_mode,
+                                        ui.visuals().selection.stroke.color,
+                                    )
+                                    .secondary,
+                                ),
+                        );
+                    }
+                    for option in visible {
+                        let state = if installed(option) {
+                            "Installed"
+                        } else {
+                            "Get in Downloads"
+                        };
+                        let response = ui
+                            .selectable_label(selected == option, format!("{option}  ·  {state}"));
+                        if response.clicked() {
+                            selected.clone_from(option);
+                            changed = true;
+                            ui.close();
+                        }
+                    }
+                });
+        });
+    changed
+}
+
+pub fn status_badge(ui: &mut Ui, label: &str, color: Color32) {
+    egui::Frame::new()
+        .fill(color.gamma_multiply(if ui.visuals().dark_mode { 0.13 } else { 0.10 }))
+        .stroke(Stroke::new(
+            theme::stroke::BORDER,
+            color.gamma_multiply(0.35),
+        ))
+        .corner_radius(theme::radius::CONTROL)
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
+                ui.painter().circle_filled(dot.center(), 3.0, color);
+                ui.label(RichText::new(label).size(theme::type_scale::LABEL).strong());
+            });
+        });
+}
+
+fn model_option_matches(option: &str, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    query.is_empty() || option.to_lowercase().contains(&query)
+}
+
 pub fn status_dot(ui: &mut Ui, color: Color32, label: &str) {
     ui.horizontal(|ui| {
         let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
@@ -152,4 +248,16 @@ pub fn status_dot(ui: &mut Ui, color: Color32, label: &str) {
         ui.add_space(theme::space::XS);
         ui.label(label);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::model_option_matches;
+
+    #[test]
+    fn model_search_is_case_insensitive_and_trims_input() {
+        assert!(model_option_matches("RealESRGAN x4", "  realesrgan "));
+        assert!(model_option_matches("RIFE 4.25", ""));
+        assert!(!model_option_matches("RIFE 4.25", "esrgan"));
+    }
 }

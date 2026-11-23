@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.54 — 2026-11-23
+
+- Launch the app from Inno Setup using the original user's token so uv can create managed Python version junctions without weakening Setup's RedirectionGuard protection.
+- Keep packaged builds bound to their app-managed Python instead of probing unrelated PATH aliases that can fail with WinError 87.
+- Refresh Python and backend status after runtime setup completes, and replace stale setup errors with live progress while retrying.
+- Clarify pending, missing, and unavailable interpreter states on the Python page.
+- Improve responsive model pickers and shared status styling, and fix trimmed model-search behavior.
+
 ## 2.4.53 — 2026-11-23
 
 - Clear an incomplete managed Python environment before recreating it, so setup recovers cleanly from folders left by older runtime setup attempts.

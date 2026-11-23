@@ -1,6 +1,6 @@
 #define MyAppName "REAL Video Enhancer"
 #ifndef MyAppVersion
-#define MyAppVersion "2.4.53"
+#define MyAppVersion "2.4.54"
 #endif
 #define MyAppPublisher "B1progame"
 #define MyAppURL "https://github.com/B1progame/REAL-Video-Enhancer"
@@ -65,7 +65,9 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; WorkingDir: "{app}"; IconFilename: "{app}\logo-v3.ico"; IconIndex: 0; AppUserModelID: "B1progame.REALVideoEnhancer"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch REAL Video Enhancer"; Flags: nowait
+; Keep Setup's RedirectionGuard in place, but don't pass it to the application.
+; This preserves automatic startup without adding a Finish-page checkbox.
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch REAL Video Enhancer"; Flags: nowait runasoriginaluser
 
 [Code]
 var

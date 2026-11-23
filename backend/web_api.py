@@ -48,12 +48,16 @@ runtime_candidates = [
     LEGACY_PROGRAMS / "REAL Video Enhancer-old" / "python" / "python" / managed_python_name,
     ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"),
 ]
-default_python = next((str(item) for item in runtime_candidates if item.is_file()), None)
-default_python = default_python or shutil.which("python") or shutil.which("python3")
-# In a frozen engine, sys.executable is the engine, not Python. Falling back to
-# it would recursively launch the service as the renderer.
-if not default_python and not FROZEN:
-    default_python = sys.executable
+def resolve_default_python(candidates, frozen):
+    managed = next((str(item) for item in candidates if item.is_file()), None)
+    if managed or frozen:
+        return managed
+    return shutil.which("python") or shutil.which("python3") or sys.executable
+
+
+# Packaged builds only use the app-managed runtime. Resolving an external PATH
+# alias can fail with opaque WinError 87 and is not supported for rendering.
+default_python = resolve_default_python(runtime_candidates, FROZEN)
 PYTHON = os.environ.get("RVE_PYTHON", default_python or "")
 managed_python_paths = {path.resolve() for path in runtime_candidates if path.is_absolute()}
 if PYTHON and Path(PYTHON).resolve() in managed_python_paths:
@@ -69,7 +73,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.53")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.54")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -1290,6 +1294,12 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
     except Exception as exc:
         message = str(exc).strip()
         first_line = message.splitlines()[0] if message else "Runtime setup failed."
+        if os.name == "nt" and ("os error 448" in message.lower() or "untrusted mount point" in message.lower()):
+            first_line = (
+                "Windows blocked uv from creating its Python version link because this app was started "
+                "by the installer. Close the app, reopen it from the Start menu, and retry setup."
+            )
+            message = first_line + "\n\n" + message
         install_log(f"ERROR: {first_line}")
         set_install_state(status="cancelled" if isinstance(exc, InterruptedError) else "error", stage="Setup cancelled" if isinstance(exc, InterruptedError) else "Runtime setup failed", detail=first_line, error=message)
         cancel_event.clear()

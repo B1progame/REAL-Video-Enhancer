@@ -36,6 +36,16 @@ def _release(digest="sha256:" + "a" * 64):
 
 
 class UpdateFlowTests(unittest.TestCase):
+    def test_frozen_build_does_not_fall_back_to_python_on_path(self):
+        with patch.object(web_api.shutil, "which", return_value="python.exe") as lookup:
+            self.assertIsNone(web_api.resolve_default_python([], frozen=True))
+
+        lookup.assert_not_called()
+
+    def test_source_build_can_fall_back_to_system_python(self):
+        with patch.object(web_api.shutil, "which", side_effect=["python.exe", None]):
+            self.assertEqual(web_api.resolve_default_python([], frozen=False), "python.exe")
+
     def test_app_managed_python_is_recognized_by_resolved_path(self):
         with patch.object(web_api, "managed_python_paths", {Path(sys.executable).resolve()}):
             self.assertTrue(web_api.is_managed_python(sys.executable))

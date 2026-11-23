@@ -23,6 +23,20 @@ pub mod radius {
     pub const DIALOG: u8 = 16;
 }
 
+pub mod type_scale {
+    pub const PAGE: f32 = 27.0;
+    pub const SECTION: f32 = 16.0;
+    pub const BODY: f32 = 15.0;
+    pub const BUTTON: f32 = 14.0;
+    pub const LABEL: f32 = 13.0;
+    pub const CAPTION: f32 = 12.0;
+    pub const MONOSPACE: f32 = 12.0;
+}
+
+pub mod stroke {
+    pub const BORDER: f32 = 1.0;
+}
+
 pub mod motion {
     pub const HOVER_SECONDS: f32 = 0.12;
     pub const NAV_SECONDS: f32 = 0.22;
@@ -130,19 +144,20 @@ pub fn apply(ctx: &egui::Context, accent: Color32, appearance: &str, reduce_moti
         style.explanation_tooltips = true;
         style
             .text_styles
-            .insert(TextStyle::Heading, FontId::proportional(27.0));
+            .insert(TextStyle::Heading, FontId::proportional(type_scale::PAGE));
         style
             .text_styles
-            .insert(TextStyle::Body, FontId::proportional(15.0));
+            .insert(TextStyle::Body, FontId::proportional(type_scale::BODY));
         style
             .text_styles
-            .insert(TextStyle::Button, FontId::proportional(14.0));
+            .insert(TextStyle::Button, FontId::proportional(type_scale::BUTTON));
         style
             .text_styles
-            .insert(TextStyle::Small, FontId::proportional(12.0));
-        style
-            .text_styles
-            .insert(TextStyle::Monospace, FontId::monospace(12.0));
+            .insert(TextStyle::Small, FontId::proportional(type_scale::CAPTION));
+        style.text_styles.insert(
+            TextStyle::Monospace,
+            FontId::monospace(type_scale::MONOSPACE),
+        );
     });
 }
 
