@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4.42 — 2026-11-23
+
+- Prevent Home content from overflowing after window or display-DPI changes by stacking the hero and status cards at compact sizes.
+
 ## 2.4.41 — 2026-11-23
 
 - Keep the Process workspace in one column until the window is wide enough for both cards, preventing clipped controls on compact windows.

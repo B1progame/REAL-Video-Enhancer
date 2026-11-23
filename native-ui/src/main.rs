@@ -40,6 +40,8 @@ const PAGES: [(&str, &str); 6] = [
 ];
 const PROCESS_PAGE: usize = 1;
 const PROCESS_COLUMN_THRESHOLD: f32 = 1360.0;
+const HOME_HERO_COLUMN_THRESHOLD: f32 = 960.0;
+const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 1080.0;
 
 fn settings_uses_two_columns(available_width: f32) -> bool {
     available_width >= 960.0
@@ -47,6 +49,14 @@ fn settings_uses_two_columns(available_width: f32) -> bool {
 
 fn process_uses_two_columns(available_width: f32) -> bool {
     available_width >= PROCESS_COLUMN_THRESHOLD
+}
+
+fn home_hero_uses_two_columns(available_width: f32) -> bool {
+    available_width >= HOME_HERO_COLUMN_THRESHOLD
+}
+
+fn home_status_uses_three_columns(available_width: f32) -> bool {
+    available_width >= HOME_STATUS_THREE_COLUMN_THRESHOLD
 }
 
 #[derive(Clone)]
@@ -1434,127 +1444,104 @@ impl NativeApp {
         );
     }
 
-    fn home_page(&mut self, ui: &mut egui::Ui) {
-        let light = !ui.visuals().dark_mode;
-        let palette = theme::palette(light, self.accent);
-        let backends = self.bootstrap["system"]["available_backends"]
-            .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let selected_backend_ready = backends.contains(&self.backend);
-        let model_count = self.models.as_object().map_or(0, |categories| {
-            categories
-                .values()
-                .filter_map(Value::as_array)
-                .map(Vec::len)
-                .sum::<usize>()
-        });
-        let disk_space = self.bootstrap["system"]["available_disk_gb"].as_f64();
-
-        egui::Frame::new()
-            .fill(palette.surface)
-            .stroke(Stroke::new(1.0, palette.accent.gamma_multiply(0.32)))
-            .corner_radius(theme::radius::CARD)
-            .inner_margin(egui::Margin::same(24))
-            .show(ui, |ui| {
-                ui.columns(2, |columns| {
-                    let left = &mut columns[0];
-                    left.label(
-                        RichText::new("REAL VIDEO ENHANCER")
-                            .size(11.0)
-                            .strong()
-                            .color(palette.accent),
-                    );
-                    left.add_space(theme::space::SM);
-                    left.label(
-                        RichText::new("Make more of\nevery frame.")
-                            .size(34.0)
-                            .strong()
-                            .color(palette.text),
-                    );
-                    left.add_space(theme::space::SM);
-                    left.label(
-                        RichText::new("Upscale, smooth motion, and restore detail in a clear, local workflow.")
-                            .size(15.0)
-                            .color(palette.secondary),
-                    );
-                    left.add_space(theme::space::LG);
-                    if components::primary_button(left, "Choose a video").clicked() {
-                        self.page = 1;
-                        self.get("/api/dialog/select_input");
-                    }
-                    left.add_space(theme::space::SM);
-                    left.label(
-                        RichText::new("Your footage stays on your device.")
-                            .size(11.0)
-                            .color(palette.muted),
-                    );
-
-                    let right = &mut columns[1];
-                    let width = right.available_width().max(1.0);
-                    let size = Vec2::new(width, (width * 9.0 / 16.0).clamp(150.0, 245.0));
-                    let (rect, _) = right.allocate_exact_size(size, egui::Sense::hover());
-                    right.painter().rect_filled(rect, 12.0, palette.elevated);
-                    if let Some(texture) = self
-                        .source_preview
-                        .as_ref()
-                        .filter(|_| self.source_preview_path == self.input_path.trim())
-                    {
-                        right.place(
-                            rect,
-                            egui::Image::new(texture)
-                                .fit_to_exact_size(size)
-                                .maintain_aspect_ratio(true)
-                                .corner_radius(12.0),
-                        );
-                    } else {
-                        let icon_rect = egui::Rect::from_center_size(
-                            rect.center() - Vec2::new(0.0, 13.0),
-                            Vec2::splat(36.0),
-                        );
-                        right.place(icon_rect, icons::styled("video", palette.accent, 30.0));
-                        right.painter().text(
-                            rect.center() + Vec2::new(0.0, 27.0),
-                            egui::Align2::CENTER_CENTER,
-                            if self.input_path.is_empty() {
-                                "Your video preview appears here"
-                            } else {
-                                "Preparing your video preview…"
-                            },
-                            egui::FontId::proportional(12.0),
-                            palette.secondary,
-                        );
-                    }
-                    right.add_space(theme::space::SM);
-                    right.horizontal(|ui| {
-                        let file_name = Path::new(&self.input_path)
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("No source selected");
-                        ui.label(RichText::new(file_name).strong().color(palette.text));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let count = if !self.connected {
-                                "Catalog unavailable".to_owned()
-                            } else if model_count == 1 {
-                                "1 model option".to_owned()
-                            } else {
-                                format!("{model_count} model options")
-                            };
-                            ui.label(RichText::new(count).size(11.0).color(palette.muted));
-                        });
-                    });
-                });
-            });
-
+    fn home_hero_intro(&mut self, ui: &mut egui::Ui, palette: theme::Palette) {
+        ui.label(
+            RichText::new("REAL VIDEO ENHANCER")
+                .size(11.0)
+                .strong()
+                .color(palette.accent),
+        );
+        ui.add_space(theme::space::SM);
+        ui.label(
+            RichText::new("Make more of\nevery frame.")
+                .size(34.0)
+                .strong()
+                .color(palette.text),
+        );
+        ui.add_space(theme::space::SM);
+        ui.label(
+            RichText::new("Upscale, smooth motion, and restore detail in a clear, local workflow.")
+                .size(15.0)
+                .color(palette.secondary),
+        );
         ui.add_space(theme::space::LG);
-        ui.columns(3, |columns| {
-            Self::card(&mut columns[0], "Engine", |ui| {
+        if components::primary_button(ui, "Choose a video").clicked() {
+            self.page = 1;
+            self.get("/api/dialog/select_input");
+        }
+        ui.add_space(theme::space::SM);
+        ui.label(
+            RichText::new("Your footage stays on your device.")
+                .size(11.0)
+                .color(palette.muted),
+        );
+    }
+
+    fn home_video_preview(&self, ui: &mut egui::Ui, palette: theme::Palette, model_count: usize) {
+        let width = ui.available_width().max(1.0);
+        let size = Vec2::new(width, (width * 9.0 / 16.0).clamp(150.0, 245.0));
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        ui.painter().rect_filled(rect, 12.0, palette.elevated);
+        if let Some(texture) = self
+            .source_preview
+            .as_ref()
+            .filter(|_| self.source_preview_path == self.input_path.trim())
+        {
+            ui.place(
+                rect,
+                egui::Image::new(texture)
+                    .fit_to_exact_size(size)
+                    .maintain_aspect_ratio(true)
+                    .corner_radius(12.0),
+            );
+        } else {
+            let icon_rect = egui::Rect::from_center_size(
+                rect.center() - Vec2::new(0.0, 13.0),
+                Vec2::splat(36.0),
+            );
+            ui.place(icon_rect, icons::styled("video", palette.accent, 30.0));
+            ui.painter().text(
+                rect.center() + Vec2::new(0.0, 27.0),
+                egui::Align2::CENTER_CENTER,
+                if self.input_path.is_empty() {
+                    "Your video preview appears here"
+                } else {
+                    "Preparing your video preview…"
+                },
+                egui::FontId::proportional(12.0),
+                palette.secondary,
+            );
+        }
+        ui.add_space(theme::space::SM);
+        let file_name = Path::new(&self.input_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("No source selected");
+        let count = if !self.connected {
+            "Catalog unavailable".to_owned()
+        } else if model_count == 1 {
+            "1 model option".to_owned()
+        } else {
+            format!("{model_count} model options")
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(file_name).strong().color(palette.text));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(count).size(11.0).color(palette.muted));
+            });
+        });
+    }
+
+    fn home_status_cards(
+        &self,
+        ui: &mut egui::Ui,
+        palette: theme::Palette,
+        backends: &[String],
+        selected_backend_ready: bool,
+        model_count: usize,
+    ) {
+        let engine = |ui: &mut egui::Ui| {
+            Self::card(ui, "Engine", |ui| {
                 components::status_dot(
                     ui,
                     if self.connected {
@@ -1587,7 +1574,9 @@ impl NativeApp {
                     }),
                 );
             });
-            Self::card(&mut columns[1], "Inference backend", |ui| {
+        };
+        let backend = |ui: &mut egui::Ui| {
+            Self::card(ui, "Inference backend", |ui| {
                 components::status_dot(
                     ui,
                     if selected_backend_ready {
@@ -1612,7 +1601,9 @@ impl NativeApp {
                     .color(palette.secondary),
                 );
             });
-            Self::card(&mut columns[2], "Model storage", |ui| {
+        };
+        let storage = |ui: &mut egui::Ui| {
+            Self::card(ui, "Model storage", |ui| {
                 let (label, color) = if self.model_storage == "wsl" {
                     ("WSL · Ubuntu", palette.accent)
                 } else {
@@ -1627,7 +1618,74 @@ impl NativeApp {
                 };
                 ui.label(RichText::new(models).size(12.0).color(palette.secondary));
             });
+        };
+
+        let width = ui.available_width();
+        if home_status_uses_three_columns(width) {
+            ui.columns(3, |columns| {
+                engine(&mut columns[0]);
+                backend(&mut columns[1]);
+                storage(&mut columns[2]);
+            });
+        } else if width >= 640.0 {
+            ui.columns(2, |columns| {
+                engine(&mut columns[0]);
+                backend(&mut columns[1]);
+            });
+            ui.add_space(theme::space::MD);
+            storage(ui);
+        } else {
+            engine(ui);
+            ui.add_space(theme::space::MD);
+            backend(ui);
+            ui.add_space(theme::space::MD);
+            storage(ui);
+        }
+    }
+
+    fn home_page(&mut self, ui: &mut egui::Ui) {
+        let light = !ui.visuals().dark_mode;
+        let palette = theme::palette(light, self.accent);
+        let backends = self.bootstrap["system"]["available_backends"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let selected_backend_ready = backends.contains(&self.backend);
+        let model_count = self.models.as_object().map_or(0, |categories| {
+            categories
+                .values()
+                .filter_map(Value::as_array)
+                .map(Vec::len)
+                .sum::<usize>()
         });
+        let disk_space = self.bootstrap["system"]["available_disk_gb"].as_f64();
+
+        egui::Frame::new()
+            .fill(palette.surface)
+            .stroke(Stroke::new(1.0, palette.accent.gamma_multiply(0.32)))
+            .corner_radius(theme::radius::CARD)
+            .inner_margin(egui::Margin::same(24))
+            .show(ui, |ui| {
+                if home_hero_uses_two_columns(ui.available_width()) {
+                    ui.columns(2, |columns| {
+                        self.home_hero_intro(&mut columns[0], palette);
+                        self.home_video_preview(&mut columns[1], palette, model_count);
+                    });
+                } else {
+                    self.home_hero_intro(ui, palette);
+                    ui.add_space(theme::space::LG);
+                    self.home_video_preview(ui, palette, model_count);
+                }
+            });
+
+        ui.add_space(theme::space::LG);
+        self.home_status_cards(ui, palette, &backends, selected_backend_ready, model_count);
 
         ui.add_space(theme::space::LG);
         Self::card(ui, "Quick actions", |ui| {
@@ -3774,8 +3832,9 @@ fn set_windows_app_identity() {}
 #[cfg(test)]
 mod tests {
     use super::{
-        PROCESS_PAGE, active_task_from, encode_query_component, process_uses_two_columns,
-        settings_uses_two_columns,
+        HOME_HERO_COLUMN_THRESHOLD, HOME_STATUS_THREE_COLUMN_THRESHOLD, PROCESS_PAGE,
+        active_task_from, encode_query_component, home_hero_uses_two_columns,
+        home_status_uses_three_columns, process_uses_two_columns, settings_uses_two_columns,
     };
 
     #[test]
@@ -3803,6 +3862,20 @@ mod tests {
         assert!(!process_uses_two_columns(1100.0));
         assert!(!process_uses_two_columns(1359.0));
         assert!(process_uses_two_columns(1360.0));
+    }
+
+    #[test]
+    fn home_layout_reflows_before_cards_can_clip() {
+        assert!(!home_hero_uses_two_columns(
+            HOME_HERO_COLUMN_THRESHOLD - 1.0
+        ));
+        assert!(home_hero_uses_two_columns(HOME_HERO_COLUMN_THRESHOLD));
+        assert!(!home_status_uses_three_columns(
+            HOME_STATUS_THREE_COLUMN_THRESHOLD - 1.0
+        ));
+        assert!(home_status_uses_three_columns(
+            HOME_STATUS_THREE_COLUMN_THRESHOLD
+        ));
     }
 
     #[test]
