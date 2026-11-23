@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.51 — 2026-11-23
+
+- Keep background status polling from clearing the in-flight action state, and reject duplicate POST actions until the current request completes.
+- Add a regression check for busy-state handling across poll and action responses.
+
 ## 2.4.50 — 2026-11-23
 
 - Keep the no-interpreter Python check from invoking an empty executable path, and explicitly report external Python as different from the app-managed runtime.

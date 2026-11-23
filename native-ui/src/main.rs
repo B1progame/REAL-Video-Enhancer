@@ -48,6 +48,10 @@ fn can_start_model_download(connected: bool, active: bool, busy: bool) -> bool {
     connected && !active && !busy
 }
 
+fn pending_post_after_event(pending: bool, is_post: bool) -> bool {
+    pending && !is_post
+}
+
 fn settings_uses_two_columns(available_width: f32) -> bool {
     available_width >= 960.0
 }
@@ -74,6 +78,7 @@ struct ApiEvent {
     endpoint: String,
     value: Result<Value, String>,
     image: Option<Result<Vec<u8>, String>>,
+    is_post: bool,
 }
 
 struct ApiBridge {
@@ -304,6 +309,7 @@ fn start_api_worker(ctx: egui::Context) -> ApiBridge {
                             endpoint,
                             value,
                             image,
+                            is_post: false,
                         });
                         ctx.request_repaint();
                     }
@@ -313,6 +319,7 @@ fn start_api_worker(ctx: egui::Context) -> ApiBridge {
                             endpoint,
                             value,
                             image: None,
+                            is_post: true,
                         });
                         ctx.request_repaint();
                     }
@@ -344,6 +351,7 @@ fn start_api_worker(ctx: egui::Context) -> ApiBridge {
                                 endpoint: "/api/connection".to_owned(),
                                 value: Err(error.clone()),
                                 image: None,
+                                is_post: false,
                             });
                             connected = false;
                             ctx.request_repaint();
@@ -353,6 +361,7 @@ fn start_api_worker(ctx: egui::Context) -> ApiBridge {
                             endpoint: (*endpoint).to_owned(),
                             value,
                             image: None,
+                            is_post: false,
                         });
                         ctx.request_repaint();
                     }
@@ -954,11 +963,18 @@ impl NativeApp {
     }
 
     fn post(&mut self, endpoint: &str, payload: Value) {
+        if self.busy {
+            return;
+        }
         self.busy = true;
-        let _ = self
+        if self
             .api
             .send
-            .send(ApiCommand::Post(endpoint.to_owned(), payload));
+            .send(ApiCommand::Post(endpoint.to_owned(), payload))
+            .is_err()
+        {
+            self.busy = false;
+        }
     }
 
     fn active_task(&self) -> Option<&'static str> {
@@ -1108,7 +1124,7 @@ impl NativeApp {
                 ctx.request_repaint();
                 continue;
             }
-            self.busy = false;
+            self.busy = pending_post_after_event(self.busy, event.is_post);
             match event.value {
                 Ok(value) => match event.endpoint.as_str() {
                     "/api/bootstrap" => {
@@ -3972,8 +3988,8 @@ mod tests {
     use super::{
         HOME_HERO_COLUMN_THRESHOLD, HOME_STATUS_THREE_COLUMN_THRESHOLD, PROCESS_PAGE,
         active_task_from, can_start_model_download, encode_query_component,
-        home_hero_uses_two_columns, home_status_uses_three_columns, process_uses_two_columns,
-        settings_uses_two_columns,
+        home_hero_uses_two_columns, home_status_uses_three_columns, pending_post_after_event,
+        process_uses_two_columns, settings_uses_two_columns,
     };
 
     #[test]
@@ -4028,6 +4044,13 @@ mod tests {
         assert!(!can_start_model_download(true, true, false));
         assert!(!can_start_model_download(true, false, true));
         assert!(can_start_model_download(true, false, false));
+    }
+
+    #[test]
+    fn background_poll_does_not_clear_a_pending_post() {
+        assert!(pending_post_after_event(true, false));
+        assert!(!pending_post_after_event(true, true));
+        assert!(!pending_post_after_event(false, false));
     }
 
     #[test]
