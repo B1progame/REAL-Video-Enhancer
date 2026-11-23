@@ -1,6 +1,6 @@
 #define MyAppName "REAL Video Enhancer"
 #ifndef MyAppVersion
-#define MyAppVersion "2.4.47"
+#define MyAppVersion "2.4.48"
 #endif
 #define MyAppPublisher "B1progame"
 #define MyAppURL "https://github.com/B1progame/REAL-Video-Enhancer"

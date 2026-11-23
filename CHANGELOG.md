@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.48 — 2026-11-23
+
+- Report missing or broken managed Python cleanly instead of launching an empty interpreter path and showing a Windows parameter error.
+- Make Runtime reflect failed or cancelled setup even when system Python happens to report installed backends, and expose the last installer output directly in the page.
+- Add a clear retry action on the Python page, improve compact sidebar selection contrast, and give the custom accent picker its own labeled control.
+
 ## 2.4.47 — 2026-11-23
 
 - Use consistent truncated, copyable path rows across Process, Downloads, Runtime, and Python so long paths stay inside their cards.

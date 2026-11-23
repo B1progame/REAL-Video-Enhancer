@@ -69,7 +69,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.47")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.48")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -1999,9 +1999,24 @@ class Handler(BaseHTTPRequestHandler):
                 respond_json(self, dict(update_state))
             return
         if path == "/api/python/info":
-            try: detail = subprocess.run([PYTHON, "--version"], capture_output=True, text=True, timeout=4, **hidden_subprocess_kwargs()).stdout.strip() or subprocess.run([PYTHON, "--version"], capture_output=True, text=True, timeout=4, **hidden_subprocess_kwargs()).stderr.strip()
-            except Exception as exc: detail = str(exc)
-            respond_json(self, {"python_path": PYTHON or None, "python_available": bool(PYTHON and (Path(PYTHON).exists() or shutil.which(PYTHON))), "python_detail": detail, "pip_detail": "Use the runtime's Python environment.", "version": detail}); return
+            python_path = PYTHON.strip()
+            python_exists = bool(python_path and (Path(python_path).is_file() or shutil.which(python_path)))
+            if not python_path:
+                detail = "Managed Python is not installed. Install the recommended runtime from the Runtime page."
+            elif not python_exists:
+                detail = f"The configured Python interpreter was not found: {python_path}"
+            else:
+                try:
+                    probe = subprocess.run([python_path, "--version"], capture_output=True, text=True,
+                                           timeout=4, check=False, **hidden_subprocess_kwargs())
+                    detail = (probe.stdout or probe.stderr).strip()
+                    if probe.returncode:
+                        detail = detail or f"Python exited with code {probe.returncode}."
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    detail = f"Could not start Python: {exc}"
+            respond_json(self, {"python_path": python_path or None, "python_available": python_exists,
+                                "python_detail": detail, "pip_detail": "Use the runtime's Python environment.",
+                                "version": detail}); return
         if path == "/api/models":
             backend, catalog = model_catalog(urllib.parse.parse_qs(url.query).get("backend", ["pytorch"])[0])
             models = {category: list(entries) for category, entries in catalog.items()}

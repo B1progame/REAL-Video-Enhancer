@@ -39,6 +39,7 @@ const PAGES: [(&str, &str); 6] = [
     ("Settings", "settings"),
 ];
 const PROCESS_PAGE: usize = 1;
+const RUNTIME_PAGE: usize = 3;
 const PROCESS_COLUMN_THRESHOLD: f32 = 1360.0;
 const HOME_HERO_COLUMN_THRESHOLD: f32 = 840.0;
 const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 880.0;
@@ -2714,6 +2715,8 @@ impl NativeApp {
             || (progress > 0.0
                 && progress < 100.0
                 && !matches!(status.as_str(), "cancelled" | "error" | "completed"));
+        let failed = status == "error";
+        let cancelled = status == "cancelled";
         let system = self.bootstrap["system"].clone();
         let available = system["available_backends"]
             .as_array()
@@ -2726,6 +2729,8 @@ impl NativeApp {
             })
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "No inference backend detected".to_owned());
+        let runtime_ready = !available.starts_with("No ")
+            && self.python["python_available"].as_bool() == Some(true);
 
         Self::card(ui, "Inference runtime", |ui| {
             ui.horizontal(|ui| {
@@ -2733,14 +2738,18 @@ impl NativeApp {
                     ui,
                     if installing {
                         palette.accent
-                    } else if available.starts_with("No ") {
+                    } else if failed || cancelled || available.starts_with("No ") {
                         palette.warning
                     } else {
                         palette.success
                     },
                     if installing {
                         "Installing"
-                    } else if available.starts_with("No ") {
+                    } else if failed {
+                        "Setup failed"
+                    } else if cancelled {
+                        "Setup cancelled"
+                    } else if !runtime_ready {
                         "Setup required"
                     } else {
                         "Ready"
@@ -2759,7 +2768,7 @@ impl NativeApp {
                     .as_str()
                     .unwrap_or("Install a rendering backend to enable video enhancement."),
             );
-            if progress > 0.0 || installing {
+            if installing {
                 ui.add(
                     egui::ProgressBar::new(progress / 100.0).text(
                         self.install["stage"]
@@ -2767,6 +2776,45 @@ impl NativeApp {
                             .unwrap_or("Preparing runtime"),
                     ),
                 );
+            }
+            if failed || cancelled {
+                ui.add_space(theme::space::SM);
+                egui::Frame::new()
+                    .fill(palette.error.gamma_multiply(0.10))
+                    .stroke(Stroke::new(1.0, palette.error.gamma_multiply(0.35)))
+                    .corner_radius(theme::radius::CONTROL)
+                    .inner_margin(egui::Margin::symmetric(12, 9))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(if failed {
+                                "Setup needs attention"
+                            } else {
+                                "Setup was cancelled"
+                            })
+                            .strong()
+                            .color(if failed {
+                                palette.error
+                            } else {
+                                palette.warning
+                            }),
+                        );
+                        if failed && let Some(lines) = self.install["output"].as_array() {
+                            egui::ScrollArea::vertical()
+                                .max_height(112.0)
+                                .show(ui, |ui| {
+                                    for line in
+                                        lines.iter().rev().take(6).rev().filter_map(Value::as_str)
+                                    {
+                                        ui.label(
+                                            RichText::new(line)
+                                                .monospace()
+                                                .size(11.0)
+                                                .color(palette.secondary),
+                                        );
+                                    }
+                                });
+                        }
+                    });
             }
             ui.add_space(theme::space::MD);
             ui.horizontal_wrapped(|ui| {
@@ -2844,6 +2892,7 @@ impl NativeApp {
     fn python_page(&mut self, ui: &mut egui::Ui) {
         let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
         let available = self.python["python_available"].as_bool().unwrap_or(false);
+        let install_failed = self.install["status"].as_str() == Some("error");
         let python_path = self.python["python_path"].as_str().unwrap_or("").to_owned();
         Self::card(ui, "Managed Python", |ui| {
             ui.horizontal(|ui| {
@@ -2851,11 +2900,15 @@ impl NativeApp {
                     ui,
                     if available {
                         palette.success
+                    } else if install_failed {
+                        palette.error
                     } else {
                         palette.warning
                     },
                     if available {
                         "Interpreter ready"
+                    } else if install_failed {
+                        "Setup failed"
                     } else {
                         "Not installed"
                     },
@@ -2869,6 +2922,31 @@ impl NativeApp {
                     .as_str()
                     .unwrap_or("The Runtime page prepares the local Python engine."),
             );
+            if !available {
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .button(if install_failed {
+                            "Retry runtime setup"
+                        } else {
+                            "Set up Python runtime"
+                        })
+                        .clicked()
+                    {
+                        self.page = RUNTIME_PAGE;
+                        self.post("/api/startup/install", json!({"backend": "pytorch"}));
+                    }
+                    if install_failed {
+                        ui.label(
+                            RichText::new(
+                                self.install["detail"]
+                                    .as_str()
+                                    .unwrap_or("Runtime setup failed."),
+                            )
+                            .color(palette.error),
+                        );
+                    }
+                });
+            }
             ui.add_space(theme::space::SM);
             ui.label(
                 RichText::new("Interpreter path")
@@ -3010,18 +3088,31 @@ impl NativeApp {
                     }
                     response.on_hover_text(format!("Use the {label} accent"));
                 }
-                ui.horizontal(|ui| {
-                    if ui.color_edit_button_srgba(&mut self.accent).changed() {
-                        save_accent(self.accent);
-                        apply_theme(ui.ctx(), self.accent, &self.appearance, self.reduce_motion);
-                    }
-                    ui.label(
-                        RichText::new("Custom accent")
-                            .size(11.0)
-                            .color(palette.secondary),
-                    );
-                });
             });
+            ui.add_space(theme::space::SM);
+            egui::Frame::new()
+                .fill(palette.elevated)
+                .stroke(Stroke::new(1.0, palette.border))
+                .corner_radius(theme::radius::CONTROL)
+                .inner_margin(egui::Margin::symmetric(10, 6))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.color_edit_button_srgba(&mut self.accent).changed() {
+                            save_accent(self.accent);
+                            apply_theme(
+                                ui.ctx(),
+                                self.accent,
+                                &self.appearance,
+                                self.reduce_motion,
+                            );
+                        }
+                        ui.label(
+                            RichText::new("Custom accent")
+                                .size(11.0)
+                                .color(palette.secondary),
+                        );
+                    });
+                });
             if self.reduce_motion {
                 ui.add_space(theme::space::SM);
                 ui.label(
@@ -3575,7 +3666,7 @@ impl eframe::App for NativeApp {
                         },
                     );
                     let fill = if selected {
-                        theme_accent.gamma_multiply(if light { 0.12 } else { 0.10 })
+                        theme_accent.gamma_multiply(if light { 0.18 } else { 0.16 })
                     } else if response.hovered() {
                         ui.visuals().widgets.hovered.bg_fill.gamma_multiply(hover)
                     } else {
@@ -3583,12 +3674,20 @@ impl eframe::App for NativeApp {
                     };
                     let painter = ui.painter().clone();
                     painter.rect_filled(rect, 8.0, fill);
+                    if selected {
+                        painter.rect_stroke(
+                            rect,
+                            8.0,
+                            Stroke::new(1.0, theme_accent.gamma_multiply(0.5)),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
                     let active_center = first_navigation_row + active_index * 47.0 + 22.0;
                     if active_center >= rect.top() - 10.0 && active_center <= rect.bottom() + 10.0 {
                         painter.rect_filled(
                             egui::Rect::from_center_size(
                                 egui::pos2(rect.left() + 2.0, active_center),
-                                Vec2::new(3.0, 22.0),
+                                Vec2::new(3.0, 28.0),
                             ),
                             1.5,
                             theme_accent,
@@ -3606,7 +3705,7 @@ impl eframe::App for NativeApp {
                     };
                     ui.place(
                         egui::Rect::from_center_size(icon_center, Vec2::splat(22.0)),
-                        icons::styled(icon, icon_color, 18.0),
+                        icons::styled(icon, icon_color, if compact_sidebar { 20.0 } else { 18.0 }),
                     );
                     if !compact_sidebar {
                         painter.text(
