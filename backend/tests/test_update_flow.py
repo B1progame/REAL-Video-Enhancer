@@ -44,6 +44,27 @@ class UpdateFlowTests(unittest.TestCase):
         with patch.object(web_api, "managed_python_paths", set()):
             self.assertFalse(web_api.is_managed_python(sys.executable))
 
+    def test_missing_python_does_not_launch_an_empty_command(self):
+        with patch.object(web_api, "PYTHON", ""), patch.object(web_api.subprocess, "run") as run:
+            result = web_api.python_info_payload()
+
+        self.assertFalse(result["python_available"])
+        self.assertFalse(result["python_managed"])
+        self.assertIn("not installed", result["python_detail"])
+        run.assert_not_called()
+
+    def test_system_python_is_reported_as_external_not_managed(self):
+        with (
+            patch.object(web_api, "PYTHON", sys.executable),
+            patch.object(web_api, "managed_python_paths", set()),
+            patch.object(web_api.subprocess, "run", return_value=CompletedProcess([], 0, "Python 3.12.0", "")),
+        ):
+            result = web_api.python_info_payload()
+
+        self.assertTrue(result["python_available"])
+        self.assertFalse(result["python_managed"])
+        self.assertIn("External Python", result["python_detail"])
+
     def test_video_preview_uses_a_bounded_real_frame(self):
         with TemporaryDirectory() as directory:
             video = Path(directory) / "source clip.mp4"

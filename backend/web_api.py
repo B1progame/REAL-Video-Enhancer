@@ -69,7 +69,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.49")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.50")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -1006,6 +1006,30 @@ def is_managed_python(path):
         return Path(path).resolve() in managed_python_paths
     except (OSError, RuntimeError):
         return False
+
+
+def python_info_payload():
+    python_path = PYTHON.strip()
+    python_exists = bool(python_path and (Path(python_path).is_file() or shutil.which(python_path)))
+    python_managed = python_exists and is_managed_python(python_path)
+    if not python_path:
+        detail = "Managed Python is not installed. Install the recommended runtime from the Runtime page."
+    elif not python_exists:
+        detail = f"The configured Python interpreter was not found: {python_path}"
+    else:
+        try:
+            probe = subprocess.run([python_path, "--version"], capture_output=True, text=True,
+                                   timeout=4, check=False, **hidden_subprocess_kwargs())
+            detail = (probe.stdout or probe.stderr).strip()
+            if probe.returncode:
+                detail = detail or f"Python exited with code {probe.returncode}."
+            if not python_managed:
+                detail += " · External Python detected; the app-managed runtime is not installed."
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            detail = f"Could not start Python: {exc}"
+    return {"python_path": python_path or None, "python_available": python_exists,
+            "python_managed": python_managed, "python_detail": detail,
+            "pip_detail": "Use the runtime's Python environment.", "version": detail}
 
 
 def managed_uv_path():
@@ -2008,28 +2032,7 @@ class Handler(BaseHTTPRequestHandler):
                 respond_json(self, dict(update_state))
             return
         if path == "/api/python/info":
-            python_path = PYTHON.strip()
-            python_exists = bool(python_path and (Path(python_path).is_file() or shutil.which(python_path)))
-            python_managed = python_exists and is_managed_python(python_path)
-            if not python_path:
-                detail = "Managed Python is not installed. Install the recommended runtime from the Runtime page."
-            elif not python_exists:
-                detail = f"The configured Python interpreter was not found: {python_path}"
-            else:
-                try:
-                    probe = subprocess.run([python_path, "--version"], capture_output=True, text=True,
-                                           timeout=4, check=False, **hidden_subprocess_kwargs())
-                    detail = (probe.stdout or probe.stderr).strip()
-                    if probe.returncode:
-                        detail = detail or f"Python exited with code {probe.returncode}."
-                    if not python_managed:
-                        detail += " · External Python detected; the app-managed runtime is not installed."
-                except (OSError, subprocess.TimeoutExpired) as exc:
-                    detail = f"Could not start Python: {exc}"
-            respond_json(self, {"python_path": python_path or None, "python_available": python_exists,
-                                "python_managed": python_managed,
-                                "python_detail": detail, "pip_detail": "Use the runtime's Python environment.",
-                                "version": detail}); return
+            respond_json(self, python_info_payload()); return
         if path == "/api/models":
             backend, catalog = model_catalog(urllib.parse.parse_qs(url.query).get("backend", ["pytorch"])[0])
             models = {category: list(entries) for category, entries in catalog.items()}
