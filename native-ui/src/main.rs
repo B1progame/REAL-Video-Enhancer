@@ -40,8 +40,12 @@ const PAGES: [(&str, &str); 6] = [
 ];
 const PROCESS_PAGE: usize = 1;
 const PROCESS_COLUMN_THRESHOLD: f32 = 1360.0;
-const HOME_HERO_COLUMN_THRESHOLD: f32 = 840.0;
-const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 880.0;
+const HOME_HERO_COLUMN_THRESHOLD: f32 = 1040.0;
+const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 1080.0;
+
+fn can_start_model_download(connected: bool, active: bool, busy: bool) -> bool {
+    connected && !active && !busy
+}
 
 fn settings_uses_two_columns(available_width: f32) -> bool {
     available_width >= 960.0
@@ -1384,7 +1388,7 @@ impl NativeApp {
     fn header(&self, ui: &mut egui::Ui) {
         let light = !ui.visuals().dark_mode;
         let palette = theme::palette(light, self.accent);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let icon_frame = egui::Frame::new()
                 .fill(palette.elevated)
                 .stroke(Stroke::new(1.0, palette.border))
@@ -2407,6 +2411,7 @@ impl NativeApp {
         let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
         let active = self.download["active"].as_bool().unwrap_or(false);
         let busy = self.busy;
+        let connected = self.connected;
         let catalog = self.models.as_object().map_or_else(Vec::new, |categories| {
             categories
                 .iter()
@@ -2427,6 +2432,20 @@ impl NativeApp {
         Self::card(ui, "Download models", |ui| {
             ui.label(RichText::new("Download only the model weights you need. They are stored in the location selected in Settings.").color(palette.secondary));
             ui.add_space(theme::space::MD);
+            if !connected {
+                egui::Frame::new()
+                    .fill(palette.warning.gamma_multiply(0.10))
+                    .stroke(Stroke::new(1.0, palette.warning.gamma_multiply(0.35)))
+                    .corner_radius(theme::radius::CONTROL)
+                    .inner_margin(egui::Margin::symmetric(12, 8))
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new("Waiting for the local engine. Model downloads unlock when it connects.")
+                                .color(palette.warning),
+                        );
+                    });
+                ui.add_space(theme::space::SM);
+            }
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new(format!("Backend · {}", self.backend.to_uppercase())).strong(),
@@ -2460,7 +2479,7 @@ impl NativeApp {
                         ],
                     ),
                 ] {
-                    let enabled = !active && !busy;
+                    let enabled = can_start_model_download(connected, active, busy);
                     if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
                         self.post(
                             "/api/models/download",
@@ -2631,18 +2650,26 @@ impl NativeApp {
                                             ui.with_layout(
                                                 Layout::right_to_left(Align::Center),
                                                 |ui| {
-                                                    if !ready
-                                                        && !active
-                                                        && !busy
-                                                        && ui.small_button("Download").clicked()
-                                                    {
-                                                        self.post(
-                                                            "/api/models/download",
-                                                            json!({
-                                                                "backend": self.backend,
-                                                                "selections": {key: name}
-                                                            }),
+                                                    if !ready {
+                                                        let can_download = can_start_model_download(
+                                                            connected, active, busy,
                                                         );
+                                                        if ui
+                                                            .add_enabled(
+                                                                can_download,
+                                                                egui::Button::new("Download")
+                                                                    .small(),
+                                                            )
+                                                            .clicked()
+                                                        {
+                                                            self.post(
+                                                                "/api/models/download",
+                                                                json!({
+                                                                    "backend": self.backend,
+                                                                    "selections": {key: name}
+                                                                }),
+                                                            );
+                                                        }
                                                     }
                                                 },
                                             );
@@ -3833,8 +3860,9 @@ fn set_windows_app_identity() {}
 mod tests {
     use super::{
         HOME_HERO_COLUMN_THRESHOLD, HOME_STATUS_THREE_COLUMN_THRESHOLD, PROCESS_PAGE,
-        active_task_from, encode_query_component, home_hero_uses_two_columns,
-        home_status_uses_three_columns, process_uses_two_columns, settings_uses_two_columns,
+        active_task_from, can_start_model_download, encode_query_component,
+        home_hero_uses_two_columns, home_status_uses_three_columns, process_uses_two_columns,
+        settings_uses_two_columns,
     };
 
     #[test]
@@ -3876,6 +3904,14 @@ mod tests {
         assert!(home_status_uses_three_columns(
             HOME_STATUS_THREE_COLUMN_THRESHOLD
         ));
+    }
+
+    #[test]
+    fn model_download_requires_connected_idle_engine() {
+        assert!(!can_start_model_download(false, false, false));
+        assert!(!can_start_model_download(true, true, false));
+        assert!(!can_start_model_download(true, false, true));
+        assert!(can_start_model_download(true, false, false));
     }
 
     #[test]

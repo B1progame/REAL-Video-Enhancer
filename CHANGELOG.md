@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.44 — 2026-11-23
+
+- Reflow the Home hero and status cards earlier to prevent cramped layouts at common window sizes, and let the page header wrap cleanly.
+- Keep model download actions disabled until the engine is connected and explain the waiting state.
+
 ## 2.4.43 — 2026-11-23
 
 - Keep the Home hero and status cards side by side when the available width supports them, so useful dashboard content stays visible without scrolling at common desktop sizes.
