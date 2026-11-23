@@ -92,6 +92,42 @@ pub fn metadata_chip(ui: &mut Ui, text: &str, accent: Color32) {
         });
 }
 
+pub fn copyable_path(ui: &mut Ui, path: &str, placeholder: &str) {
+    let palette = theme::palette(!ui.visuals().dark_mode, ui.visuals().selection.stroke.color);
+    egui::Frame::new()
+        .fill(palette.elevated)
+        .stroke(Stroke::new(1.0, palette.border))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(10, 5))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                let label = if path.is_empty() { placeholder } else { path };
+                let width = if path.is_empty() {
+                    ui.available_width()
+                } else {
+                    (ui.available_width() - 66.0).max(120.0)
+                };
+                let response = ui.add_sized(
+                    Vec2::new(width, 30.0),
+                    egui::Label::new(
+                        RichText::new(label)
+                            .monospace()
+                            .size(12.0)
+                            .color(palette.secondary),
+                    )
+                    .truncate(),
+                );
+                if !path.is_empty() {
+                    response.on_hover_text(path);
+                    if ui.small_button("Copy").clicked() {
+                        ui.ctx().copy_text(path.to_owned());
+                    }
+                }
+            });
+        });
+}
+
 pub fn primary_button_enabled(
     ui: &mut Ui,
     label: impl Into<RichText>,

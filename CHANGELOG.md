@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4.47 — 2026-11-23
+
+- Use consistent truncated, copyable path rows across Process, Downloads, Runtime, and Python so long paths stay inside their cards.
+
 ## 2.4.46 — 2026-11-23
 
 - Stretch Runtime hardware details across their cards and keep long Python paths readable without pushing the Copy action offscreen.

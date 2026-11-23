@@ -1792,17 +1792,17 @@ impl NativeApp {
                     .and_then(|name| name.to_str())
                     .unwrap_or(self.input_path.trim());
                 ui.add_space(theme::space::SM);
-                ui.label(
-                    RichText::new(file_name)
-                        .size(14.0)
-                        .strong()
-                        .color(palette.text),
-                );
-                ui.label(
-                    RichText::new(self.input_path.trim())
-                        .size(11.0)
-                        .color(palette.muted),
-                );
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(file_name)
+                            .size(14.0)
+                            .strong()
+                            .color(palette.text),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(file_name);
+                components::copyable_path(ui, self.input_path.trim(), "Source path");
             }
             if compact_source {
                 ui.add_space(theme::space::SM);
@@ -2686,7 +2686,11 @@ impl NativeApp {
             let path = self.storage_status["model_dir"]
                 .as_str()
                 .unwrap_or("Choose a model location in Settings, then run setup.");
-            ui.label(RichText::new(path).monospace().size(12.0));
+            components::copyable_path(
+                ui,
+                path,
+                "Choose a model location in Settings, then run setup.",
+            );
             ui.add_space(theme::space::XS);
             ui.label(RichText::new(if self.model_storage == "wsl" {
                 "Weights are installed in Ubuntu under WSL. The Windows app and Python engine remain on Windows."
@@ -2871,25 +2875,7 @@ impl NativeApp {
                     .size(11.0)
                     .color(palette.muted),
             );
-            ui.horizontal_wrapped(|ui| {
-                let path_label = if python_path.is_empty() {
-                    "Waiting for engine…"
-                } else {
-                    &python_path
-                };
-                let path_width = if python_path.is_empty() {
-                    ui.available_width()
-                } else {
-                    (ui.available_width() - 112.0).max(120.0)
-                };
-                ui.add_sized(
-                    Vec2::new(path_width, 36.0),
-                    egui::Label::new(RichText::new(path_label).monospace().size(12.0)).truncate(),
-                );
-                if !python_path.is_empty() && ui.button("Copy path").clicked() {
-                    ui.ctx().copy_text(python_path.clone());
-                }
-            });
+            components::copyable_path(ui, &python_path, "Waiting for engine…");
             ui.add_space(theme::space::MD);
             ui.horizontal_wrapped(|ui| {
                 for (command, label) in [
@@ -3124,14 +3110,12 @@ impl NativeApp {
                     error,
                 );
             }
-            ui.label(
-                RichText::new(
-                    self.storage_status["model_dir"]
-                        .as_str()
-                        .unwrap_or("Storage path will be shown after setup"),
-                )
-                .size(11.0)
-                .monospace(),
+            components::copyable_path(
+                ui,
+                self.storage_status["model_dir"]
+                    .as_str()
+                    .unwrap_or_default(),
+                "Storage path will be shown after setup",
             );
         });
     }
