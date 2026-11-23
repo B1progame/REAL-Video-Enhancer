@@ -12,6 +12,7 @@ web-ui/dist/
 build
 dist
 /release-stage/
+/release-stage-*/
 /integrations/
 /native-ui/target/
 /web-ui/

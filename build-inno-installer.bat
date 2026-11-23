@@ -40,34 +40,34 @@ if /I "%PYTHON_EXE%"=="%APP_DIR%.venv\Scripts\python.exe" set "RVE_BUILD_VENV=%A
 if /I "%PYTHON_EXE%"=="%APP_DIR%venv\Scripts\python.exe" set "RVE_BUILD_VENV=%APP_DIR%venv"
 
 echo [1/3] Building the headless video engine...
-"%PYTHON_EXE%" build.py --build pyinstaller
-if errorlevel 1 goto :build_failed
-
 set "RVE_VERSION_FILE=%TEMP%\rve-version-%RANDOM%-%RANDOM%.txt"
 "%PYTHON_EXE%" -c "from src.version import version; print(version)" > "%RVE_VERSION_FILE%"
 if errorlevel 1 goto :build_failed
 set /p "RVE_VERSION="<"%RVE_VERSION_FILE%"
 del "%RVE_VERSION_FILE%" >nul 2>&1
-if not defined RVE_VERSION set "RVE_VERSION=2.4.44"
+if not defined RVE_VERSION set "RVE_VERSION=2.4.45"
 set "RVE_APP_VERSION=%RVE_VERSION%"
+set "RVE_OUTPUT_FOLDER=release-stage-%RVE_VERSION%"
+"%PYTHON_EXE%" build.py --build pyinstaller
+if errorlevel 1 goto :build_failed
 
 echo [2/3] Compiling the Rust desktop interface...
 cargo build --release --manifest-path "native-ui\Cargo.toml"
 if errorlevel 1 goto :build_failed
 
-if not exist "release-stage\REAL-Video-Enhancer\RVE-Engine\RVE-Engine.exe" (
+if not exist "%RVE_OUTPUT_FOLDER%\REAL-Video-Enhancer\RVE-Engine\RVE-Engine.exe" (
     echo The headless Python engine was not created.
     goto :build_failed
 )
-copy /Y "native-ui\target\release\rve-native.exe" "release-stage\REAL-Video-Enhancer\REAL-Video-Enhancer.exe" >nul
+copy /Y "native-ui\target\release\rve-native.exe" "%RVE_OUTPUT_FOLDER%\REAL-Video-Enhancer\REAL-Video-Enhancer.exe" >nul
 if errorlevel 1 goto :build_failed
 
 echo [3/3] Compiling the Windows installer...
-"%ISCC%" /DMyAppVersion=%RVE_VERSION% "REAL-Video-Enhancer.iss"
+"%ISCC%" /DMyAppVersion=%RVE_VERSION% /DMyReleaseFolder=%RVE_OUTPUT_FOLDER% "REAL-Video-Enhancer.iss"
 if errorlevel 1 goto :build_failed
 
 popd
-echo Installer created in release-stage\installer.
+echo Installer created in %RVE_OUTPUT_FOLDER%\installer.
 endlocal
 exit /b 0
 

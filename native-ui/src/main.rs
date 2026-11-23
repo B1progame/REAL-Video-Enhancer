@@ -40,8 +40,8 @@ const PAGES: [(&str, &str); 6] = [
 ];
 const PROCESS_PAGE: usize = 1;
 const PROCESS_COLUMN_THRESHOLD: f32 = 1360.0;
-const HOME_HERO_COLUMN_THRESHOLD: f32 = 1040.0;
-const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 1080.0;
+const HOME_HERO_COLUMN_THRESHOLD: f32 = 840.0;
+const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 880.0;
 
 fn can_start_model_download(connected: bool, active: bool, busy: bool) -> bool {
     connected && !active && !busy
@@ -3904,6 +3904,11 @@ mod tests {
         assert!(home_status_uses_three_columns(
             HOME_STATUS_THREE_COLUMN_THRESHOLD
         ));
+        // The captured 1184×950 desktop window leaves about 860 points inside
+        // the Home hero and about 908 points for the status row. Keep its
+        // useful two/three-column dashboard at those measured content widths.
+        assert!(home_hero_uses_two_columns(860.0));
+        assert!(home_status_uses_three_columns(908.0));
     }
 
     #[test]

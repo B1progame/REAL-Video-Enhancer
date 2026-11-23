@@ -1,10 +1,13 @@
 #define MyAppName "REAL Video Enhancer"
 #ifndef MyAppVersion
-#define MyAppVersion "2.4.44"
+#define MyAppVersion "2.4.45"
 #endif
 #define MyAppPublisher "B1progame"
 #define MyAppURL "https://github.com/B1progame/REAL-Video-Enhancer"
 #define MyAppExeName "REAL-Video-Enhancer.exe"
+#ifndef MyReleaseFolder
+  #define MyReleaseFolder "release-stage"
+#endif
 #ifexist "LICENSE"
   #define MyLicenseFile "LICENSE"
 #else
@@ -26,7 +29,7 @@ DefaultGroupName={#MyAppName}
 #ifdef MyLicenseFile
 LicenseFile={#MyLicenseFile}
 #endif
-OutputDir=release-stage\installer
+OutputDir={#MyReleaseFolder}\installer
 OutputBaseFilename=REAL-Video-Enhancer-{#MyAppVersion}-Windows-Installer
 SetupIconFile=icons\logo-v3.ico
 UninstallDisplayIcon={app}\logo-v3.ico
@@ -53,7 +56,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "release-stage\REAL-Video-Enhancer\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#MyReleaseFolder}\REAL-Video-Enhancer\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 Source: "icons\logo-v3.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

@@ -13,7 +13,7 @@ os.chdir(PROJECT_ROOT)
 
 PLATFORM = sys.platform
 CPU_ARCH = "x86_64" if platform.machine() == "AMD64" else platform.machine()
-OUTPUT_FOLDER = "release-stage"
+OUTPUT_FOLDER = os.environ.get("RVE_OUTPUT_FOLDER", "release-stage").strip() or "release-stage"
 BUILD_ENV = os.environ.get("RVE_BUILD_VENV") or (
     os.path.join(PROJECT_ROOT, ".venv")
     if os.path.isdir(os.path.join(PROJECT_ROOT, ".venv"))

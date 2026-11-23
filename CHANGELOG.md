@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.45 — 2026-11-23
+
+- Keep the two-column Home hero and three status cards at the 1184×950 desktop layout validated in the release review, while retaining narrow-window reflow.
+- Build releases into versioned staging directories so a running app cannot lock files needed by the next package build.
+
 ## 2.4.44 — 2026-11-23
 
 - Reflow the Home hero and status cards earlier to prevent cramped layouts at common window sizes, and let the page header wrap cleanly.
