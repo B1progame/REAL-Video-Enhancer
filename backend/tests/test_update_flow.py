@@ -86,6 +86,16 @@ class UpdateFlowTests(unittest.TestCase):
                 if web_api.os.name == "nt"
                 else web_api.managed_python_environment_dir() / "bin" / "python3",
             )
+            command = web_api.managed_python_venv_command(Path("/app-data/bin/uv.exe"))
+            self.assertEqual(command[1:3], ["venv", "--clear"])
+            self.assertEqual(command[-1], str(web_api.managed_python_environment_dir()))
+
+    def test_uv_python_data_uses_local_appdata_paths(self):
+        with patch.object(web_api, "LOCAL_DATA", Path("/local/app")):
+            env = web_api.managed_uv_environment()
+
+        self.assertEqual(env["UV_DATA_DIR"], str(Path("/local/app/uv")))
+        self.assertEqual(env["UV_PYTHON_INSTALL_DIR"], str(Path("/local/app/uv/python")))
 
     def test_video_preview_uses_a_bounded_real_frame(self):
         with TemporaryDirectory() as directory:

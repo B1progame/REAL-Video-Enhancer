@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4.53 — 2026-11-23
+
+- Clear an incomplete managed Python environment before recreating it, so setup recovers cleanly from folders left by older runtime setup attempts.
+- Keep uv's Python toolchains and version links under Local AppData to avoid OneDrive Files On-Demand mount-point failures on Windows.
+- Show the short failure reason once, with command diagnostics in the setup log instead of duplicating them in the page.
+- Add regression coverage for retry paths and uv's local data directories.
+
 ## 2.4.52 — 2026-11-23
 
 - Create the managed Python virtual environment at its root directory so uv places the interpreter where the app expects it.

@@ -69,7 +69,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.52")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.53")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -998,6 +998,11 @@ def managed_python_environment_dir():
     return LOCAL_DATA / "python" / "python"
 
 
+def managed_python_venv_command(uv):
+    return [str(uv), "venv", "--clear", "--python", PYTHON_VERSION,
+            "--managed-python", str(managed_python_environment_dir())]
+
+
 def managed_python_path():
     if os.name == "nt":
         return LOCAL_DATA / "python" / "python" / "Scripts" / "python.exe"
@@ -1043,6 +1048,14 @@ def python_info_payload():
 
 def managed_uv_path():
     return APP_DATA / "bin" / ("uv.exe" if os.name == "nt" else "uv")
+
+
+def managed_uv_environment():
+    env = os.environ.copy()
+    uv_data = LOCAL_DATA / "uv"
+    env["UV_DATA_DIR"] = str(uv_data)
+    env["UV_PYTHON_INSTALL_DIR"] = str(uv_data / "python")
+    return env
 
 
 def ensure_uv():
@@ -1121,13 +1134,12 @@ def ensure_managed_python():
         os.environ["PYTHONNOUSERSITE"] = "1"
         return
     uv = ensure_uv()
-    env = os.environ.copy()
-    env["UV_PYTHON_INSTALL_DIR"] = str(LOCAL_DATA / "python" / "managed")
+    env = managed_uv_environment()
     set_install_state(stage=f"Installing Python {PYTHON_VERSION} with uv", progress=10)
     run_runtime_command([uv, "python", "install", PYTHON_VERSION, "--managed-python"], f"Installing Python {PYTHON_VERSION}", env=env)
     environment_dir = managed_python_environment_dir()
     environment_dir.parent.mkdir(parents=True, exist_ok=True)
-    run_runtime_command([uv, "venv", "--python", PYTHON_VERSION, "--managed-python", str(environment_dir)], "Creating managed Python environment", env=env)
+    run_runtime_command(managed_python_venv_command(uv), "Creating managed Python environment", env=env)
     if not python.is_file():
         raise RuntimeError(f"Python download extracted, but the runtime executable is missing: {python}")
     PYTHON = str(python)
@@ -1276,8 +1288,10 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
                     run_runtime_command(pip + ["install", "--python", PYTHON, "--no-progress", "--no-deps", "--extra-index-url", "https://download.pytorch.org/whl/", f"torchvision=={tv_version}{suffix}"], "Installing compatible torchvision", 80)
             set_install_state(status="completed", progress=100, stage="Backend operation complete", detail=f"{backend} {action} completed. Refresh backend status to see the result.")
     except Exception as exc:
-        install_log(f"ERROR: {exc}")
-        set_install_state(status="cancelled" if isinstance(exc, InterruptedError) else "error", stage="Setup cancelled" if isinstance(exc, InterruptedError) else "Runtime setup failed", detail=str(exc))
+        message = str(exc).strip()
+        first_line = message.splitlines()[0] if message else "Runtime setup failed."
+        install_log(f"ERROR: {first_line}")
+        set_install_state(status="cancelled" if isinstance(exc, InterruptedError) else "error", stage="Setup cancelled" if isinstance(exc, InterruptedError) else "Runtime setup failed", detail=first_line, error=message)
         cancel_event.clear()
 
 
