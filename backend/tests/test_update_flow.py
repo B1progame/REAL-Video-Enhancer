@@ -42,6 +42,15 @@ class UpdateFlowTests(unittest.TestCase):
 
         lookup.assert_not_called()
 
+    def test_frozen_build_ignores_a_stale_python_override(self):
+        self.assertIsNone(web_api.resolve_default_python([], frozen=True, override="C:/old/python.exe"))
+
+    def test_source_build_honors_an_explicit_python_override(self):
+        self.assertEqual(
+            web_api.resolve_default_python([], frozen=False, override="C:/custom/python.exe"),
+            "C:/custom/python.exe",
+        )
+
     def test_source_build_can_fall_back_to_system_python(self):
         with patch.object(web_api.shutil, "which", side_effect=["python.exe", None]):
             self.assertEqual(web_api.resolve_default_python([], frozen=False), "python.exe")
@@ -85,7 +94,21 @@ class UpdateFlowTests(unittest.TestCase):
 
         self.assertFalse(result["python_available"])
         self.assertFalse(result["python_managed"])
+        self.assertTrue(result["python_present"])
         self.assertIn("Install the app-managed runtime", result["python_detail"])
+
+    def test_windows_process_start_retries_without_startupinfo_on_winerror_87(self):
+        invalid_startup = OSError(87, "The parameter is incorrect")
+        invalid_startup.winerror = 87
+        with (
+            patch.object(web_api.os, "name", "nt"),
+            patch.object(web_api, "hidden_subprocess_kwargs", return_value={"startupinfo": object()}),
+            patch.object(web_api.subprocess, "Popen", side_effect=[invalid_startup, object()]) as popen,
+        ):
+            web_api.start_hidden_process(["uv.exe", "python", "install"])
+
+        self.assertEqual(popen.call_count, 2)
+        self.assertNotIn("startupinfo", popen.call_args.kwargs)
 
     def test_managed_python_environment_path_is_the_venv_root(self):
         with patch.object(web_api, "LOCAL_DATA", Path("/app-data")):

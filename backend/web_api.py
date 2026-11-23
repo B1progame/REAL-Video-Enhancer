@@ -48,17 +48,19 @@ runtime_candidates = [
     LEGACY_PROGRAMS / "REAL Video Enhancer-old" / "python" / "python" / managed_python_name,
     ROOT / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python"),
 ]
-def resolve_default_python(candidates, frozen):
+def resolve_default_python(candidates, frozen, override=None):
     managed = next((str(item) for item in candidates if item.is_file()), None)
     if managed or frozen:
         return managed
+    if override:
+        return override
     return shutil.which("python") or shutil.which("python3") or sys.executable
 
 
 # Packaged builds only use the app-managed runtime. Resolving an external PATH
 # alias can fail with opaque WinError 87 and is not supported for rendering.
-default_python = resolve_default_python(runtime_candidates, FROZEN)
-PYTHON = os.environ.get("RVE_PYTHON", default_python or "")
+default_python = resolve_default_python(runtime_candidates, FROZEN, os.environ.get("RVE_PYTHON"))
+PYTHON = default_python or ""
 managed_python_paths = {path.resolve() for path in runtime_candidates if path.is_absolute()}
 if PYTHON and Path(PYTHON).resolve() in managed_python_paths:
     os.environ["PYTHONNOUSERSITE"] = "1"
@@ -73,7 +75,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.54")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.56")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -126,6 +128,28 @@ def hidden_subprocess_kwargs():
     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startupinfo.wShowWindow = 0
     return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0), "startupinfo": startupinfo}
+
+
+def start_hidden_process(command, **kwargs):
+    """Start CLI tools without a console, retrying WinError 87 without startupinfo."""
+    hidden = hidden_subprocess_kwargs()
+    try:
+        return subprocess.Popen(command, **hidden, **kwargs)
+    except OSError as exc:
+        if os.name != "nt" or getattr(exc, "winerror", None) != 87:
+            raise
+        return subprocess.Popen(command, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **kwargs)
+
+
+def run_hidden_process(command, **kwargs):
+    """Run CLI probes with the same compatibility fallback as managed installs."""
+    hidden = hidden_subprocess_kwargs()
+    try:
+        return subprocess.run(command, **hidden, **kwargs)
+    except OSError as exc:
+        if os.name != "nt" or getattr(exc, "winerror", None) != 87:
+            raise
+        return subprocess.run(command, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **kwargs)
 
 
 def version_tuple(value):
@@ -858,7 +882,7 @@ print('installed_pytorch=' + str(installed_pytorch))
 print('installed_ncnn=' + str(installed_ncnn))
 print('installed_tensorrt=' + str(installed_tensorrt))
 """
-        probe = subprocess.run([PYTHON, "-c", probe_code], capture_output=True, text=True, timeout=120, **hidden_subprocess_kwargs())
+        probe = run_hidden_process([PYTHON, "-c", probe_code], capture_output=True, text=True, timeout=120)
         result["opencv_available"] = probe.returncode == 0 and "opencv=True" in probe.stdout
         if probe.returncode == 0:
             lines = dict(line.split("=", 1) for line in probe.stdout.splitlines() if "=" in line)
@@ -1032,8 +1056,8 @@ def python_info_payload():
         detail = f"The configured Python interpreter was not found: {python_path}"
     else:
         try:
-            probe = subprocess.run([python_path, "--version"], capture_output=True, text=True,
-                                   timeout=4, check=False, **hidden_subprocess_kwargs())
+            probe = run_hidden_process([python_path, "--version"], capture_output=True, text=True,
+                                       timeout=4, check=False)
             detail = (probe.stdout or probe.stderr).strip()
             if probe.returncode:
                 python_exists = False
@@ -1045,7 +1069,8 @@ def python_info_payload():
             python_exists = False
             python_managed = False
             detail = f"Could not start the detected Python interpreter ({exc}). Install the app-managed runtime from the Runtime page."
-    return {"python_path": python_path or None, "python_available": python_exists,
+    return {"python_path": python_path or None, "python_present": bool(python_path and Path(python_path).is_file()),
+            "python_available": python_exists,
             "python_managed": python_managed, "python_detail": detail,
             "pip_detail": "Use the runtime's Python environment.", "version": detail}
 
@@ -1165,9 +1190,9 @@ def run_runtime_command(command, stage, progress=None, env=None):
     Path(command_env["TEMP"]).mkdir(parents=True, exist_ok=True)
     command = [str(item) for item in command]
     install_log("$ " + subprocess.list2cmdline([str(x) for x in command]))
-    proc = subprocess.Popen(command, cwd=str(APP_DATA), env=command_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, encoding="utf-8", errors="replace", bufsize=1,
-                            **hidden_subprocess_kwargs())
+    proc = start_hidden_process(command, cwd=str(APP_DATA), env=command_env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+                                errors="replace", bufsize=1)
     global runtime_process
     with runtime_process_lock:
         runtime_process = proc

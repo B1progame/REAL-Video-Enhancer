@@ -41,6 +41,7 @@ const PAGES: [(&str, &str); 6] = [
 const PROCESS_PAGE: usize = 1;
 const RUNTIME_PAGE: usize = 3;
 const PROCESS_COLUMN_THRESHOLD: f32 = 1040.0;
+const RUNTIME_METRICS_COLUMN_THRESHOLD: f32 = 760.0;
 const HOME_HERO_COLUMN_THRESHOLD: f32 = 840.0;
 const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 880.0;
 
@@ -58,6 +59,10 @@ fn settings_uses_two_columns(available_width: f32) -> bool {
 
 fn process_uses_two_columns(available_width: f32) -> bool {
     available_width >= PROCESS_COLUMN_THRESHOLD
+}
+
+fn runtime_metrics_use_two_columns(available_width: f32) -> bool {
+    available_width >= RUNTIME_METRICS_COLUMN_THRESHOLD
 }
 
 fn home_hero_uses_two_columns(available_width: f32) -> bool {
@@ -1912,27 +1917,46 @@ impl NativeApp {
         egui::CollapsingHeader::new("Enter a video path manually")
             .id_salt("manual-video-path")
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let path_response = ui.add_sized(
-                        Vec2::new((ui.available_width() - 72.0).max(120.0), 38.0),
+                let compact = ui.available_width() < 360.0;
+                let path_response = if compact {
+                    ui.add_sized(
+                        Vec2::new(ui.available_width().max(1.0), 38.0),
                         egui::TextEdit::singleline(&mut self.input_path)
                             .hint_text("Paste a video file path"),
-                    );
-                    if path_response.changed() {
-                        self.input_info = Value::Null;
-                        self.source_preview = None;
-                        self.source_preview_path.clear();
-                        self.source_preview_loading = false;
-                        self.source_preview_error = None;
-                    }
-                    if ui.button("Inspect").clicked() {
-                        self.input_info = json!({"status": "inspecting"});
-                        self.post(
-                            "/api/video/inspect",
-                            json!({"path": self.input_path.trim()}),
+                    )
+                } else {
+                    ui.horizontal(|ui| {
+                        let field_width = (ui.available_width() - 78.0).max(1.0);
+                        let response = ui.add_sized(
+                            Vec2::new(field_width, 38.0),
+                            egui::TextEdit::singleline(&mut self.input_path)
+                                .hint_text("Paste a video file path"),
                         );
-                    }
-                });
+                        if ui.button("Inspect").clicked() {
+                            self.input_info = json!({"status": "inspecting"});
+                            self.post(
+                                "/api/video/inspect",
+                                json!({"path": self.input_path.trim()}),
+                            );
+                        }
+                        response
+                    })
+                    .inner
+                };
+                if path_response.changed() {
+                    self.input_info = Value::Null;
+                    self.source_preview = None;
+                    self.source_preview_path.clear();
+                    self.source_preview_loading = false;
+                    self.source_preview_error = None;
+                }
+                if compact && ui.button("Inspect video").clicked() {
+                    self.input_info = json!({"status": "inspecting"});
+                    self.post(
+                        "/api/video/inspect",
+                        json!({"path": self.input_path.trim()}),
+                    );
+                }
             });
     }
 
@@ -1941,6 +1965,22 @@ impl NativeApp {
         Self::card(ui, "Output", |ui| {
             if self.output_to_mpv {
                 components::status_dot(ui, palette.accent, "Send enhanced video to MPV");
+            } else if ui.available_width() < 680.0 {
+                ui.label(RichText::new("Save location").strong());
+                ui.label(
+                    RichText::new("The engine creates the enhanced file here.")
+                        .size(11.0)
+                        .color(palette.secondary),
+                );
+                ui.add_space(theme::space::XS);
+                ui.add_sized(
+                    Vec2::new(ui.available_width().max(1.0), 38.0),
+                    egui::TextEdit::singleline(&mut self.output_folder)
+                        .hint_text("Choose an output folder"),
+                );
+                if ui.button("Browse for output folder").clicked() {
+                    self.get("/api/dialog/select_output");
+                }
             } else {
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
@@ -1952,7 +1992,7 @@ impl NativeApp {
                         );
                     });
                     ui.add_space(theme::space::MD);
-                    let path_width = (ui.available_width() - 84.0).max(110.0);
+                    let path_width = (ui.available_width() - 84.0).max(1.0);
                     ui.add_sized(
                         Vec2::new(path_width, 38.0),
                         egui::TextEdit::singleline(&mut self.output_folder)
@@ -2893,41 +2933,49 @@ impl NativeApp {
 
         ui.add_space(theme::space::MD);
         Self::card(ui, "Hardware and compatibility", |ui| {
-            ui.columns(2, |columns| {
-                columns[0].vertical(|ui| {
-                    for (key, label) in
-                        [("os", "Operating system"), ("cuda_version", "CUDA version")]
-                    {
-                        egui::Frame::new()
-                            .fill(palette.elevated)
-                            .corner_radius(8.0)
-                            .inner_margin(egui::Margin::symmetric(12, 9))
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                ui.label(RichText::new(label).size(11.0).color(palette.muted));
-                                let value = system[key].as_str().unwrap_or("Not detected");
-                                ui.label(RichText::new(value).strong().color(palette.text));
-                            });
+            let metrics = [
+                (
+                    "Operating system",
+                    system["os"].as_str().unwrap_or("Not detected").to_owned(),
+                ),
+                (
+                    "CUDA version",
+                    system["cuda_version"]
+                        .as_str()
+                        .unwrap_or("Not detected")
+                        .to_owned(),
+                ),
+                (
+                    "Graphics device",
+                    system["gpu_name"]
+                        .as_str()
+                        .unwrap_or("Not detected")
+                        .to_owned(),
+                ),
+                ("Available backends", available.clone()),
+            ];
+            let draw_metric = |ui: &mut egui::Ui, label: &str, value: &str| {
+                egui::Frame::new()
+                    .fill(palette.elevated)
+                    .corner_radius(8.0)
+                    .inner_margin(egui::Margin::symmetric(12, 9))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.label(RichText::new(label).size(11.0).color(palette.muted));
+                        ui.label(RichText::new(value).strong().color(palette.text));
+                    });
+            };
+            if runtime_metrics_use_two_columns(ui.available_width()) {
+                ui.columns(2, |columns| {
+                    for (index, (label, value)) in metrics.iter().enumerate() {
+                        draw_metric(&mut columns[index % 2], label, value);
                     }
                 });
-                columns[1].vertical(|ui| {
-                    let gpu = system["gpu_name"].as_str().unwrap_or("Not detected");
-                    for (label, value) in [
-                        ("Graphics device", gpu),
-                        ("Available backends", available.as_str()),
-                    ] {
-                        egui::Frame::new()
-                            .fill(palette.elevated)
-                            .corner_radius(8.0)
-                            .inner_margin(egui::Margin::symmetric(12, 9))
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                ui.label(RichText::new(label).size(11.0).color(palette.muted));
-                                ui.label(RichText::new(value).strong().color(palette.text));
-                            });
-                    }
-                });
-            });
+            } else {
+                for (label, value) in &metrics {
+                    draw_metric(ui, label, value);
+                }
+            }
             if ui.button("Refresh system detection").clicked() {
                 self.post("/api/actions/refresh_backends", json!({}));
                 self.get("/api/bootstrap");
@@ -2945,6 +2993,7 @@ impl NativeApp {
         let python_info_pending = self.connected && self.python.is_null();
         let python_installing = self.install["status"].as_str() == Some("running");
         let interpreter_available = self.python["python_available"].as_bool().unwrap_or(false);
+        let interpreter_present = self.python["python_present"].as_bool().unwrap_or(false);
         let available = self.python["python_managed"].as_bool() == Some(true);
         let install_failed = self.install["status"].as_str() == Some("error");
         let python_path = self.python["python_path"].as_str().unwrap_or("").to_owned();
@@ -2954,13 +3003,15 @@ impl NativeApp {
                     ui,
                     if available {
                         palette.success
-                    } else if install_failed {
+                    } else if interpreter_present || install_failed {
                         palette.error
                     } else {
                         palette.warning
                     },
                     if available {
                         "Interpreter ready"
+                    } else if interpreter_present {
+                        "Found, but could not start"
                     } else if install_failed {
                         "Setup failed"
                     } else {
@@ -2985,6 +3036,8 @@ impl NativeApp {
                     if ui
                         .button(if install_failed {
                             "Retry runtime setup"
+                        } else if interpreter_present {
+                            "Repair Python runtime"
                         } else {
                             "Set up Python runtime"
                         })
@@ -3025,6 +3078,8 @@ impl NativeApp {
                     "Checking interpreter…"
                 } else if python_installing {
                     "Installing Python…"
+                } else if interpreter_present {
+                    "The interpreter was found, but Windows could not start it. Repair the runtime from this page."
                 } else if self.connected {
                     "App-managed Python is not installed"
                 } else if self.engine_error.is_some() {
@@ -4029,9 +4084,10 @@ fn set_windows_app_identity() {}
 mod tests {
     use super::{
         HOME_HERO_COLUMN_THRESHOLD, HOME_STATUS_THREE_COLUMN_THRESHOLD, PROCESS_PAGE,
-        active_task_from, can_start_model_download, encode_query_component,
-        home_hero_uses_two_columns, home_status_uses_three_columns, pending_post_after_event,
-        process_uses_two_columns, settings_uses_two_columns,
+        RUNTIME_METRICS_COLUMN_THRESHOLD, active_task_from, can_start_model_download,
+        encode_query_component, home_hero_uses_two_columns, home_status_uses_three_columns,
+        pending_post_after_event, process_uses_two_columns, runtime_metrics_use_two_columns,
+        settings_uses_two_columns,
     };
 
     #[test]
@@ -4061,6 +4117,16 @@ mod tests {
         assert!(process_uses_two_columns(1040.0));
         // At 1366 px the sidebar and margins leave roughly 1090 px for Process.
         assert!(process_uses_two_columns(1090.0));
+    }
+
+    #[test]
+    fn runtime_hardware_cards_reflow_before_values_get_cramped() {
+        assert!(!runtime_metrics_use_two_columns(
+            RUNTIME_METRICS_COLUMN_THRESHOLD - 1.0
+        ));
+        assert!(runtime_metrics_use_two_columns(
+            RUNTIME_METRICS_COLUMN_THRESHOLD
+        ));
     }
 
     #[test]

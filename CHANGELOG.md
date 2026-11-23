@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.4.56 — 2026-11-23
+
+- Retry Windows Python and runtime process launches without optional startup metadata when a launch context returns WinError 87.
+- Ignore stale `RVE_PYTHON` environment overrides in packaged builds so they always use the app-managed interpreter.
+- Distinguish a present but unlaunchable Python interpreter from a runtime that is not installed, and offer a direct repair action.
+- Add regression coverage for packaged interpreter selection and Windows process launch fallback.
+
+## 2.4.55 — 2026-11-23
+
+- Make copyable paths and searchable model pickers fit the available window width, switching long paths to a stacked layout on narrow panels.
+- Reflow manual input and output path controls when the Process workspace is compact.
+- Switch Runtime hardware details to one column when two columns would make values cramped.
+- Add layout boundary coverage for the compact Runtime card.
+
 ## 2.4.54 — 2026-11-23
 
 - Launch the app from Inno Setup using the original user's token so uv can create managed Python version junctions without weakening Setup's RedirectionGuard protection.

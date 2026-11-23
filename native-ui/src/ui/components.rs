@@ -105,31 +105,42 @@ pub fn copyable_path(ui: &mut Ui, path: &str, placeholder: &str) {
         .corner_radius(8.0)
         .inner_margin(egui::Margin::symmetric(10, 5))
         .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.horizontal_wrapped(|ui| {
-                let label = if path.is_empty() { placeholder } else { path };
-                let width = if path.is_empty() {
-                    ui.available_width()
-                } else {
-                    (ui.available_width() - 66.0).max(120.0)
-                };
-                let response = ui.add_sized(
-                    Vec2::new(width, 30.0),
-                    egui::Label::new(
-                        RichText::new(label)
-                            .monospace()
-                            .size(12.0)
-                            .color(palette.secondary),
-                    )
-                    .truncate(),
-                );
-                if !path.is_empty() {
-                    response.on_hover_text(path);
-                    if ui.small_button("Copy").clicked() {
+            let available = ui.available_width().max(1.0);
+            ui.set_min_width(available);
+            let label = if path.is_empty() { placeholder } else { path };
+            let path_label = || {
+                egui::Label::new(
+                    RichText::new(label)
+                        .monospace()
+                        .size(theme::type_scale::MONOSPACE)
+                        .color(palette.secondary),
+                )
+                .truncate()
+            };
+            if !path.is_empty() && available < 220.0 {
+                ui.vertical(|ui| {
+                    ui.add_sized(Vec2::new(available, 30.0), path_label())
+                        .on_hover_text(path);
+                    if ui.small_button("Copy path").clicked() {
                         ui.ctx().copy_text(path.to_owned());
                     }
-                }
-            });
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    let text_width = if path.is_empty() {
+                        available
+                    } else {
+                        (available - 66.0).max(1.0)
+                    };
+                    let response = ui.add_sized(Vec2::new(text_width, 30.0), path_label());
+                    if !path.is_empty() {
+                        response.on_hover_text(path);
+                        if ui.small_button("Copy").clicked() {
+                            ui.ctx().copy_text(path.to_owned());
+                        }
+                    }
+                });
+            }
         });
 }
 
@@ -159,7 +170,7 @@ pub fn searchable_select(
     options: &[String],
     installed: impl Fn(&str) -> bool,
 ) -> bool {
-    let picker_width = ui.available_width().clamp(120.0, 360.0);
+    let picker_width = ui.available_width().clamp(1.0, 360.0);
     let label = if selected.is_empty() {
         "Choose a model"
     } else {
