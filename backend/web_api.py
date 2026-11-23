@@ -75,7 +75,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.58")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.59")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -1081,6 +1081,18 @@ def managed_uv_path():
 
 def managed_uv_environment():
     env = os.environ.copy()
+    # Do not let a shell-level mirror or stale PyTorch index redirect ordinary
+    # runtime packages away from PyPI. The install commands set their indexes
+    # explicitly where needed.
+    for key in (
+        "UV_INDEX",
+        "UV_INDEX_URL",
+        "UV_EXTRA_INDEX_URL",
+        "UV_DEFAULT_INDEX",
+        "PIP_INDEX_URL",
+        "PIP_EXTRA_INDEX_URL",
+    ):
+        env.pop(key, None)
     uv_data = LOCAL_DATA / "uv"
     env["UV_DATA_DIR"] = str(uv_data)
     env["UV_PYTHON_INSTALL_DIR"] = str(uv_data / "python")
@@ -1220,7 +1232,41 @@ def run_runtime_command(command, stage, progress=None, env=None):
 
 RUNTIME_COMMON = ["testresources==2.0.1", "requests==2.32.3", "opencv-python-headless==4.11.0.86", "pypresence==4.3.0",
                   "scenedetect==0.6.5.2", "numpy==2.2.2", "sympy", "tqdm==4.67.1", "typing_extensions==4.12.2",
-                  "packaging==24.2", "mpmath==1.3.0", "pillow==11.1.0"]
+                  "packaging==24.2", "mpmath==1.3.0", "pillow==11.1.0", "filelock>=3.13",
+                  "networkx>=2.6.3", "jinja2", "fsspec", "setuptools"]
+PYPI_DEFAULT_INDEX = "https://pypi.org/simple"
+PYTORCH_INDEXES = (
+    "https://download.pytorch.org/whl/",
+)
+
+
+def uv_pip_install_command(uv, python, *, pytorch_indexes=False, no_deps=False):
+    """Build an install command with PyPI as primary and optional torch indexes."""
+    command = [
+        str(uv), "pip", "install", "--python", str(python), "--no-progress",
+        "--default-index", PYPI_DEFAULT_INDEX,
+    ]
+    if pytorch_indexes:
+        for index in PYTORCH_INDEXES:
+            command.extend(["--index", index])
+    if no_deps:
+        command.append("--no-deps")
+    return command
+
+
+def uv_backend_install_commands(uv, python, packages):
+    """Install backend dependencies from PyPI and the pinned torch wheel alone."""
+    packages = [str(package) for package in packages]
+    torch_wheels = [package for package in packages if package.lower().startswith("torch==")]
+    other_packages = [package for package in packages if package not in torch_wheels]
+    commands = []
+    if other_packages:
+        commands.append(uv_pip_install_command(uv, python) + other_packages)
+    for package in torch_wheels:
+        commands.append(
+            uv_pip_install_command(uv, python, pytorch_indexes=True, no_deps=True) + [package]
+        )
+    return commands
 
 
 def backend_packages(backend, payload=None):
@@ -1241,7 +1287,10 @@ def backend_packages(backend, payload=None):
         if flavor.startswith("cu") and flavor not in compatible_flavors:
             raise ValueError(f"PyTorch {version} is not available with CUDA {flavor[2:]}; choose a listed CUDA version or CPU.")
         suffix = "" if flavor in ("cpu", "mps") else "+" + flavor
-        packages = [f"torch=={version}{suffix}", "safetensors==0.5.3", "einops==0.8.1"]
+        packages = [
+            f"torch=={version}{suffix}", "filelock>=3.13", "networkx>=2.6.3", "jinja2",
+            "fsspec", "setuptools", "safetensors==0.5.3", "einops==0.8.1",
+        ]
         if flavor.startswith("cu12"):
             packages.append("cupy-cuda12x==13.3.0")
         if backend == "tensorrt":
@@ -1262,17 +1311,23 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
         if action == "recommended":
             ensure_managed_python()
             uv = ensure_uv()
-            common = [str(uv), "pip", "install", "--python", PYTHON, "--no-progress", "--extra-index-url", "https://download.pytorch.org/whl/", "--extra-index-url", "https://download.pytorch.org/whl/test/"]
-            run_runtime_command(common + RUNTIME_COMMON, "Installing RVE runtime dependencies", 46)
+            uv_env = managed_uv_environment()
+            common = uv_pip_install_command(uv, PYTHON)
+            run_runtime_command(common + RUNTIME_COMMON, "Installing RVE runtime dependencies", 46, env=uv_env)
             apple_silicon = sys.platform == "darwin" and platform.machine().lower() in ("arm64", "aarch64")
             use_cuda = bool(shutil.which("nvidia-smi"))
             backend = "torch" if use_cuda or apple_silicon else "ncnn"
             torch_flavor = "cu128" if use_cuda else "mps" if apple_silicon else "cpu"
             packages = backend_packages(backend, {"torch_version": "2.7.0", "pytorch_backend": torch_flavor})
-            run_runtime_command(common + packages, f"Installing {backend} backend", 74)
+            for command in uv_backend_install_commands(uv, PYTHON, packages):
+                is_torch_wheel = command[-1].lower().startswith("torch==") and "--no-deps" in command
+                stage = "Installing PyTorch wheel from the official index" if is_torch_wheel else f"Installing {backend} dependencies from PyPI"
+                progress = 78 if is_torch_wheel else 74
+                run_runtime_command(command, stage, progress, env=uv_env)
             if backend == "torch":
                 tv_suffix = "+cu128" if torch_flavor.startswith("cu") else ""
-                run_runtime_command([str(uv), "pip", "install", "--python", PYTHON, "--no-progress", "--no-deps", "--extra-index-url", "https://download.pytorch.org/whl/", f"torchvision==0.22.0{tv_suffix}"], "Installing compatible torchvision", 86)
+                torchvision_command = uv_pip_install_command(uv, PYTHON, pytorch_indexes=True, no_deps=True)
+                run_runtime_command(torchvision_command + [f"torchvision==0.22.0{tv_suffix}"], "Installing compatible torchvision", 86, env=uv_env)
             ffmpeg = APP_DATA / "bin" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
             if not ffmpeg.exists():
                 if os.name == "nt": asset = "ffmpeg.exe" if platform.machine() in ("AMD64", "x86_64") else "ffmpeg-windows-arm64.exe"
@@ -1299,13 +1354,18 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
             uv = ensure_uv()
             pip = [str(uv), "pip"]
             if action == "install":
-                command = pip + ["install", "--python", PYTHON, "--no-progress", "--extra-index-url", "https://download.pytorch.org/whl/", "--extra-index-url", "https://download.pytorch.org/whl/test/"] + packages
+                commands = uv_backend_install_commands(uv, PYTHON, packages)
             else:
                 names = [str(pkg).split("==", 1)[0] for pkg in packages]
                 if backend in ("torch", "pytorch", "tensorrt"):
                     names.append("torchvision")
                 command = pip + ["uninstall", "--python", PYTHON, "-y"] + names
-            run_runtime_command(command, f"{action.capitalize()} {backend} backend", 20)
+                commands = [command]
+            for install_command in commands:
+                is_torch_wheel = install_command[-1].lower().startswith("torch==") and "--no-deps" in install_command
+                stage = "Installing PyTorch wheel from the official index" if is_torch_wheel else f"Installing {backend} dependencies from PyPI"
+                progress = 60 if is_torch_wheel else 20
+                run_runtime_command(install_command, stage, progress, env=managed_uv_environment())
             if action == "install" and backend in ("torch", "pytorch", "tensorrt"):
                 version = str(payload.get("torch_version") or "2.7.0")
                 version = {"2.6": "2.6.0"}.get(version, version)
@@ -1314,7 +1374,8 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
                 flavor = {"cuda": {"2.6.0": "cu118", "2.7.0": "cu128", "2.8.0": "cu129", "2.9.0": "cu130"}.get(version, "cu128")}.get(flavor, flavor)
                 suffix = "" if flavor == "cpu" else "+" + flavor
                 if tv_version:
-                    run_runtime_command(pip + ["install", "--python", PYTHON, "--no-progress", "--no-deps", "--extra-index-url", "https://download.pytorch.org/whl/", f"torchvision=={tv_version}{suffix}"], "Installing compatible torchvision", 80)
+                    torchvision_command = uv_pip_install_command(uv, PYTHON, pytorch_indexes=True, no_deps=True)
+                    run_runtime_command(torchvision_command + [f"torchvision=={tv_version}{suffix}"], "Installing compatible torchvision", 80, env=managed_uv_environment())
             set_install_state(status="completed", progress=100, stage="Backend operation complete", detail=f"{backend} {action} completed. Refresh backend status to see the result.")
     except Exception as exc:
         message = str(exc).strip()

@@ -130,6 +130,50 @@ class UpdateFlowTests(unittest.TestCase):
         self.assertEqual(env["UV_DATA_DIR"], str(Path("/local/app/uv")))
         self.assertEqual(env["UV_PYTHON_INSTALL_DIR"], str(Path("/local/app/uv/python")))
 
+    def test_managed_uv_environment_clears_untrusted_package_index_overrides(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "UV_INDEX": "https://example.test/simple",
+                "UV_INDEX_URL": "https://example.test/simple",
+                "UV_EXTRA_INDEX_URL": "https://example.test/extra",
+                "UV_DEFAULT_INDEX": "https://example.test/default",
+                "PIP_INDEX_URL": "https://example.test/simple",
+                "PIP_EXTRA_INDEX_URL": "https://example.test/extra",
+            },
+        ):
+            env = web_api.managed_uv_environment()
+
+        for key in (
+            "UV_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX",
+            "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL",
+        ):
+            self.assertNotIn(key, env)
+
+    def test_common_uv_dependencies_use_only_pypi(self):
+        command = web_api.uv_pip_install_command("uv.exe", "python.exe")
+
+        self.assertIn("--default-index", command)
+        self.assertIn("https://pypi.org/simple", command)
+        self.assertNotIn("--index", command)
+        self.assertNotIn("--extra-index-url", command)
+
+    def test_pytorch_uv_install_uses_explicit_pypi_and_torch_indexes(self):
+        common, torch = web_api.uv_backend_install_commands(
+            "uv.exe", "python.exe", ["torch==2.7.0+cu128", "requests==2.32.3", "safetensors==0.5.3"]
+        )
+
+        self.assertIn("https://pypi.org/simple", common)
+        self.assertIn("requests==2.32.3", common)
+        self.assertIn("safetensors==0.5.3", common)
+        self.assertNotIn("--index", common)
+        self.assertIn("--no-deps", torch)
+        self.assertEqual(torch[-1], "torch==2.7.0+cu128")
+        self.assertNotIn("requests==2.32.3", torch)
+        for index in web_api.PYTORCH_INDEXES:
+            self.assertIn(index, torch)
+        self.assertNotIn("--extra-index-url", torch)
+
     def test_video_preview_uses_a_bounded_real_frame(self):
         with TemporaryDirectory() as directory:
             video = Path(directory) / "source clip.mp4"
