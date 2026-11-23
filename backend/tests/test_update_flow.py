@@ -36,6 +36,14 @@ def _release(digest="sha256:" + "a" * 64):
 
 
 class UpdateFlowTests(unittest.TestCase):
+    def test_app_managed_python_is_recognized_by_resolved_path(self):
+        with patch.object(web_api, "managed_python_paths", {Path(sys.executable).resolve()}):
+            self.assertTrue(web_api.is_managed_python(sys.executable))
+
+    def test_system_python_is_not_misreported_as_app_managed(self):
+        with patch.object(web_api, "managed_python_paths", set()):
+            self.assertFalse(web_api.is_managed_python(sys.executable))
+
     def test_video_preview_uses_a_bounded_real_frame(self):
         with TemporaryDirectory() as directory:
             video = Path(directory) / "source clip.mp4"

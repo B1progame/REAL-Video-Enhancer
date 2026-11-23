@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.49 — 2026-11-23
+
+- Distinguish app-managed Python from a system Python so Runtime and Python do not report an unmanaged interpreter as ready.
+- Explain when setup will create the managed environment, while keeping the detected external interpreter visible for diagnostics.
+
 ## 2.4.48 — 2026-11-23
 
 - Report missing or broken managed Python cleanly instead of launching an empty interpreter path and showing a Windows parameter error.
