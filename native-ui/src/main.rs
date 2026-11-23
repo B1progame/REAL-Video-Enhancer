@@ -40,8 +40,8 @@ const PAGES: [(&str, &str); 6] = [
 ];
 const PROCESS_PAGE: usize = 1;
 const PROCESS_COLUMN_THRESHOLD: f32 = 1360.0;
-const HOME_HERO_COLUMN_THRESHOLD: f32 = 960.0;
-const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 1080.0;
+const HOME_HERO_COLUMN_THRESHOLD: f32 = 840.0;
+const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 880.0;
 
 fn settings_uses_two_columns(available_width: f32) -> bool {
     available_width >= 960.0

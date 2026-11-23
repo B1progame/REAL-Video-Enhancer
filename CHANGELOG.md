@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4.43 — 2026-11-23
+
+- Keep the Home hero and status cards side by side when the available width supports them, so useful dashboard content stays visible without scrolling at common desktop sizes.
+
 ## 2.4.42 — 2026-11-23
 
 - Prevent Home content from overflowing after window or display-DPI changes by stacking the hero and status cards at compact sizes.
