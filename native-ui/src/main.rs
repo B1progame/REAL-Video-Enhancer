@@ -2800,6 +2800,7 @@ impl NativeApp {
                             .corner_radius(8.0)
                             .inner_margin(egui::Margin::symmetric(12, 9))
                             .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
                                 ui.label(RichText::new(label).size(11.0).color(palette.muted));
                                 let value = system[key].as_str().unwrap_or("Not detected");
                                 ui.label(RichText::new(value).strong().color(palette.text));
@@ -2817,6 +2818,7 @@ impl NativeApp {
                             .corner_radius(8.0)
                             .inner_margin(egui::Margin::symmetric(12, 9))
                             .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
                                 ui.label(RichText::new(label).size(11.0).color(palette.muted));
                                 ui.label(RichText::new(value).strong().color(palette.text));
                             });
@@ -2869,15 +2871,20 @@ impl NativeApp {
                     .size(11.0)
                     .color(palette.muted),
             );
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(if python_path.is_empty() {
-                        "Waiting for engine…"
-                    } else {
-                        &python_path
-                    })
-                    .monospace()
-                    .size(12.0),
+            ui.horizontal_wrapped(|ui| {
+                let path_label = if python_path.is_empty() {
+                    "Waiting for engine…"
+                } else {
+                    &python_path
+                };
+                let path_width = if python_path.is_empty() {
+                    ui.available_width()
+                } else {
+                    (ui.available_width() - 112.0).max(120.0)
+                };
+                ui.add_sized(
+                    Vec2::new(path_width, 36.0),
+                    egui::Label::new(RichText::new(path_label).monospace().size(12.0)).truncate(),
                 );
                 if !python_path.is_empty() && ui.button("Copy path").clicked() {
                     ui.ctx().copy_text(python_path.clone());

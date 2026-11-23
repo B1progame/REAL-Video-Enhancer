@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4.46 — 2026-11-23
+
+- Stretch Runtime hardware details across their cards and keep long Python paths readable without pushing the Copy action offscreen.
+
 ## 2.4.45 — 2026-11-23
 
 - Keep the two-column Home hero and three status cards at the 1184×950 desktop layout validated in the release review, while retaining narrow-window reflow.
