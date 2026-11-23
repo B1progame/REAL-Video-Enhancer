@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.37 — 2026-11-23
+
+- Cancel now terminates the active WSL model-library installer process directly.
+- Prevent managed Python/model deletion while a render is stopping.
+
 ## 2.4.36 — 2026-11-23
 
 - Added cancellation for active render, model, runtime, WSL storage, and app update work, with a cancel-and-quit action when closing during work.

@@ -69,7 +69,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.36")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.37")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -105,6 +105,8 @@ download_job = {"id": None, "status": "idle", "active": False, "progress": 0, "l
 cancel_event = threading.Event()
 runtime_process_lock = threading.RLock()
 runtime_process = None
+storage_process_lock = threading.RLock()
+storage_process = None
 UV_VERSION = "0.13.7"
 UV_SHA256_X64 = "0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021"
 update_cancel_event = threading.Event()
@@ -621,7 +623,7 @@ def delete_managed_data(kind):
     global PYTHON
     if kind not in ("python", "models"):
         raise ValueError("Choose Python or models for removal.")
-    if render.get("status") in ("preparing", "running", "paused") or download_job.get("active") or install_state.get("status") == "running" or storage_job.get("status") in ("starting", "installing"):
+    if render.get("status") in ("preparing", "running", "paused", "stopping") or download_job.get("active") or install_state.get("status") == "running" or storage_job.get("status") in ("starting", "installing"):
         raise ValueError("Wait for active work to stop before removing managed files.")
     if kind == "python":
         root = (LOCAL_DATA / "python").resolve()
@@ -721,22 +723,30 @@ def prepare_model_storage(mode):
         process = subprocess.Popen(common + ["bash", script_in_wsl], stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
                                    bufsize=1, **hidden)
+        global storage_process
+        with storage_process_lock:
+            storage_process = process
+        if cancel_event.is_set() and process.poll() is None:
+            process.terminate()
         with storage_lock:
             storage_job["status"] = "installing"
-        for line in process.stdout or []:
-            if cancel_event.is_set() and process.poll() is None:
-                process.terminate()
-            detail = line.strip()
-            if detail:
-                progress = storage_job.get("progress", 2)
-                if detail.startswith("[") and "/" in detail:
-                    try:
-                        current, total = detail[1:].split("]", 1)[0].split("/", 1)
-                        progress = 2 + round(96 * int(current) / max(1, int(total)))
-                    except ValueError:
-                        pass
-                _set_storage_status(progress=progress, detail=detail)
-        code = process.wait()
+        try:
+            for line in process.stdout or []:
+                detail = line.strip()
+                if detail:
+                    progress = storage_job.get("progress", 2)
+                    if detail.startswith("[") and "/" in detail:
+                        try:
+                            current, total = detail[1:].split("]", 1)[0].split("/", 1)
+                            progress = 2 + round(96 * int(current) / max(1, int(total)))
+                        except ValueError:
+                            pass
+                    _set_storage_status(progress=progress, detail=detail)
+            code = process.wait()
+        finally:
+            with storage_process_lock:
+                if storage_process is process:
+                    storage_process = None
         if cancel_event.is_set():
             _set_storage_status(status="cancelled", stage="Setup cancelled", detail="WSL model setup was cancelled.", error="")
             cancel_event.clear()
@@ -2092,6 +2102,13 @@ class Handler(BaseHTTPRequestHandler):
                 if proc and proc.poll() is None:
                     try:
                         proc.terminate()
+                    except OSError:
+                        pass
+                with storage_process_lock:
+                    storage_proc = storage_process
+                if storage_proc and storage_proc.poll() is None:
+                    try:
+                        storage_proc.terminate()
                     except OSError:
                         pass
                 render_proc = render.get("process")

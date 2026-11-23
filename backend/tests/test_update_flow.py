@@ -33,6 +33,16 @@ def _release(digest="sha256:" + "a" * 64):
 
 
 class UpdateFlowTests(unittest.TestCase):
+    def test_managed_files_cannot_be_deleted_while_render_is_stopping(self):
+        with patch.dict(web_api.render, {"status": "stopping"}):
+            with self.assertRaisesRegex(ValueError, "active work"):
+                web_api.delete_managed_data("models")
+
+    def test_managed_python_cannot_be_deleted_during_model_storage_setup(self):
+        with patch.dict(web_api.storage_job, {"status": "installing"}):
+            with self.assertRaisesRegex(ValueError, "active work"):
+                web_api.delete_managed_data("python")
+
     def test_version_tuple_ignores_release_prefix_and_suffix(self):
         self.assertEqual(web_api.version_tuple("v2.4.30-beta.1"), (2, 4, 30))
 
