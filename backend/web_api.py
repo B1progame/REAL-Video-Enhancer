@@ -69,7 +69,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.51")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.52")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -993,6 +993,11 @@ def install_log(message):
         install_state["detail"] = str(message).rstrip()[-500:]
 
 
+def managed_python_environment_dir():
+    """Return the uv virtual-environment root containing the managed interpreter."""
+    return LOCAL_DATA / "python" / "python"
+
+
 def managed_python_path():
     if os.name == "nt":
         return LOCAL_DATA / "python" / "python" / "Scripts" / "python.exe"
@@ -1022,11 +1027,15 @@ def python_info_payload():
                                    timeout=4, check=False, **hidden_subprocess_kwargs())
             detail = (probe.stdout or probe.stderr).strip()
             if probe.returncode:
-                detail = detail or f"Python exited with code {probe.returncode}."
+                python_exists = False
+                python_managed = False
+                detail = detail or f"Python exited with code {probe.returncode}. Install the app-managed runtime from the Runtime page."
             if not python_managed:
                 detail += " · External Python detected; the app-managed runtime is not installed."
         except (OSError, subprocess.TimeoutExpired) as exc:
-            detail = f"Could not start Python: {exc}"
+            python_exists = False
+            python_managed = False
+            detail = f"Could not start the detected Python interpreter ({exc}). Install the app-managed runtime from the Runtime page."
     return {"python_path": python_path or None, "python_available": python_exists,
             "python_managed": python_managed, "python_detail": detail,
             "pip_detail": "Use the runtime's Python environment.", "version": detail}
@@ -1116,8 +1125,9 @@ def ensure_managed_python():
     env["UV_PYTHON_INSTALL_DIR"] = str(LOCAL_DATA / "python" / "managed")
     set_install_state(stage=f"Installing Python {PYTHON_VERSION} with uv", progress=10)
     run_runtime_command([uv, "python", "install", PYTHON_VERSION, "--managed-python"], f"Installing Python {PYTHON_VERSION}", env=env)
-    python.parent.mkdir(parents=True, exist_ok=True)
-    run_runtime_command([uv, "venv", "--python", PYTHON_VERSION, "--managed-python", str(python.parent)], "Creating managed Python environment", env=env)
+    environment_dir = managed_python_environment_dir()
+    environment_dir.parent.mkdir(parents=True, exist_ok=True)
+    run_runtime_command([uv, "venv", "--python", PYTHON_VERSION, "--managed-python", str(environment_dir)], "Creating managed Python environment", env=env)
     if not python.is_file():
         raise RuntimeError(f"Python download extracted, but the runtime executable is missing: {python}")
     PYTHON = str(python)
@@ -1145,11 +1155,14 @@ def run_runtime_command(command, stage, progress=None, env=None):
     global runtime_process
     with runtime_process_lock:
         runtime_process = proc
+    output_tail = []
     try:
         for line in proc.stdout:
             if cancel_event.is_set() and proc.poll() is None:
                 proc.terminate()
             install_log(line)
+            output_tail.append(line.rstrip())
+            del output_tail[:-8]
     finally:
         code = proc.wait()
         with runtime_process_lock:
@@ -1157,7 +1170,11 @@ def run_runtime_command(command, stage, progress=None, env=None):
     if cancel_event.is_set():
         raise InterruptedError("Runtime setup cancelled.")
     if code:
-        raise RuntimeError(f"{stage} failed with exit code {code}. See the download manager output for details.")
+        diagnostic = "\n".join(item[-500:] for item in output_tail if item.strip())
+        detail = f"{stage} failed with exit code {code}."
+        if diagnostic:
+            detail += f"\n\nLast command output:\n{diagnostic}"
+        raise RuntimeError(detail)
 
 
 RUNTIME_COMMON = ["testresources==2.0.1", "requests==2.32.3", "opencv-python-headless==4.11.0.86", "pypresence==4.3.0",

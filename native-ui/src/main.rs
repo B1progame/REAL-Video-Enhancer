@@ -2745,10 +2745,7 @@ impl NativeApp {
             })
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "No inference backend detected".to_owned());
-        let interpreter_available = self.python["python_available"].as_bool() == Some(true);
-        let managed_python = self.python["python_managed"]
-            .as_bool()
-            .unwrap_or(interpreter_available);
+        let managed_python = self.python["python_managed"].as_bool() == Some(true);
         let runtime_ready = !available.starts_with("No ") && managed_python;
 
         Self::card(ui, "Inference runtime", |ui| {
@@ -2911,9 +2908,7 @@ impl NativeApp {
     fn python_page(&mut self, ui: &mut egui::Ui) {
         let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
         let interpreter_available = self.python["python_available"].as_bool().unwrap_or(false);
-        let available = self.python["python_managed"]
-            .as_bool()
-            .unwrap_or(interpreter_available);
+        let available = self.python["python_managed"].as_bool() == Some(true);
         let install_failed = self.install["status"].as_str() == Some("error");
         let python_path = self.python["python_path"].as_str().unwrap_or("").to_owned();
         Self::card(ui, "Managed Python", |ui| {

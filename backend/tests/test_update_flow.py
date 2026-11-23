@@ -65,6 +65,28 @@ class UpdateFlowTests(unittest.TestCase):
         self.assertFalse(result["python_managed"])
         self.assertIn("External Python", result["python_detail"])
 
+    def test_python_probe_oserror_is_reported_as_unavailable(self):
+        with (
+            patch.object(web_api, "PYTHON", sys.executable),
+            patch.object(web_api, "managed_python_paths", {Path(sys.executable).resolve()}),
+            patch.object(web_api.subprocess, "run", side_effect=OSError(87, "The parameter is incorrect")),
+        ):
+            result = web_api.python_info_payload()
+
+        self.assertFalse(result["python_available"])
+        self.assertFalse(result["python_managed"])
+        self.assertIn("Install the app-managed runtime", result["python_detail"])
+
+    def test_managed_python_environment_path_is_the_venv_root(self):
+        with patch.object(web_api, "LOCAL_DATA", Path("/app-data")):
+            self.assertEqual(web_api.managed_python_environment_dir(), Path("/app-data/python/python"))
+            self.assertEqual(
+                web_api.managed_python_path(),
+                web_api.managed_python_environment_dir() / "Scripts" / "python.exe"
+                if web_api.os.name == "nt"
+                else web_api.managed_python_environment_dir() / "bin" / "python3",
+            )
+
     def test_video_preview_uses_a_bounded_real_frame(self):
         with TemporaryDirectory() as directory:
             video = Path(directory) / "source clip.mp4"

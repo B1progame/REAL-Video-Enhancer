@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.52 — 2026-11-23
+
+- Create the managed Python virtual environment at its root directory so uv places the interpreter where the app expects it.
+- Treat failed or non-zero Python probes as unavailable, show an actionable error, and require app-managed Python before Runtime reports ready.
+- Include the last subprocess output in setup failures to expose the actual uv error instead of only its exit code.
+
 ## 2.4.51 — 2026-11-23
 
 - Keep background status polling from clearing the in-flight action state, and reject duplicate POST actions until the current request completes.
