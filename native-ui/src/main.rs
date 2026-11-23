@@ -39,7 +39,7 @@ const PAGES: [(&str, &str); 6] = [
     ("Settings", "settings"),
 ];
 const PROCESS_PAGE: usize = 1;
-const PROCESS_COLUMN_THRESHOLD: f32 = 860.0;
+const PROCESS_COLUMN_THRESHOLD: f32 = 1360.0;
 
 fn settings_uses_two_columns(available_width: f32) -> bool {
     available_width >= 960.0
@@ -3800,8 +3800,9 @@ mod tests {
 
     #[test]
     fn process_switches_to_one_column_when_space_is_tight() {
-        assert!(!process_uses_two_columns(859.0));
-        assert!(process_uses_two_columns(860.0));
+        assert!(!process_uses_two_columns(1100.0));
+        assert!(!process_uses_two_columns(1359.0));
+        assert!(process_uses_two_columns(1360.0));
     }
 
     #[test]

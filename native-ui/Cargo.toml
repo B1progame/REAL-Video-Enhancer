@@ -1,6 +1,6 @@
 [package]
 name = "rve-native"
-version = "2.4.40"
+version = "2.4.41"
 edition = "2024"
 publish = false
 license = "AGPL-3.0-only"

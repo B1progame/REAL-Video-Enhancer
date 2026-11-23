@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4.41 — 2026-11-23
+
+- Keep the Process workspace in one column until the window is wide enough for both cards, preventing clipped controls on compact windows.
+
 ## 2.4.40 — 2026-11-23
 
 - Update from Settings now installs the checksum-verified download automatically in silent mode and reopens the app when it finishes.
