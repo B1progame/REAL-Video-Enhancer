@@ -1,8 +1,6 @@
 #![windows_subsystem = "windows"]
 
 use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke, Vec2};
-#[cfg(windows)]
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -500,62 +498,6 @@ fn apply_theme(ctx: &egui::Context, accent: Color32, appearance: &str, reduce_mo
     theme::apply(ctx, accent, appearance, reduce_motion);
 }
 
-#[cfg(windows)]
-fn apply_native_titlebar(window: &impl HasWindowHandle, light: bool) {
-    use std::ffi::c_void;
-
-    let Ok(window_handle) = window.window_handle() else {
-        return;
-    };
-    let RawWindowHandle::Win32(window_handle) = window_handle.as_raw() else {
-        return;
-    };
-    let hwnd = window_handle.hwnd.get() as *mut c_void;
-    let dark_mode: i32 = if light { 0 } else { 1 };
-    let (caption, text, border) = if light {
-        (0x00F7_F5F2_u32, 0x0026_2020_u32, 0x00DB_E3E7_u32)
-    } else {
-        (0x0015_1110_u32, 0x00F7_F5F2_u32, 0x0042_3830_u32)
-    };
-
-    #[link(name = "dwmapi")]
-    unsafe extern "system" {
-        fn DwmSetWindowAttribute(
-            hwnd: *mut c_void,
-            attribute: u32,
-            value: *const c_void,
-            size: u32,
-        ) -> i32;
-    }
-
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            20,
-            (&dark_mode as *const i32).cast(),
-            std::mem::size_of::<i32>() as u32,
-        );
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            35,
-            (&caption as *const u32).cast(),
-            std::mem::size_of::<u32>() as u32,
-        );
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            36,
-            (&text as *const u32).cast(),
-            std::mem::size_of::<u32>() as u32,
-        );
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            34,
-            (&border as *const u32).cast(),
-            std::mem::size_of::<u32>() as u32,
-        );
-    }
-}
-
 fn color_from_array(rgb: [u8; 3]) -> Color32 {
     Color32::from_rgb(rgb[0], rgb[1], rgb[2])
 }
@@ -714,8 +656,6 @@ struct NativeApp {
     accent: Color32,
     appearance: String,
     reduce_motion: bool,
-    #[cfg(windows)]
-    native_titlebar_light: bool,
     connected: bool,
     engine_error: Option<String>,
     input_info: Value,
@@ -770,10 +710,6 @@ impl NativeApp {
         let accent = saved_accent();
         let appearance = saved_appearance();
         let reduce_motion = saved_reduce_motion();
-        #[cfg(windows)]
-        apply_native_titlebar(ctx, appearance == "light");
-        #[cfg(windows)]
-        let native_titlebar_light = appearance == "light";
         let model_storage = saved_model_storage();
         let first_setup = !model_storage_configured();
         let (engine, engine_error) = match start_engine(&model_storage, first_setup) {
@@ -807,8 +743,6 @@ impl NativeApp {
             accent,
             appearance,
             reduce_motion,
-            #[cfg(windows)]
-            native_titlebar_light,
             connected: false,
             engine_error,
             input_info: Value::Null,
@@ -1500,6 +1434,132 @@ impl NativeApp {
             .fit_to_exact_size(Vec2::splat(size))
             .corner_radius(9),
         );
+    }
+
+    #[cfg(windows)]
+    fn titlebar_button(ui: &mut egui::Ui, glyph: &str, close: bool) -> egui::Response {
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(46.0, 42.0), egui::Sense::click());
+        let center = rect.center();
+        let stroke = Stroke::new(1.15, ui.visuals().text_color().gamma_multiply(0.78));
+        if response.hovered() {
+            let fill = if close {
+                Color32::from_rgb(196, 54, 66)
+            } else {
+                ui.visuals().widgets.hovered.bg_fill
+            };
+            ui.painter().rect_filled(rect, 0.0, fill);
+        }
+        match glyph {
+            "minimize" => {
+                ui.painter().line_segment(
+                    [center + Vec2::new(-5.0, 3.0), center + Vec2::new(5.0, 3.0)],
+                    stroke,
+                );
+            }
+            "maximize" => {
+                ui.painter().rect_stroke(
+                    egui::Rect::from_center_size(center, Vec2::splat(10.0)),
+                    0.0,
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+            "restore" => {
+                let rear =
+                    egui::Rect::from_center_size(center + Vec2::new(1.5, -1.5), Vec2::splat(9.0));
+                let front =
+                    egui::Rect::from_center_size(center + Vec2::new(-1.5, 1.5), Vec2::splat(9.0));
+                ui.painter()
+                    .rect_filled(front, 0.0, ui.visuals().panel_fill);
+                ui.painter()
+                    .rect_stroke(rear, 0.0, stroke, egui::StrokeKind::Inside);
+                ui.painter()
+                    .rect_stroke(front, 0.0, stroke, egui::StrokeKind::Inside);
+            }
+            "close" => {
+                ui.painter().line_segment(
+                    [center + Vec2::new(-4.5, -4.5), center + Vec2::new(4.5, 4.5)],
+                    stroke,
+                );
+                ui.painter().line_segment(
+                    [center + Vec2::new(4.5, -4.5), center + Vec2::new(-4.5, 4.5)],
+                    stroke,
+                );
+            }
+            _ => {}
+        }
+        response
+    }
+
+    #[cfg(windows)]
+    fn custom_titlebar(&self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let light = self.appearance == "light";
+        let palette = theme::palette(light, self.accent);
+        egui::Panel::top("custom-window-titlebar")
+            .exact_size(42.0)
+            .show_separator_line(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(palette.canvas)
+                    .inner_margin(egui::Margin::ZERO),
+            )
+            .show(ui, |bar| {
+                bar.spacing_mut().item_spacing.x = 0.0;
+                bar.horizontal(|bar| {
+                    bar.add_space(12.0);
+                    egui::Frame::new()
+                        .fill(palette.elevated)
+                        .stroke(Stroke::new(1.0, palette.border))
+                        .corner_radius(8)
+                        .inner_margin(egui::Margin::same(2))
+                        .show(bar, |icon_ui| Self::brand_mark(icon_ui, 24.0));
+                    bar.add_space(9.0);
+                    bar.label(
+                        RichText::new("REAL Video Enhancer")
+                            .size(13.0)
+                            .strong()
+                            .color(palette.text),
+                    );
+
+                    let drag_width = (bar.available_width() - 138.0).max(0.0);
+                    let (_, drag) = bar.allocate_exact_size(
+                        Vec2::new(drag_width, 42.0),
+                        egui::Sense::click_and_drag(),
+                    );
+                    if drag.drag_started() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                    }
+                    if drag.double_clicked() {
+                        let maximized =
+                            ctx.input(|input| input.viewport().maximized.unwrap_or(false));
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                    }
+                    let _ = drag.on_hover_cursor(egui::CursorIcon::Move);
+
+                    if Self::titlebar_button(bar, "minimize", false).clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                    }
+                    let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
+                    if Self::titlebar_button(
+                        bar,
+                        if maximized { "restore" } else { "maximize" },
+                        false,
+                    )
+                    .clicked()
+                    {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                    }
+                    if Self::titlebar_button(bar, "close", true).clicked() {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+                let rect = bar.max_rect();
+                bar.painter().hline(
+                    rect.x_range(),
+                    rect.bottom() - 0.5,
+                    Stroke::new(1.0, palette.border),
+                );
+            });
     }
 
     fn home_hero_intro(&mut self, ui: &mut egui::Ui, palette: theme::Palette) {
@@ -3664,10 +3724,7 @@ impl eframe::App for NativeApp {
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
         #[cfg(windows)]
-        if self.native_titlebar_light != (self.appearance == "light") {
-            apply_native_titlebar(_frame, self.appearance == "light");
-            self.native_titlebar_light = self.appearance == "light";
-        }
+        self.custom_titlebar(root_ui, &ctx);
         self.process_tray_commands(&ctx);
         if ctx.input(|input| input.viewport().close_requested())
             && self.active_task().is_some()
@@ -4042,12 +4099,18 @@ fn main() -> eframe::Result<()> {
     set_windows_app_identity();
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../docs/assets/rve-logo.png"))
         .unwrap_or_default();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("REAL Video Enhancer")
+        .with_inner_size([1360.0, 860.0])
+        .with_min_inner_size([840.0, 620.0])
+        .with_resizable(true)
+        .with_icon(icon);
+    #[cfg(windows)]
+    {
+        viewport = viewport.with_decorations(false);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("REAL Video Enhancer")
-            .with_inner_size([1360.0, 860.0])
-            .with_min_inner_size([840.0, 620.0])
-            .with_icon(icon),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

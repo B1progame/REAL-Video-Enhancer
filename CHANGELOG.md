@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.58 — 2026-11-23
+
+- Replace the tiny Windows native caption icon with a branded, resizable 42 px custom title bar and a crisp 24 px logo.
+- Add minimize, maximize/restore, close, drag-to-move, and double-click-to-maximize controls while preserving close-while-busy handling.
+- Keep the title bar in sync with the selected light or dark appearance.
+
 ## 2.4.56 — 2026-11-23
 
 - Retry Windows Python and runtime process launches without optional startup metadata when a launch context returns WinError 87.
