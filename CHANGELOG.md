@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4.78 — 2026-11-24
+
+- Add a live, scrollable terminal panel to Runtime setup with color-coded output and retained logs after setup completes or fails.
+
 ## 2.4.77 — 2026-11-24
 
 - Apply the compatible TensorRT package versions to the legacy dependency installer and bundled backend requirements as well as the native Runtime installer.

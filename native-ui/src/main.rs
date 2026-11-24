@@ -4721,6 +4721,83 @@ impl NativeApp {
                     ),
                 );
             }
+            if installing
+                || self.install["output"]
+                    .as_array()
+                    .is_some_and(|lines| !lines.is_empty())
+            {
+                ui.add_space(theme::space::SM);
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(9, 12, 17))
+                    .stroke(Stroke::new(1.0, palette.border))
+                    .corner_radius(theme::radius::CONTROL)
+                    .inner_margin(egui::Margin::symmetric(12, 9))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Live setup output")
+                                    .strong()
+                                    .color(Color32::from_rgb(228, 234, 241)),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if installing {
+                                    components::status_dot(ui, palette.success, "LIVE");
+                                } else if failed {
+                                    components::status_dot(
+                                        ui,
+                                        palette.error,
+                                        "Finished with errors",
+                                    );
+                                } else if cancelled {
+                                    components::status_dot(ui, palette.warning, "Cancelled");
+                                } else {
+                                    components::status_dot(ui, palette.muted, "Last run");
+                                }
+                            });
+                        });
+                        ui.separator();
+                        egui::ScrollArea::vertical()
+                            .id_salt("runtime-live-output-terminal")
+                            .max_height(if installing { 250.0 } else { 180.0 })
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                if let Some(lines) = self.install["output"].as_array() {
+                                    for line in
+                                        lines.iter().rev().take(120).rev().filter_map(Value::as_str)
+                                    {
+                                        let lower = line.to_ascii_lowercase();
+                                        let color = if lower.contains("error")
+                                            || lower.contains("failed")
+                                        {
+                                            Color32::from_rgb(255, 123, 133)
+                                        } else if lower.starts_with("$")
+                                            || lower.contains("installing")
+                                        {
+                                            Color32::from_rgb(137, 199, 255)
+                                        } else {
+                                            Color32::from_rgb(188, 198, 210)
+                                        };
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(line)
+                                                    .monospace()
+                                                    .size(10.5)
+                                                    .color(color),
+                                            )
+                                            .wrap(),
+                                        );
+                                    }
+                                } else {
+                                    ui.label(
+                                        RichText::new("Waiting for setup output…")
+                                            .monospace()
+                                            .size(10.5)
+                                            .color(Color32::from_rgb(145, 157, 172)),
+                                    );
+                                }
+                            });
+                    });
+            }
             if failed || cancelled {
                 ui.add_space(theme::space::SM);
                 egui::Frame::new()
@@ -4742,22 +4819,6 @@ impl NativeApp {
                                 palette.warning
                             }),
                         );
-                        if failed && let Some(lines) = self.install["output"].as_array() {
-                            egui::ScrollArea::vertical()
-                                .max_height(112.0)
-                                .show(ui, |ui| {
-                                    for line in
-                                        lines.iter().rev().take(6).rev().filter_map(Value::as_str)
-                                    {
-                                        ui.label(
-                                            RichText::new(line)
-                                                .monospace()
-                                                .size(11.0)
-                                                .color(palette.secondary),
-                                        );
-                                    }
-                                });
-                        }
                     });
             }
             ui.add_space(theme::space::MD);
