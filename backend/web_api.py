@@ -75,7 +75,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.65")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.66")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -87,12 +87,64 @@ def default_model_dir(storage=None):
     storage = (storage or os.environ.get("RVE_MODEL_STORAGE") or "wsl").lower()
     if storage == "windows":
         return APP_DATA / "models"
-    # WSL exposes the Linux model directory as a normal UNC path to Windows.
     if os.name == "nt":
-        distro = os.environ.get("RVE_WSL_DISTRO", "Ubuntai")
-        linux_user = os.environ.get("RVE_WSL_USER", "Benjai")
-        return Path(rf"\\wsl.localhost\{distro}\home\{linux_user}\.local\share\REAL-Video-Enhancer\models")
+        # The WSL home is resolved when storage setup starts. Avoid guessing a
+        # Linux username before that probe has run.
+        return APP_DATA / "models"
     return APP_DATA / "models"
+
+
+def _decode_wsl_list_output(output):
+    if isinstance(output, bytes):
+        if output.startswith((b"\xff\xfe", b"\xfe\xff")):
+            output = output.decode("utf-16", errors="replace")
+        elif b"\x00" in output[:64]:
+            output = output.decode("utf-16-le", errors="replace")
+        else:
+            output = output.decode("utf-8", errors="replace")
+    return str(output).replace("\x00", "").replace("\ufeff", "")
+
+
+def wsl_distribution_name():
+    configured = os.environ.get("RVE_WSL_DISTRO", "").strip()
+    if configured:
+        if not all(ch.isalnum() or ch in "._-" for ch in configured):
+            raise ValueError("The configured WSL distribution name contains unsupported characters.")
+        return configured
+    wsl = shutil.which("wsl.exe") or shutil.which("wsl")
+    if not wsl:
+        raise RuntimeError("WSL could not be found. Install or enable WSL, or select Windows model storage.")
+    result = subprocess.run(
+        [wsl, "--list", "--quiet"], capture_output=True, timeout=30,
+        **hidden_subprocess_kwargs(),
+    )
+    if result.returncode:
+        detail = _decode_wsl_list_output(result.stderr or result.stdout).strip()
+        raise RuntimeError(detail or "Could not list installed WSL distributions.")
+    distributions = [
+        line.strip().lstrip("* ").strip()
+        for line in _decode_wsl_list_output(result.stdout).splitlines()
+        if line.strip() and "windows subsystem for linux" not in line.lower()
+    ]
+    if not distributions:
+        raise RuntimeError("No WSL distribution is installed. Install Ubuntu or choose Windows model storage.")
+    return next((name for name in distributions if name.casefold().startswith("ubuntu")), distributions[0])
+
+
+def wsl_home_directory(distro):
+    wsl = shutil.which("wsl.exe") or shutil.which("wsl") or "wsl.exe"
+    result = subprocess.run(
+        [wsl, "--distribution", distro, "--exec", "bash", "-lc", 'printf %s "$HOME"'],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+        **hidden_subprocess_kwargs(),
+    )
+    if result.returncode:
+        detail = (result.stderr or result.stdout or f"Could not start WSL distribution {distro}.").strip()
+        raise RuntimeError(detail)
+    home = result.stdout.strip().replace("\r", "")
+    if not home.startswith("/home/") or ".." in Path(home).parts:
+        raise RuntimeError("Could not safely locate the WSL user's home directory.")
+    return home
 
 
 MODEL_DIR = default_model_dir()
@@ -657,40 +709,49 @@ def _set_storage_status(**updates):
 
 
 def delete_managed_data(kind):
-    global PYTHON
+    global PYTHON, MODEL_DIR
     if kind not in ("python", "models"):
         raise ValueError("Choose Python or models for removal.")
-    if render.get("status") in ("preparing", "running", "paused", "stopping") or download_job.get("active") or install_state.get("status") == "running" or storage_job.get("status") in ("starting", "installing"):
+    if (render.get("status") in ("preparing", "running", "paused", "stopping")
+            or download_job.get("active")
+            or install_state.get("status") in ("starting", "running", "installing", "downloading")
+            or storage_job.get("status") in ("starting", "installing")):
         raise ValueError("Wait for active work to stop before removing managed files.")
     if kind == "python":
-        root = (LOCAL_DATA / "python").resolve()
-        expected = (LOCAL_DATA / "python").resolve()
-        if root != expected or root.name.lower() != "python" or root.parent != LOCAL_DATA.resolve():
-            raise ValueError("Managed Python path failed its safety check.")
-        if root.exists():
-            shutil.rmtree(root)
-        uv_cache = LOCAL_DATA / "uv-cache"
-        if uv_cache.exists():
-            shutil.rmtree(uv_cache)
+        data_root = LOCAL_DATA.resolve()
+
+        def remove_local_managed_tree(path):
+            target = Path(path)
+            resolved = target.resolve()
+            if resolved == data_root or not resolved.is_relative_to(data_root):
+                raise ValueError(f"Refusing to remove files outside app-managed storage: {target}")
+            if target.exists():
+                shutil.rmtree(target)
+            if target.exists():
+                raise RuntimeError(f"Managed files remain after removal: {target}")
+
+        # uv's downloaded CPython builds live separately from the virtual
+        # environment; remove both along with the package cache.
+        remove_local_managed_tree(LOCAL_DATA / "python")
+        remove_local_managed_tree(LOCAL_DATA / "uv" / "python")
+        remove_local_managed_tree(LOCAL_DATA / "uv-cache")
         PYTHON = ""
         capability_cache.update(checked_at=0.0, value=None)
+        set_install_state(status="not_started", progress=0, stage="Runtime removed",
+                          detail="Managed Python and its packages were deleted.", output=[], error="")
         return {"ok": True, "detail": "Managed Python and its installed Python packages were removed. Use Runtime setup to install them again."}
 
     if os.name == "nt" and storage_job.get("mode") == "wsl":
-        distro = os.environ.get("RVE_WSL_DISTRO", "Ubuntai")
-        if not all(ch.isalnum() or ch in "._-" for ch in distro):
-            raise ValueError("The configured WSL name is not safe to use for model cleanup.")
+        distro = wsl_distribution_name()
         wsl = shutil.which("wsl.exe") or "wsl.exe"
-        home_result = subprocess.run([wsl, "--distribution", distro, "--exec", "bash", "-lc", "printf %s \"$HOME\""],
-                                     capture_output=True, text=True, timeout=60, **hidden_subprocess_kwargs())
-        linux_home = home_result.stdout.strip().replace("\r", "")
-        if home_result.returncode or not linux_home.startswith("/home/") or ".." in Path(linux_home).parts:
-            raise RuntimeError("Could not safely locate the WSL user's home directory for model cleanup.")
+        linux_home = wsl_home_directory(distro)
         linux_path = linux_home.rstrip("/") + "/.local/share/REAL-Video-Enhancer/models"
         result = subprocess.run([wsl, "--distribution", distro, "--exec", "rm", "-rf", "--", linux_path, linux_path + "/custom_models"],
                                 capture_output=True, text=True, timeout=180, **hidden_subprocess_kwargs())
         if result.returncode:
-            raise RuntimeError((result.stderr or "WSL could not remove the managed model folder.").strip())
+            raise RuntimeError((result.stderr or result.stdout or "WSL could not remove the managed model folder.").strip())
+        windows_home = linux_home.replace("/", "\\")
+        MODEL_DIR = Path(rf"\\wsl.localhost\{distro}{windows_home}\.local\share\REAL-Video-Enhancer\models")
     else:
         root = (APP_DATA / "models").resolve()
         if root.name.lower() != "models" or root.parent != APP_DATA.resolve():
@@ -700,6 +761,9 @@ def delete_managed_data(kind):
         custom = APP_DATA / "custom_models"
         if custom.exists():
             shutil.rmtree(custom)
+    with storage_lock:
+        storage_job.update(status="idle", progress=0, stage="Models removed",
+                           detail="Managed model files were removed. Download them again from Downloads.", error="")
     return {"ok": True, "detail": "The managed model library and custom model files were removed. You can download models again from Downloads."}
 
 
@@ -731,18 +795,14 @@ def prepare_model_storage(mode):
 
         if mode != "wsl" or os.name != "nt":
             raise ValueError("Choose WSL or Windows model storage.")
-        distro = os.environ.get("RVE_WSL_DISTRO", "Ubuntai")
+        distro = wsl_distribution_name()
         _set_storage_status(status="starting", mode=mode, progress=0, stage=f"Starting WSL · {distro}",
                             detail="Starting the selected WSL distribution if it is stopped.", error="")
         wsl = shutil.which("wsl.exe") or "wsl.exe"
         common = [wsl, "--distribution", distro, "--exec"]
         hidden = hidden_subprocess_kwargs()
         # Running a harmless command starts WSL when it is not already running.
-        home_result = subprocess.run(common + ["bash", "-lc", "printf %s \"$HOME\""], capture_output=True,
-                                     text=True, encoding="utf-8", errors="replace", timeout=180, **hidden)
-        if home_result.returncode:
-            raise RuntimeError((home_result.stderr or home_result.stdout or f"Could not start WSL distro {distro}.").strip())
-        linux_home = home_result.stdout.strip().replace("\r", "")
+        linux_home = wsl_home_directory(distro)
         if not linux_home.startswith("/") or ".." in Path(linux_home).parts:
             raise RuntimeError(f"WSL returned an invalid home directory: {linux_home!r}")
         windows_home = linux_home.replace("/", "\\")

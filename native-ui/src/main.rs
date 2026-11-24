@@ -694,6 +694,10 @@ struct NativeApp {
     tray_error: Option<String>,
     close_confirmation: bool,
     destructive_confirmation: Option<String>,
+    managed_data_message: Option<String>,
+    managed_data_kind: Option<String>,
+    managed_data_failed: bool,
+    managed_data_pending: bool,
     quit_when_idle: bool,
     page: usize,
     accent: Color32,
@@ -782,6 +786,10 @@ impl NativeApp {
             tray_error,
             close_confirmation: false,
             destructive_confirmation: None,
+            managed_data_message: None,
+            managed_data_kind: None,
+            managed_data_failed: false,
+            managed_data_pending: false,
             quit_when_idle: false,
             page: PROCESS_PAGE,
             accent,
@@ -1201,14 +1209,21 @@ impl NativeApp {
                     }
                     "/api/storage/status" => self.storage_status = value,
                     "/api/data/delete" => {
-                        self.logs.push(
-                            value["detail"]
-                                .as_str()
-                                .unwrap_or("Managed files removed.")
-                                .to_owned(),
-                        );
+                        let detail = value["detail"]
+                            .as_str()
+                            .unwrap_or("Managed files removed.")
+                            .to_owned();
+                        self.managed_data_message = Some(detail.clone());
+                        self.managed_data_failed = value["ok"].as_bool() == Some(false);
+                        self.managed_data_pending = false;
+                        self.logs.push(detail);
                         self.get(&format!("/api/models?backend={}", self.backend));
                         self.get("/api/python/info");
+                        self.get("/api/storage/status");
+                        self.get("/api/startup/install_status");
+                        if self.managed_data_kind.as_deref() == Some("python") {
+                            self.get("/api/bootstrap");
+                        }
                     }
                     "/api/app/update/status"
                     | "/api/app/update/check"
@@ -1234,6 +1249,11 @@ impl NativeApp {
                     }
                 },
                 Err(error) => {
+                    if event.endpoint == "/api/data/delete" {
+                        self.managed_data_message = Some(format!("Delete failed: {error}"));
+                        self.managed_data_failed = true;
+                        self.managed_data_pending = false;
+                    }
                     if event.endpoint == "/api/bootstrap" || event.endpoint == "/api/connection" {
                         self.connected = false;
                         self.engine_error = Some(error.clone());
@@ -3662,23 +3682,40 @@ impl NativeApp {
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(
-                        self.active_task().is_none(),
+                        self.active_task().is_none() && !self.managed_data_pending,
                         egui::Button::new("Delete Python and packages"),
                     )
                     .clicked()
                 {
+                    self.managed_data_message = None;
                     self.destructive_confirmation = Some("python".to_owned());
                 }
                 if ui
                     .add_enabled(
-                        self.active_task().is_none(),
+                        self.active_task().is_none() && !self.managed_data_pending,
                         egui::Button::new("Delete models"),
                     )
                     .clicked()
                 {
+                    self.managed_data_message = None;
                     self.destructive_confirmation = Some("models".to_owned());
                 }
             });
+            if let Some(message) = self.managed_data_message.as_deref() {
+                ui.add_space(theme::space::XS);
+                ui.horizontal(|ui| {
+                    if self.managed_data_pending {
+                        ui.spinner();
+                    }
+                    ui.label(RichText::new(message).color(if self.managed_data_failed {
+                        palette.error
+                    } else if self.managed_data_pending {
+                        palette.accent
+                    } else {
+                        palette.success
+                    }));
+                });
+            }
             ui.label(RichText::new("Python can be installed again from Runtime. Models can be downloaded again from Downloads.").size(11.0).color(palette.secondary));
         });
     }
@@ -4253,11 +4290,21 @@ impl eframe::App for NativeApp {
                         }
                         if ui
                             .add_enabled(
-                                self.active_task().is_none(),
+                                self.active_task().is_none() && !self.managed_data_pending,
                                 egui::Button::new("Delete files"),
                             )
                             .clicked()
                         {
+                            self.managed_data_kind = Some(kind.clone());
+                            self.managed_data_message = Some(if kind == "python" {
+                                "Removing the managed Python environment, downloaded Python runtimes, and package cache…".to_owned()
+                            } else if self.model_storage == "wsl" {
+                                "Removing the managed model library from WSL Ubuntu…".to_owned()
+                            } else {
+                                "Removing the managed model library from this PC…".to_owned()
+                            });
+                            self.managed_data_failed = false;
+                            self.managed_data_pending = true;
                             self.destructive_confirmation = None;
                             self.post("/api/data/delete", json!({"kind": kind.clone()}));
                         }

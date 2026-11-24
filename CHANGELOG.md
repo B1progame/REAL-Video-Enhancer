@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4.66 — 2026-11-24
+
+- Delete the complete app-managed Python environment, including uv-installed CPython builds, the virtual environment, and package cache.
+- Detect the installed WSL distribution and its real home directory for model deletion and setup instead of relying on a misspelled distro and a hard-coded Linux username.
+- Show delete progress and success or failure in Settings, refresh Python, model, and storage state after removal, and reset stale ready statuses.
+- Correct the WSL distribution used by the installer's optional full-data uninstall cleanup.
+
 ## 2.4.65 — 2026-11-24
 
 - Populate Runtime hardware details from the managed PyTorch probe so the graphics device and CUDA runtime are reported accurately.

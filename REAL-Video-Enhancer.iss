@@ -1,6 +1,6 @@
 #define MyAppName "REAL Video Enhancer"
 #ifndef MyAppVersion
-#define MyAppVersion "2.4.65"
+#define MyAppVersion "2.4.66"
 #endif
 #define MyAppPublisher "B1progame"
 #define MyAppURL "https://github.com/B1progame/REAL-Video-Enhancer"
@@ -112,7 +112,7 @@ begin
   begin
     DelTree(ExpandConstant('{localappdata}\REAL-Video-Enhancer'), True, True, True);
     Exec(ExpandConstant('{sys}\wsl.exe'),
-      '--distribution Ubuntai --exec bash -lc "rm -rf -- $HOME/.local/share/REAL-Video-Enhancer"',
+      '--distribution Ubuntu --exec bash -lc "rm -rf -- $HOME/.local/share/REAL-Video-Enhancer"',
       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;

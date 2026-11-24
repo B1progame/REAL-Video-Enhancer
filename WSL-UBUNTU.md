@@ -5,9 +5,11 @@ launch, the app installs its managed Windows Python runtime and asks where to
 store models. Settings lets you choose WSL or Windows storage. WSL is the
 default; when selected, the app starts the distro if needed, installs and
 verifies the complete model catalog, and reads weights through the WSL network
-share. The default Windows path is
-`\\wsl.localhost\Ubuntai\home\Benjai\.local\share\REAL-Video-Enhancer\models`.
-Set `RVE_WSL_DISTRO`, `RVE_WSL_USER`, or `RVE_MODEL_DIR` to change that location.
+share. During setup, the app detects the installed Ubuntu distribution and
+resolves the active WSL user's home directory. The Windows network path follows
+`\\wsl.localhost\Ubuntu\home\<your-wsl-user>\.local\share\REAL-Video-Enhancer\models`.
+Set `RVE_WSL_DISTRO` or `RVE_MODEL_DIR` to select a different distribution or
+model location.
 
 From the repository folder inside Ubuntu, install system packages once:
 
