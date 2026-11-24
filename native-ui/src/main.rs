@@ -42,10 +42,10 @@ const PROCESS_PAGE: usize = 1;
 const BENCHMARK_PAGE: usize = 4;
 const RUNTIME_PAGE: usize = 5;
 const SETTINGS_PAGE: usize = 7;
-const PROCESS_COLUMN_THRESHOLD: f32 = 880.0;
+const PROCESS_COLUMN_THRESHOLD: f32 = 1040.0;
 const RUNTIME_METRICS_COLUMN_THRESHOLD: f32 = 760.0;
-const HOME_HERO_COLUMN_THRESHOLD: f32 = 840.0;
-const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 880.0;
+const HOME_HERO_COLUMN_THRESHOLD: f32 = 780.0;
+const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 940.0;
 
 fn can_start_model_download(connected: bool, active: bool, busy: bool) -> bool {
     connected && !active && !busy
@@ -1792,9 +1792,20 @@ impl NativeApp {
                 .color(palette.secondary),
         );
         ui.add_space(theme::space::LG);
-        if components::primary_button(ui, "Choose a video").clicked() {
-            self.page = 1;
-            self.get("/api/dialog/select_input");
+        if components::primary_button(
+            ui,
+            if self.input_path.is_empty() {
+                "Choose a video"
+            } else {
+                "Continue editing"
+            },
+        )
+        .clicked()
+        {
+            self.page = PROCESS_PAGE;
+            if self.input_path.is_empty() {
+                self.get("/api/dialog/select_input");
+            }
         }
         ui.add_space(theme::space::SM);
         ui.label(
@@ -1804,40 +1815,41 @@ impl NativeApp {
         );
     }
 
-    fn home_video_preview(&self, ui: &mut egui::Ui, palette: theme::Palette, model_count: usize) {
+    fn home_video_preview(
+        &mut self,
+        ui: &mut egui::Ui,
+        palette: theme::Palette,
+        model_count: usize,
+    ) {
         let width = ui.available_width().max(1.0);
         let size = Vec2::new(width, (width * 9.0 / 16.0).clamp(190.0, 310.0));
-        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-        ui.painter().rect_filled(rect, 12.0, palette.elevated);
-        if let Some(texture) = self
+        let preview = self
             .source_preview
             .as_ref()
             .filter(|_| self.source_preview_path == self.input_path.trim())
-        {
-            ui.place(
-                rect,
-                egui::Image::new(texture)
-                    .fit_to_exact_size(size)
-                    .maintain_aspect_ratio(true)
-                    .corner_radius(12.0),
-            );
+            .cloned();
+        if self.input_path.is_empty() {
+            self.source_drop_target(ui, size.y);
         } else {
-            let icon_rect = egui::Rect::from_center_size(
-                rect.center() - Vec2::new(0.0, 13.0),
-                Vec2::splat(36.0),
-            );
-            ui.place(icon_rect, icons::styled("video", palette.accent, 30.0));
-            ui.painter().text(
-                rect.center() + Vec2::new(0.0, 27.0),
-                egui::Align2::CENTER_CENTER,
-                if self.input_path.is_empty() {
-                    "Your video preview appears here"
-                } else {
-                    "Preparing your video preview…"
-                },
-                egui::FontId::proportional(12.0),
-                palette.secondary,
-            );
+            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::click());
+            ui.painter().rect_filled(rect, 12.0, palette.elevated);
+            if let Some(texture) = preview {
+                ui.place(
+                    rect,
+                    egui::Image::new(&texture)
+                        .fit_to_exact_size(size)
+                        .maintain_aspect_ratio(true)
+                        .corner_radius(12.0),
+                );
+            } else {
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Preparing your video preview…",
+                    egui::FontId::proportional(13.0),
+                    palette.secondary,
+                );
+            }
         }
         ui.add_space(theme::space::SM);
         let file_name = Path::new(&self.input_path)
@@ -1998,7 +2010,7 @@ impl NativeApp {
 
         egui::Frame::new()
             .fill(palette.surface)
-            .stroke(Stroke::new(1.0, palette.accent.gamma_multiply(0.32)))
+            .stroke(Stroke::new(1.0, palette.border))
             .corner_radius(theme::radius::CARD)
             .inner_margin(egui::Margin::same(24))
             .show(ui, |ui| {
@@ -2679,6 +2691,34 @@ impl NativeApp {
         });
     }
 
+    fn render_blocker_action(&mut self, ui: &mut egui::Ui, blocker: &str) {
+        let action = if blocker.contains("input video") || blocker.contains("supported video") {
+            Some(("Choose source video", 0))
+        } else if blocker.contains("output folder") {
+            Some(("Choose output folder", 1))
+        } else if blocker.contains("processing backend")
+            || blocker.contains("AnimeScripter")
+            || blocker.contains("backend in Runtime")
+        {
+            Some(("Open runtime setup", 2))
+        } else if blocker.contains("model") || blocker.contains("enhancement") {
+            Some(("Choose models", 3))
+        } else {
+            None
+        };
+        let Some((label, destination)) = action else {
+            return;
+        };
+        if ui.small_button(label).clicked() {
+            match destination {
+                0 => self.get("/api/dialog/select_input"),
+                1 => self.get("/api/dialog/select_output"),
+                2 => self.page = RUNTIME_PAGE,
+                _ => self.page = 2,
+            }
+        }
+    }
+
     fn render_action_bar(&mut self, ui: &mut egui::Ui) {
         let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
         let status = self.render["status"].as_str().unwrap_or("idle").to_owned();
@@ -2705,10 +2745,20 @@ impl NativeApp {
         } else {
             "Ready to render"
         };
-        let compact = ui.available_width() < 960.0;
+        let compact = ui.available_width() < 700.0;
         if compact {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(title).size(14.0).strong().color(palette.text));
+            ui.horizontal_wrapped(|ui| {
+                components::status_dot(
+                    ui,
+                    if active {
+                        palette.accent
+                    } else if !blockers.is_empty() {
+                        palette.warning
+                    } else {
+                        palette.success
+                    },
+                    title,
+                );
                 self.render_action_controls(ui, active, preparing, paused, &status, can_start);
             });
             if active {
@@ -2735,12 +2785,25 @@ impl NativeApp {
                     .color(palette.secondary),
                 );
             } else if let Some(blocker) = blockers.first() {
-                ui.label(RichText::new(blocker).size(11.0).color(palette.warning));
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(blocker).size(11.0).color(palette.warning));
+                    self.render_blocker_action(ui, blocker);
+                });
             }
         } else {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(title).size(14.0).strong().color(palette.text));
+                    components::status_dot(
+                        ui,
+                        if active {
+                            palette.accent
+                        } else if !blockers.is_empty() {
+                            palette.warning
+                        } else {
+                            palette.success
+                        },
+                        title,
+                    );
                     if active {
                         let frame = self.render["current_frame"].as_u64().unwrap_or(0);
                         let fps = self.render["gen_fps"].as_f64();
@@ -2774,15 +2837,11 @@ impl NativeApp {
                         );
                     }
                 });
+                if !active && let Some(blocker) = blockers.first() {
+                    self.render_blocker_action(ui, blocker);
+                }
                 self.render_action_controls(ui, active, preparing, paused, &status, can_start);
             });
-        }
-        if blockers
-            .first()
-            .is_some_and(|blocker| blocker.contains("processing backend"))
-            && ui.small_button("Open Runtime setup").clicked()
-        {
-            self.page = RUNTIME_PAGE;
         }
         if let Some(error) = self.render["error"]
             .as_str()
@@ -5070,6 +5129,8 @@ impl eframe::App for NativeApp {
                     egui::Key::Num4,
                     egui::Key::Num5,
                     egui::Key::Num6,
+                    egui::Key::Num7,
+                    egui::Key::Num8,
                 ]
                 .iter()
                 .position(|key| input.key_pressed(*key))
@@ -5082,8 +5143,8 @@ impl eframe::App for NativeApp {
         }
         let light = self.appearance == "light";
         let theme_accent = accent_for_theme(self.accent, light);
-        let compact_sidebar = root_ui.available_width() < 960.0;
-        let sidebar_width = if compact_sidebar { 76.0 } else { 232.0 };
+        let compact_sidebar = root_ui.available_width() < 820.0;
+        let sidebar_width = if compact_sidebar { 76.0 } else { 220.0 };
         egui::Panel::left("navigation")
             .resizable(false)
             .default_size(sidebar_width)
@@ -5099,52 +5160,55 @@ impl eframe::App for NativeApp {
                 ui.add_space(4.0);
                 if compact_sidebar {
                     ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                        Self::brand_mark(ui, 46.0);
+                        Self::brand_mark(ui, 44.0);
                     });
                 } else {
                     ui.horizontal(|ui| {
-                        Self::brand_mark(ui, 50.0);
+                        Self::brand_mark(ui, 46.0);
                         ui.vertical(|ui| {
                             ui.label(
                                 RichText::new("REAL VIDEO")
-                                    .size(11.0)
+                                    .size(12.0)
                                     .strong()
                                     .color(theme::palette(light, self.accent).text),
                             );
                             ui.label(
-                                RichText::new("ENHANCER")
+                                RichText::new(format!("ENHANCER · v{APP_VERSION}"))
                                     .size(9.0)
-                                    .color(secondary_text_color(light)),
+                                    .color(theme::palette(light, self.accent).muted),
                             );
                         });
                     });
                 }
-                ui.add_space(if compact_sidebar {
-                    20.0
-                } else {
-                    theme::space::XXL
-                });
+                ui.add_space(if compact_sidebar { 16.0 } else { 28.0 });
                 if !compact_sidebar {
                     ui.label(
                         RichText::new("WORKSPACE")
-                            .size(10.0)
+                            .size(9.0)
                             .strong()
-                            .color(secondary_text_color(light)),
+                            .color(theme::palette(light, self.accent).muted),
                     );
-                    ui.add_space(8.0);
+                    ui.add_space(7.0);
                 }
-                let first_navigation_row = ui.cursor().min.y;
-                let motion_duration = if self.reduce_motion {
-                    0.0
-                } else {
-                    theme::motion::NAV_SECONDS
-                };
-                let active_index = ctx.animate_value_with_time(
-                    egui::Id::unique("navigation-selection"),
-                    self.page as f32,
-                    motion_duration,
-                );
                 for (index, (label, icon)) in PAGES.iter().enumerate() {
+                    let group = match index {
+                        2 => Some("LIBRARY"),
+                        5 => Some("ENGINE"),
+                        7 => Some("PREFERENCES"),
+                        _ => None,
+                    };
+                    if let Some(group) = group
+                        && !compact_sidebar
+                    {
+                        ui.add_space(if index == 7 { 16.0 } else { 12.0 });
+                        ui.label(
+                            RichText::new(group)
+                                .size(9.0)
+                                .strong()
+                                .color(theme::palette(light, self.accent).muted),
+                        );
+                        ui.add_space(6.0);
+                    }
                     let selected = self.page == index;
                     let (rect, response) = ui.allocate_exact_size(
                         Vec2::new(
@@ -5153,7 +5217,7 @@ impl eframe::App for NativeApp {
                             } else {
                                 sidebar_width - 36.0
                             },
-                            46.0,
+                            44.0,
                         ),
                         egui::Sense::click(),
                     );
@@ -5167,42 +5231,35 @@ impl eframe::App for NativeApp {
                         },
                     );
                     let fill = if selected {
-                        theme_accent.gamma_multiply(if light { 0.18 } else { 0.16 })
+                        theme_accent.gamma_multiply(if light { 0.13 } else { 0.12 })
                     } else if response.hovered() {
-                        ui.visuals().widgets.hovered.bg_fill.gamma_multiply(hover)
+                        theme::palette(light, self.accent)
+                            .elevated
+                            .gamma_multiply(hover)
                     } else {
                         Color32::TRANSPARENT
                     };
                     let painter = ui.painter().clone();
-                    painter.rect_filled(rect, 8.0, fill);
+                    painter.rect_filled(rect, 10.0, fill);
                     if selected {
-                        painter.rect_stroke(
-                            rect,
-                            8.0,
-                            Stroke::new(1.0, theme_accent.gamma_multiply(0.5)),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
-                    let active_center = first_navigation_row + active_index * 49.0 + 23.0;
-                    if active_center >= rect.top() - 10.0 && active_center <= rect.bottom() + 10.0 {
                         painter.rect_filled(
                             egui::Rect::from_center_size(
-                                egui::pos2(rect.left() + 2.0, active_center),
-                                Vec2::new(3.0, 28.0),
+                                egui::pos2(rect.left() + 3.0, rect.center().y),
+                                Vec2::new(3.0, 23.0),
                             ),
                             1.5,
                             theme_accent,
                         );
                     }
                     let icon_color = if selected {
-                        theme_accent
+                        theme::palette(light, self.accent).accent
                     } else {
                         secondary_text_color(light)
                     };
                     let icon_center = if compact_sidebar {
                         rect.center()
                     } else {
-                        egui::pos2(rect.left() + 21.0, rect.center().y)
+                        egui::pos2(rect.left() + 22.0, rect.center().y)
                     };
                     ui.place(
                         egui::Rect::from_center_size(icon_center, Vec2::splat(22.0)),
@@ -5210,10 +5267,10 @@ impl eframe::App for NativeApp {
                     );
                     if !compact_sidebar {
                         painter.text(
-                            egui::pos2(rect.left() + 43.0, rect.center().y),
+                            egui::pos2(rect.left() + 45.0, rect.center().y),
                             egui::Align2::LEFT_CENTER,
                             *label,
-                            egui::FontId::proportional(13.0),
+                            egui::FontId::proportional(13.5),
                             if selected {
                                 ui.visuals().text_color()
                             } else {
@@ -5241,7 +5298,7 @@ impl eframe::App for NativeApp {
                             *label,
                         )
                     });
-                    ui.add_space(3.0);
+                    ui.add_space(2.0);
                 }
                 ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                     let palette = theme::palette(light, self.accent);
@@ -5263,10 +5320,11 @@ impl eframe::App for NativeApp {
                 });
             });
 
+        let compact_content = root_ui.available_width() < 1120.0;
         if self.page == PROCESS_PAGE {
             let palette = theme::palette(light, self.accent);
             let footer_height = if root_ui.available_width() < 1200.0 {
-                98.0
+                112.0
             } else {
                 82.0
             };
@@ -5289,8 +5347,8 @@ impl eframe::App for NativeApp {
                 egui::Frame::new()
                     .fill(theme::palette(light, self.accent).canvas)
                     .inner_margin(egui::Margin::symmetric(
-                        if compact_sidebar { 18 } else { 34 },
-                        theme::space::XL as i8,
+                        if compact_content { 22 } else { 32 },
+                        22,
                     )),
             )
             .show(root_ui, |ui| {

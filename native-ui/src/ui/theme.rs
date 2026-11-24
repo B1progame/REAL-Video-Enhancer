@@ -13,22 +13,19 @@ pub mod space {
     pub const SM: f32 = 8.0;
     pub const MD: f32 = 12.0;
     pub const LG: f32 = 16.0;
-    pub const XL: f32 = 24.0;
-    pub const XXL: f32 = 32.0;
 }
 
 pub mod radius {
-    pub const CONTROL: u8 = 10;
-    pub const CARD: u8 = 16;
-    pub const DIALOG: u8 = 18;
+    pub const CONTROL: u8 = 9;
+    pub const CARD: u8 = 14;
+    pub const DIALOG: u8 = 16;
 }
 
 pub mod type_scale {
-    pub const PAGE: f32 = 29.0;
-    pub const SECTION: f32 = 17.0;
-    pub const BODY: f32 = 14.5;
-    pub const BUTTON: f32 = 14.0;
-    pub const LABEL: f32 = 13.0;
+    pub const PAGE: f32 = 30.0;
+    pub const SECTION: f32 = 16.0;
+    pub const BODY: f32 = 14.0;
+    pub const BUTTON: f32 = 13.5;
     pub const CAPTION: f32 = 12.0;
     pub const MONOSPACE: f32 = 12.0;
 }
@@ -62,14 +59,14 @@ pub fn palette(light: bool, accent: Color32) -> Palette {
     let accent = accent_for_theme(accent, light);
     if light {
         Palette {
-            canvas: Color32::from_rgb(244, 247, 249),
+            canvas: Color32::from_rgb(245, 247, 249),
             sidebar: Color32::from_rgb(250, 251, 252),
             surface: Color32::WHITE,
-            elevated: Color32::from_rgb(237, 242, 245),
-            border: Color32::from_rgb(222, 229, 234),
-            text: Color32::from_rgb(22, 29, 36),
-            secondary: Color32::from_rgb(77, 90, 101),
-            muted: Color32::from_rgb(111, 125, 136),
+            elevated: Color32::from_rgb(240, 243, 246),
+            border: Color32::from_rgb(224, 229, 234),
+            text: Color32::from_rgb(24, 30, 37),
+            secondary: Color32::from_rgb(79, 91, 102),
+            muted: Color32::from_rgb(117, 129, 139),
             accent,
             success: Color32::from_rgb(35, 137, 100),
             warning: Color32::from_rgb(166, 111, 35),
@@ -77,14 +74,14 @@ pub fn palette(light: bool, accent: Color32) -> Palette {
         }
     } else {
         Palette {
-            canvas: Color32::from_rgb(9, 17, 24),
-            sidebar: Color32::from_rgb(12, 22, 31),
-            surface: Color32::from_rgb(18, 31, 42),
-            elevated: Color32::from_rgb(26, 42, 54),
-            border: Color32::from_rgb(40, 62, 77),
-            text: Color32::from_rgb(239, 246, 249),
-            secondary: Color32::from_rgb(171, 191, 201),
-            muted: Color32::from_rgb(119, 145, 157),
+            canvas: Color32::from_rgb(13, 17, 22),
+            sidebar: Color32::from_rgb(18, 23, 29),
+            surface: Color32::from_rgb(25, 31, 38),
+            elevated: Color32::from_rgb(32, 39, 47),
+            border: Color32::from_rgb(48, 57, 66),
+            text: Color32::from_rgb(242, 245, 248),
+            secondary: Color32::from_rgb(176, 185, 194),
+            muted: Color32::from_rgb(130, 141, 151),
             accent,
             success: Color32::from_rgb(75, 207, 157),
             warning: Color32::from_rgb(238, 190, 112),
@@ -113,6 +110,7 @@ pub fn apply(ctx: &egui::Context, accent: Color32, appearance: &str, reduce_moti
     visuals.widgets.active.corner_radius = egui::CornerRadius::same(radius::CONTROL);
     visuals.widgets.hovered.bg_fill = palette.accent.gamma_multiply(0.15);
     visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, palette.accent.gamma_multiply(0.52));
+    visuals.widgets.hovered.fg_stroke.color = palette.text;
     visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(radius::CONTROL);
     visuals.widgets.inactive.bg_fill = palette.surface;
     visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, palette.border);
@@ -120,7 +118,11 @@ pub fn apply(ctx: &egui::Context, accent: Color32, appearance: &str, reduce_moti
     visuals.widgets.noninteractive.bg_fill = palette.surface;
     visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, palette.border);
     visuals.widgets.noninteractive.fg_stroke.color = palette.text;
+    visuals.widgets.open.bg_fill = palette.elevated;
+    visuals.widgets.open.bg_stroke = Stroke::new(1.0, palette.border);
+    visuals.widgets.open.corner_radius = egui::CornerRadius::same(radius::CONTROL);
     visuals.hyperlink_color = palette.accent;
+    visuals.slider_trailing_fill = true;
     visuals.window_corner_radius = egui::CornerRadius::same(radius::DIALOG);
     visuals.menu_corner_radius = egui::CornerRadius::same(radius::CONTROL);
 
@@ -131,9 +133,9 @@ pub fn apply(ctx: &egui::Context, accent: Color32, appearance: &str, reduce_moti
     });
     ctx.global_style_mut(|style| {
         style.visuals = visuals;
-        style.spacing.item_spacing = Vec2::new(space::MD, 11.0);
-        style.spacing.button_padding = Vec2::new(15.0, 10.0);
-        style.spacing.interact_size = Vec2::new(42.0, 42.0);
+        style.spacing.item_spacing = Vec2::new(space::MD, 10.0);
+        style.spacing.button_padding = Vec2::new(14.0, 9.0);
+        style.spacing.interact_size = Vec2::new(42.0, 40.0);
         style.spacing.icon_width = 18.0;
         style.spacing.icon_width_inner = 12.0;
         style.animation_time = if reduce_motion {

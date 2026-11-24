@@ -8,7 +8,7 @@ pub fn card<R>(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui) -> R) -> 
         .fill(palette.surface)
         .stroke(Stroke::new(1.0, palette.border))
         .corner_radius(theme::radius::CARD)
-        .inner_margin(egui::Margin::same(22))
+        .inner_margin(egui::Margin::same(20))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(
@@ -231,18 +231,22 @@ pub fn searchable_select(
 
 pub fn status_badge(ui: &mut Ui, label: &str, color: Color32) {
     egui::Frame::new()
-        .fill(color.gamma_multiply(if ui.visuals().dark_mode { 0.13 } else { 0.10 }))
+        .fill(color.gamma_multiply(if ui.visuals().dark_mode { 0.12 } else { 0.08 }))
         .stroke(Stroke::new(
             theme::stroke::BORDER,
-            color.gamma_multiply(0.35),
+            color.gamma_multiply(0.28),
         ))
-        .corner_radius(theme::radius::CONTROL)
-        .inner_margin(egui::Margin::symmetric(12, 8))
+        .corner_radius(20)
+        .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                let (dot, _) = ui.allocate_exact_size(Vec2::splat(8.0), egui::Sense::hover());
+                let (dot, _) = ui.allocate_exact_size(Vec2::splat(7.0), egui::Sense::hover());
                 ui.painter().circle_filled(dot.center(), 3.0, color);
-                ui.label(RichText::new(label).size(theme::type_scale::LABEL).strong());
+                ui.label(
+                    RichText::new(label)
+                        .size(theme::type_scale::CAPTION)
+                        .strong(),
+                );
             });
         });
 }

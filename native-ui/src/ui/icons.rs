@@ -23,6 +23,7 @@ pub fn page(name: &str) -> Lucide {
         "home" => Lucide::House,
         "process" => Lucide::WandSparkles,
         "download" => Lucide::Download,
+        "library" => Lucide::Search,
         "benchmark" => Lucide::Gauge,
         "runtime" => Lucide::Cpu,
         "python" => Lucide::CodeXml,

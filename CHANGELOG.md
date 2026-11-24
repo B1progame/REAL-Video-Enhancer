@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4.70 — 2026-11-24
+
+- Redesign the native workspace with clearer page groups, consistent card surfaces, calmer color contrast, and a more legible responsive navigation sidebar.
+- Keep the full labeled sidebar visible at the supported window size and align its selected marker directly with the active page.
+- Rework the Home preview into a clickable drag-and-drop video area and make the bottom render bar show an actionable next step when setup is incomplete.
+- Keep the Process editor in one column until the window has room for two comfortable panels, and add Ctrl+1–8 shortcuts for every page.
+
 ## 2.4.69 — 2026-11-24
 
 - Remove the GitHub CLI dependency from in-app update checks and installer downloads.
