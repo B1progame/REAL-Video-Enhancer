@@ -1,5 +1,26 @@
 # Changelog
 
+## 2.4.63 — 2026-11-24
+
+- Handle empty, malformed, or non-object responses from the GitHub API and CLI without leaking a `json.loads(None)` exception into Settings.
+- Add regression coverage for an empty GitHub CLI response.
+
+## 2.4.62 — 2026-11-24
+
+- Simplify the ready-state model storage summary so the WSL path is shown once in its copyable path field instead of wrapping inside the status message.
+
+## 2.4.61 — 2026-11-23
+
+- Add an opt-in, real-time render preview to the Process workspace using frames produced by the existing RVE engine.
+- Poll preview frames only during active RVE rendering and display the last processed frame when a render completes.
+- Expose the existing preview preference in Settings and enable it by default for native app installs.
+- Add a focused test for preview polling states.
+
+## 2.4.60 — 2026-11-23
+
+- Disable uv configuration discovery during managed runtime installs so user or project index settings cannot redirect dependencies away from PyPI.
+- Add regression coverage for uv config isolation.
+
 ## 2.4.59 — 2026-11-23
 
 - Keep ordinary runtime dependencies such as `requests` and PyTorch prerequisites on PyPI, separate from PyTorch wheel indexes.

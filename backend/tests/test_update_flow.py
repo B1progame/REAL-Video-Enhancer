@@ -138,6 +138,7 @@ class UpdateFlowTests(unittest.TestCase):
                 "UV_INDEX_URL": "https://example.test/simple",
                 "UV_EXTRA_INDEX_URL": "https://example.test/extra",
                 "UV_DEFAULT_INDEX": "https://example.test/default",
+                "UV_CONFIG_FILE": "C:/example/uv.toml",
                 "PIP_INDEX_URL": "https://example.test/simple",
                 "PIP_EXTRA_INDEX_URL": "https://example.test/extra",
             },
@@ -145,15 +146,17 @@ class UpdateFlowTests(unittest.TestCase):
             env = web_api.managed_uv_environment()
 
         for key in (
-            "UV_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX",
+            "UV_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX", "UV_CONFIG_FILE",
             "PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL",
         ):
             self.assertNotIn(key, env)
+        self.assertEqual(env["UV_NO_CONFIG"], "1")
 
     def test_common_uv_dependencies_use_only_pypi(self):
         command = web_api.uv_pip_install_command("uv.exe", "python.exe")
 
         self.assertIn("--default-index", command)
+        self.assertIn("--no-config", command)
         self.assertIn("https://pypi.org/simple", command)
         self.assertNotIn("--index", command)
         self.assertNotIn("--extra-index-url", command)
@@ -217,6 +220,29 @@ class UpdateFlowTests(unittest.TestCase):
 
     def test_version_tuple_ignores_release_prefix_and_suffix(self):
         self.assertEqual(web_api.version_tuple("v2.4.30-beta.1"), (2, 4, 30))
+
+    def test_github_cli_empty_stdout_returns_a_readable_update_error(self):
+        permission_error = web_api.urllib.error.HTTPError(
+            web_api.UPDATE_API, 403, "Forbidden", hdrs=None, fp=None
+        )
+        with (
+            patch.object(web_api.urllib.request, "urlopen", side_effect=permission_error),
+            patch.object(web_api, "github_cli_path", return_value="gh.exe"),
+            patch.object(
+                web_api.subprocess,
+                "run",
+                return_value=CompletedProcess(["gh.exe"], 0, None, ""),
+            ),
+            patch.object(web_api, "hidden_subprocess_kwargs", return_value={}),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "GitHub CLI returned an empty release response"):
+                web_api.fetch_latest_release()
+
+    def test_github_release_response_must_be_a_json_object(self):
+        for raw in (None, "", "null", "[]"):
+            with self.subTest(raw=raw):
+                with self.assertRaisesRegex(RuntimeError, "release response|JSON object"):
+                    web_api.release_object_from_json(raw, "GitHub API")
 
     def test_update_check_selects_windows_installer_and_requires_digest(self):
         with (

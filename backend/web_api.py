@@ -75,7 +75,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.59")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.63")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -162,11 +162,23 @@ def github_cli_path():
     return shutil.which("gh.exe") or shutil.which("gh")
 
 
+def release_object_from_json(raw, source):
+    if raw is None or raw == "" or raw == b"":
+        raise RuntimeError(f"{source} returned an empty release response.")
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"{source} returned invalid JSON for the latest release.") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{source} did not return a JSON object for the latest release.")
+    return payload
+
+
 def fetch_latest_release():
     request = urllib.request.Request(UPDATE_API, headers={"Accept": "application/vnd.github+json", "User-Agent": "REAL-Video-Enhancer-Native"})
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
-            return json.loads(response.read(2 * 1024 * 1024)), None
+            return release_object_from_json(response.read(2 * 1024 * 1024), "GitHub API"), None
     except urllib.error.HTTPError as exc:
         if exc.code not in (401, 403, 404):
             raise
@@ -186,10 +198,7 @@ def fetch_latest_release():
                 "The private GitHub release could not be read. Sign in with `gh auth login -h github.com` "
                 f"using an account with repository access. {detail}"
             ) from exc
-        try:
-            return json.loads(result.stdout), "gh"
-        except json.JSONDecodeError as error:
-            raise RuntimeError("GitHub CLI returned an invalid release response.") from error
+        return release_object_from_json(result.stdout, "GitHub CLI"), "gh"
 
 
 def check_github_update():
@@ -1089,11 +1098,16 @@ def managed_uv_environment():
         "UV_INDEX_URL",
         "UV_EXTRA_INDEX_URL",
         "UV_DEFAULT_INDEX",
+        "UV_CONFIG_FILE",
         "PIP_INDEX_URL",
         "PIP_EXTRA_INDEX_URL",
     ):
         env.pop(key, None)
     uv_data = LOCAL_DATA / "uv"
+    # uv otherwise discovers per-user and project config files. A custom
+    # index in one of those files can redirect even explicitly pinned PyPI
+    # runtime dependencies to the PyTorch wheel index.
+    env["UV_NO_CONFIG"] = "1"
     env["UV_DATA_DIR"] = str(uv_data)
     env["UV_PYTHON_INSTALL_DIR"] = str(uv_data / "python")
     return env
@@ -1243,7 +1257,7 @@ PYTORCH_INDEXES = (
 def uv_pip_install_command(uv, python, *, pytorch_indexes=False, no_deps=False):
     """Build an install command with PyPI as primary and optional torch indexes."""
     command = [
-        str(uv), "pip", "install", "--python", str(python), "--no-progress",
+        str(uv), "--no-config", "pip", "install", "--python", str(python), "--no-progress",
         "--default-index", PYPI_DEFAULT_INDEX,
     ]
     if pytorch_indexes:

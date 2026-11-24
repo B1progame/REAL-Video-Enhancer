@@ -71,6 +71,13 @@ fn home_status_uses_three_columns(available_width: f32) -> bool {
     available_width >= HOME_STATUS_THREE_COLUMN_THRESHOLD
 }
 
+fn render_preview_is_available(status: &Value) -> bool {
+    matches!(
+        status["status"].as_str(),
+        Some("preparing" | "running" | "paused")
+    ) && status["preview"]["available"].as_bool() == Some(true)
+}
+
 #[derive(Clone)]
 enum ApiCommand {
     Get(String),
@@ -285,11 +292,14 @@ fn start_api_worker(ctx: egui::Context) -> ApiBridge {
         .spawn(move || {
             let client = agent();
             let mut next_refresh = Instant::now();
+            let mut render_active = false;
             let mut connected = false;
             loop {
                 match command_receive.recv_timeout(Duration::from_millis(120)) {
                     Ok(ApiCommand::Get(endpoint)) => {
-                        let image = if endpoint.starts_with("/api/video/first_frame?") {
+                        let image = if endpoint.starts_with("/api/video/first_frame?")
+                            || endpoint == "/api/render/preview_frame"
+                        {
                             Some(api_get_image(&client, &endpoint))
                         } else {
                             None
@@ -345,6 +355,17 @@ fn start_api_worker(ctx: egui::Context) -> ApiBridge {
                     };
                     for endpoint in endpoints {
                         let value = api_get(&client, endpoint);
+                        let should_fetch_render_preview = if *endpoint == "/api/render/status" {
+                            render_active = value.as_ref().is_ok_and(|status| {
+                                matches!(
+                                    status["status"].as_str(),
+                                    Some("preparing" | "running" | "paused")
+                                )
+                            });
+                            value.as_ref().is_ok_and(render_preview_is_available)
+                        } else {
+                            false
+                        };
                         if *endpoint == "/api/bootstrap" && value.is_ok() {
                             connected = true;
                         } else if *endpoint != "/api/bootstrap"
@@ -367,8 +388,21 @@ fn start_api_worker(ctx: egui::Context) -> ApiBridge {
                             is_post: false,
                         });
                         ctx.request_repaint();
+                        if should_fetch_render_preview
+                            && let Ok(bytes) = api_get_image(&client, "/api/render/preview_frame")
+                            && !bytes.is_empty()
+                        {
+                            let _ = event_send.send(ApiEvent {
+                                endpoint: "/api/render/preview_frame".to_owned(),
+                                value: Ok(Value::Null),
+                                image: Some(Ok(bytes)),
+                                is_post: false,
+                            });
+                            ctx.request_repaint();
+                        }
                     }
-                    next_refresh = Instant::now() + Duration::from_millis(1500);
+                    next_refresh = Instant::now()
+                        + Duration::from_millis(if render_active { 800 } else { 1500 });
                 }
             }
         })
@@ -660,6 +694,7 @@ struct NativeApp {
     engine_error: Option<String>,
     input_info: Value,
     source_preview: Option<egui::TextureHandle>,
+    render_preview: Option<egui::TextureHandle>,
     source_preview_path: String,
     source_preview_loading: bool,
     source_preview_error: Option<String>,
@@ -747,6 +782,7 @@ impl NativeApp {
             engine_error,
             input_info: Value::Null,
             source_preview: None,
+            render_preview: None,
             source_preview_path: String::new(),
             source_preview_loading: false,
             source_preview_error: None,
@@ -1057,6 +1093,23 @@ impl NativeApp {
     fn consume_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.api.receive.try_recv() {
             if let Some(image) = event.image {
+                if event.endpoint == "/api/render/preview_frame" {
+                    if let Ok(bytes) = image
+                        && let Ok(decoded) = image::load_from_memory(&bytes)
+                    {
+                        let rgba = decoded.to_rgba8();
+                        let size = [rgba.width() as usize, rgba.height() as usize];
+                        let color_image =
+                            egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                        self.render_preview = Some(ctx.load_texture(
+                            "rve-live-render-preview",
+                            color_image,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                    ctx.request_repaint();
+                    continue;
+                }
                 if self.source_preview_path == self.input_path.trim() {
                     self.source_preview_loading = false;
                     match image {
@@ -1302,6 +1355,7 @@ impl NativeApp {
 
     fn start_render(&mut self) {
         self.save_render_defaults();
+        self.render_preview = None;
         let mut selected = serde_json::Map::new();
         for key in ["upscale", "interpolate", "decompress", "denoise", "deblur"] {
             let value = self
@@ -1338,7 +1392,7 @@ impl NativeApp {
         render_settings["preview_enabled"] = json!(
             self.saved_settings["advanced"]["preview_enabled"]
                 .as_bool()
-                .unwrap_or(false)
+                .unwrap_or(true)
         );
         render_settings["merge_subtitles"] = json!(
             self.saved_settings["advanced"]["merge_subtitles"]
@@ -2508,6 +2562,7 @@ impl NativeApp {
         }
         ui.add_space(theme::space::MD);
         self.output_configuration_card(ui);
+        self.live_render_preview_card(ui);
         if let Some(lines) = self.render["log_lines"].as_array() {
             egui::CollapsingHeader::new("Render activity")
                 .id_salt("render-activity")
@@ -2521,6 +2576,55 @@ impl NativeApp {
                         });
                 });
         }
+    }
+
+    fn live_render_preview_card(&self, ui: &mut egui::Ui) {
+        let preview_enabled = self.saved_settings["advanced"]["preview_enabled"]
+            .as_bool()
+            .unwrap_or(true);
+        let status = self.render["status"].as_str().unwrap_or("idle");
+        let active = matches!(status, "preparing" | "running" | "paused");
+        let completed_with_preview = status == "completed" && self.render_preview.is_some();
+        if !preview_enabled || (!active && !completed_with_preview) {
+            return;
+        }
+
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        Self::card(ui, "Live render preview", |ui| {
+            ui.label(
+                RichText::new(if completed_with_preview {
+                    "Last processed frame"
+                } else {
+                    "A frame from the active render · updates as processing continues"
+                })
+                .size(12.0)
+                .color(palette.secondary),
+            );
+            ui.add_space(theme::space::SM);
+            let width = ui.available_width().max(1.0);
+            let size = Vec2::new(width, (width * 9.0 / 16.0).clamp(150.0, 360.0));
+            if let Some(texture) = self.render_preview.as_ref() {
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                ui.painter().rect_filled(rect, 12.0, Color32::BLACK);
+                ui.place(
+                    rect,
+                    egui::Image::new(texture)
+                        .fit_to_exact_size(size)
+                        .maintain_aspect_ratio(true)
+                        .corner_radius(12.0),
+                );
+            } else {
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                ui.painter().rect_filled(rect, 12.0, palette.elevated);
+                ui.painter().text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "Waiting for the first processed frame…",
+                    egui::FontId::proportional(13.0),
+                    palette.secondary,
+                );
+            }
+        });
     }
 
     fn render_summary(&self, ui: &mut egui::Ui) {
@@ -3324,6 +3428,7 @@ impl NativeApp {
     }
 
     fn model_storage_settings(&mut self, ui: &mut egui::Ui) {
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
         Self::card(ui, "Model storage", |ui| {
             ui.label("Choose where model weights are installed and read from.");
             egui::ComboBox::from_label("Storage location")
@@ -3372,8 +3477,17 @@ impl NativeApp {
                 .unwrap_or("")
                 .to_owned();
             ui.add_space(6.0);
-            ui.label(format!("{stage} · {status}"));
-            if !detail.is_empty() {
+            if status == "ready" {
+                let location = if self.model_storage == "wsl" {
+                    "WSL Ubuntu"
+                } else {
+                    "Windows"
+                };
+                components::status_dot(ui, palette.success, &format!("Ready · {location}"));
+            } else {
+                ui.label(format!("{stage} · {status}"));
+            }
+            if status != "ready" && !detail.is_empty() {
                 ui.label(
                     RichText::new(detail)
                         .size(11.0)
@@ -3526,6 +3640,9 @@ impl NativeApp {
 
     fn render_default_settings(&mut self, ui: &mut egui::Ui) -> bool {
         let mut render_defaults_changed = false;
+        let mut preview_enabled = self.saved_settings["advanced"]["preview_enabled"]
+            .as_bool()
+            .unwrap_or(true);
         Self::card(ui, "Render defaults", |ui| {
             egui::ComboBox::from_label("Precision")
                 .selected_text(&self.precision)
@@ -3579,8 +3696,20 @@ impl NativeApp {
                 render_defaults_changed |= ui
                     .checkbox(&mut self.overwrite, "Replace existing output")
                     .changed();
+                render_defaults_changed |= ui
+                    .checkbox(&mut preview_enabled, "Live render preview")
+                    .on_hover_text(
+                        "Show a small, real frame from the RVE renderer while it is working.",
+                    )
+                    .changed();
             });
         });
+        if render_defaults_changed {
+            if !self.saved_settings["advanced"].is_object() {
+                self.saved_settings["advanced"] = json!({});
+            }
+            self.saved_settings["advanced"]["preview_enabled"] = json!(preview_enabled);
+        }
         render_defaults_changed
     }
 
@@ -4149,8 +4278,8 @@ mod tests {
         HOME_HERO_COLUMN_THRESHOLD, HOME_STATUS_THREE_COLUMN_THRESHOLD, PROCESS_PAGE,
         RUNTIME_METRICS_COLUMN_THRESHOLD, active_task_from, can_start_model_download,
         encode_query_component, home_hero_uses_two_columns, home_status_uses_three_columns,
-        pending_post_after_event, process_uses_two_columns, runtime_metrics_use_two_columns,
-        settings_uses_two_columns,
+        pending_post_after_event, process_uses_two_columns, render_preview_is_available,
+        runtime_metrics_use_two_columns, settings_uses_two_columns,
     };
 
     #[test]
@@ -4159,6 +4288,26 @@ mod tests {
             encode_query_component(r"C:\Videos\Family trip 01.mp4"),
             "C%3A%5CVideos%5CFamily%20trip%2001.mp4"
         );
+    }
+
+    #[test]
+    fn live_preview_only_polls_for_a_running_render_with_preview_enabled() {
+        assert!(render_preview_is_available(&serde_json::json!({
+            "status": "running",
+            "preview": {"available": true}
+        })));
+        assert!(render_preview_is_available(&serde_json::json!({
+            "status": "paused",
+            "preview": {"available": true}
+        })));
+        assert!(!render_preview_is_available(&serde_json::json!({
+            "status": "completed",
+            "preview": {"available": true}
+        })));
+        assert!(!render_preview_is_available(&serde_json::json!({
+            "status": "running",
+            "preview": {"available": false}
+        })));
     }
 
     #[test]
