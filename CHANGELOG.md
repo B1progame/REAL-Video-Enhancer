@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.64 — 2026-11-24
+
+- Redesign the native app's shared visual system with a calmer, more refined light and dark palette, stronger typography, roomier cards, and clearer controls.
+- Keep the labeled sidebar visible at normal desktop sizes and improve navigation, logo, and page-header proportions.
+- Give source and home video previews more space, making the footage the focus of the workflow.
+
 ## 2.4.63 — 2026-11-24
 
 - Handle empty, malformed, or non-object responses from the GitHub API and CLI without leaking a `json.loads(None)` exception into Settings.

@@ -8,7 +8,7 @@ pub fn card<R>(ui: &mut Ui, title: &str, content: impl FnOnce(&mut Ui) -> R) -> 
         .fill(palette.surface)
         .stroke(Stroke::new(1.0, palette.border))
         .corner_radius(theme::radius::CARD)
-        .inner_margin(egui::Margin::same(theme::space::XL as i8))
+        .inner_margin(egui::Margin::same(22))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(

@@ -1439,19 +1439,19 @@ impl NativeApp {
             let icon_frame = egui::Frame::new()
                 .fill(palette.elevated)
                 .stroke(Stroke::new(1.0, palette.border))
-                .corner_radius(12)
-                .inner_margin(egui::Margin::same(10));
+                .corner_radius(14)
+                .inner_margin(egui::Margin::same(12));
             icon_frame.show(ui, |ui| {
                 ui.add(icons::styled(
                     PAGES.get(self.page).map(|page| page.1).unwrap_or("home"),
                     palette.accent,
-                    24.0,
+                    26.0,
                 ));
             });
             ui.vertical(|ui| {
                 ui.label(
                     RichText::new(self.page_title())
-                        .size(25.0)
+                        .size(theme::type_scale::PAGE)
                         .strong()
                         .color(palette.text),
                 );
@@ -1651,7 +1651,7 @@ impl NativeApp {
 
     fn home_video_preview(&self, ui: &mut egui::Ui, palette: theme::Palette, model_count: usize) {
         let width = ui.available_width().max(1.0);
-        let size = Vec2::new(width, (width * 9.0 / 16.0).clamp(150.0, 245.0));
+        let size = Vec2::new(width, (width * 9.0 / 16.0).clamp(190.0, 310.0));
         let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
         ui.painter().rect_filled(rect, 12.0, palette.elevated);
         if let Some(texture) = self
@@ -1921,7 +1921,7 @@ impl NativeApp {
             let preview_width = ui.available_width().max(1.0);
             let preview_size = Vec2::new(
                 preview_width,
-                (preview_width * 9.0 / 16.0).clamp(152.0, 270.0),
+                (preview_width * 9.0 / 16.0).clamp(190.0, 340.0),
             );
             if let Some(texture) = self
                 .source_preview
@@ -3901,8 +3901,8 @@ impl eframe::App for NativeApp {
         }
         let light = self.appearance == "light";
         let theme_accent = accent_for_theme(self.accent, light);
-        let compact_sidebar = root_ui.available_width() < 1120.0;
-        let sidebar_width = if compact_sidebar { 72.0 } else { 216.0 };
+        let compact_sidebar = root_ui.available_width() < 960.0;
+        let sidebar_width = if compact_sidebar { 76.0 } else { 232.0 };
         egui::Panel::left("navigation")
             .resizable(false)
             .default_size(sidebar_width)
@@ -3912,17 +3912,17 @@ impl eframe::App for NativeApp {
                 egui::Frame::new()
                     .fill(theme::palette(light, self.accent).sidebar)
                     .stroke(Stroke::new(1.0, border_color(light)))
-                    .inner_margin(if compact_sidebar { 9 } else { 16 }),
+                    .inner_margin(if compact_sidebar { 10 } else { 18 }),
             )
             .show(root_ui, |ui| {
                 ui.add_space(4.0);
                 if compact_sidebar {
                     ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                        Self::brand_mark(ui, 40.0);
+                        Self::brand_mark(ui, 46.0);
                     });
                 } else {
                     ui.horizontal(|ui| {
-                        Self::brand_mark(ui, 42.0);
+                        Self::brand_mark(ui, 50.0);
                         ui.vertical(|ui| {
                             ui.label(
                                 RichText::new("REAL VIDEO")
@@ -3968,11 +3968,11 @@ impl eframe::App for NativeApp {
                     let (rect, response) = ui.allocate_exact_size(
                         Vec2::new(
                             if compact_sidebar {
-                                48.0
+                                52.0
                             } else {
-                                sidebar_width - 32.0
+                                sidebar_width - 36.0
                             },
-                            44.0,
+                            46.0,
                         ),
                         egui::Sense::click(),
                     );
@@ -4002,7 +4002,7 @@ impl eframe::App for NativeApp {
                             egui::StrokeKind::Inside,
                         );
                     }
-                    let active_center = first_navigation_row + active_index * 47.0 + 22.0;
+                    let active_center = first_navigation_row + active_index * 49.0 + 23.0;
                     if active_center >= rect.top() - 10.0 && active_center <= rect.bottom() + 10.0 {
                         painter.rect_filled(
                             egui::Rect::from_center_size(
@@ -4108,7 +4108,7 @@ impl eframe::App for NativeApp {
                 egui::Frame::new()
                     .fill(theme::palette(light, self.accent).canvas)
                     .inner_margin(egui::Margin::symmetric(
-                        if compact_sidebar { 16 } else { 30 },
+                        if compact_sidebar { 18 } else { 34 },
                         theme::space::XL as i8,
                     )),
             )
@@ -4230,8 +4230,8 @@ fn main() -> eframe::Result<()> {
         .unwrap_or_default();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("REAL Video Enhancer")
-        .with_inner_size([1360.0, 860.0])
-        .with_min_inner_size([840.0, 620.0])
+        .with_inner_size([1440.0, 920.0])
+        .with_min_inner_size([860.0, 640.0])
         .with_resizable(true)
         .with_icon(icon);
     #[cfg(windows)]

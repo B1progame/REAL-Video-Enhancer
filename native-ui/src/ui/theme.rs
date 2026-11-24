@@ -2,10 +2,10 @@ use eframe::egui::{self, Color32, FontId, Stroke, TextStyle, Vec2};
 
 pub const ACCENTS: [(&str, [u8; 3]); 5] = [
     ("Lagoon", [0, 190, 190]),
-    ("Glacier", [64, 157, 219]),
-    ("Cobalt", [83, 112, 220]),
-    ("Aurora", [142, 104, 209]),
-    ("Mint", [38, 157, 119]),
+    ("Glacier", [56, 160, 226]),
+    ("Cobalt", [92, 120, 244]),
+    ("Aurora", [166, 112, 236]),
+    ("Mint", [48, 181, 131]),
 ];
 
 pub mod space {
@@ -18,15 +18,15 @@ pub mod space {
 }
 
 pub mod radius {
-    pub const CONTROL: u8 = 8;
-    pub const CARD: u8 = 12;
-    pub const DIALOG: u8 = 16;
+    pub const CONTROL: u8 = 10;
+    pub const CARD: u8 = 16;
+    pub const DIALOG: u8 = 18;
 }
 
 pub mod type_scale {
-    pub const PAGE: f32 = 27.0;
-    pub const SECTION: f32 = 16.0;
-    pub const BODY: f32 = 15.0;
+    pub const PAGE: f32 = 29.0;
+    pub const SECTION: f32 = 17.0;
+    pub const BODY: f32 = 14.5;
     pub const BUTTON: f32 = 14.0;
     pub const LABEL: f32 = 13.0;
     pub const CAPTION: f32 = 12.0;
@@ -62,14 +62,14 @@ pub fn palette(light: bool, accent: Color32) -> Palette {
     let accent = accent_for_theme(accent, light);
     if light {
         Palette {
-            canvas: Color32::from_rgb(242, 245, 247),
-            sidebar: Color32::from_rgb(248, 249, 250),
+            canvas: Color32::from_rgb(244, 247, 249),
+            sidebar: Color32::from_rgb(250, 251, 252),
             surface: Color32::WHITE,
-            elevated: Color32::from_rgb(234, 239, 242),
-            border: Color32::from_rgb(221, 227, 231),
-            text: Color32::from_rgb(26, 32, 38),
-            secondary: Color32::from_rgb(82, 94, 104),
-            muted: Color32::from_rgb(116, 127, 136),
+            elevated: Color32::from_rgb(237, 242, 245),
+            border: Color32::from_rgb(222, 229, 234),
+            text: Color32::from_rgb(22, 29, 36),
+            secondary: Color32::from_rgb(77, 90, 101),
+            muted: Color32::from_rgb(111, 125, 136),
             accent,
             success: Color32::from_rgb(35, 137, 100),
             warning: Color32::from_rgb(166, 111, 35),
@@ -77,18 +77,18 @@ pub fn palette(light: bool, accent: Color32) -> Palette {
         }
     } else {
         Palette {
-            canvas: Color32::from_rgb(14, 17, 21),
-            sidebar: Color32::from_rgb(18, 22, 27),
-            surface: Color32::from_rgb(25, 30, 36),
-            elevated: Color32::from_rgb(32, 39, 47),
-            border: Color32::from_rgb(47, 56, 66),
-            text: Color32::from_rgb(242, 245, 247),
-            secondary: Color32::from_rgb(166, 177, 186),
-            muted: Color32::from_rgb(117, 131, 142),
+            canvas: Color32::from_rgb(13, 17, 22),
+            sidebar: Color32::from_rgb(16, 21, 27),
+            surface: Color32::from_rgb(23, 29, 36),
+            elevated: Color32::from_rgb(31, 39, 48),
+            border: Color32::from_rgb(43, 54, 65),
+            text: Color32::from_rgb(241, 245, 248),
+            secondary: Color32::from_rgb(171, 183, 192),
+            muted: Color32::from_rgb(126, 141, 153),
             accent,
-            success: Color32::from_rgb(82, 199, 154),
-            warning: Color32::from_rgb(232, 184, 109),
-            error: Color32::from_rgb(240, 120, 120),
+            success: Color32::from_rgb(75, 207, 157),
+            warning: Color32::from_rgb(238, 190, 112),
+            error: Color32::from_rgb(248, 119, 125),
         }
     }
 }
@@ -131,9 +131,9 @@ pub fn apply(ctx: &egui::Context, accent: Color32, appearance: &str, reduce_moti
     });
     ctx.global_style_mut(|style| {
         style.visuals = visuals;
-        style.spacing.item_spacing = Vec2::new(space::MD, 10.0);
-        style.spacing.button_padding = Vec2::new(14.0, 9.0);
-        style.spacing.interact_size = Vec2::new(40.0, 40.0);
+        style.spacing.item_spacing = Vec2::new(space::MD, 11.0);
+        style.spacing.button_padding = Vec2::new(15.0, 10.0);
+        style.spacing.interact_size = Vec2::new(42.0, 42.0);
         style.spacing.icon_width = 18.0;
         style.spacing.icon_width_inner = 12.0;
         style.animation_time = if reduce_motion {
