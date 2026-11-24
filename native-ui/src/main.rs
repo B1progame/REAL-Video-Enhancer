@@ -4712,6 +4712,14 @@ impl NativeApp {
                     .as_str()
                     .unwrap_or("Install a rendering backend to enable video enhancement."),
             );
+            if let Some(issue) = self.bootstrap["system"]["backend_probe_output"]
+                .as_str()
+                .filter(|issue| issue.starts_with("TensorRT package versions do not match:"))
+            {
+                ui.label(RichText::new(issue).size(11.0).color(palette.warning));
+                ui.label(RichText::new("Run the recommended runtime setup to restore PyTorch 2.8, then install TensorRT again if it is still unavailable.")
+                    .size(11.0).color(palette.secondary));
+            }
             if installing {
                 ui.add(
                     egui::ProgressBar::new(progress / 100.0).text(

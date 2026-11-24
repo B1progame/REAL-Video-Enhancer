@@ -89,7 +89,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.78")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.79")
 update_lock = threading.RLock()
 github_token_lock = threading.RLock()
 github_token_value = None
@@ -1786,12 +1786,27 @@ try:
     installed_ncnn = ncnn_packages.issubset(distributions)
 except Exception:
     installed_ncnn = False
+installed_tensorrt = False
+tensorrt_error = ''
 try:
-    import tensorrt
-    import torch_tensorrt
-    installed_tensorrt = tensorrt_packages.issubset(distributions)
-except Exception:
-    installed_tensorrt = False
+    if not tensorrt_packages.issubset(distributions):
+        tensorrt_error = 'TensorRT packages are incomplete; install the TensorRT backend from Runtime.'
+    else:
+        torch_release = metadata.version('torch').split('+', 1)[0]
+        torch_tensorrt_release = metadata.version('torch-tensorrt')
+        tensorrt_release = metadata.version('tensorrt')
+        if torch_release != '2.8.0' or torch_tensorrt_release != '2.8.0' or not tensorrt_release.startswith('10.12.'):
+            tensorrt_error = ('TensorRT package versions do not match: PyTorch ' + torch_release +
+                ', Torch-TensorRT ' + torch_tensorrt_release + ', TensorRT ' + tensorrt_release +
+                '. Install the recommended runtime, then install TensorRT again.')
+        elif not cuda:
+            tensorrt_error = 'TensorRT needs a CUDA-capable NVIDIA GPU.'
+        else:
+            import tensorrt
+            import torch_tensorrt
+            installed_tensorrt = True
+except Exception as exc:
+    tensorrt_error = 'TensorRT could not be loaded: ' + str(exc).replace('\\n', ' ')[:500]
 print('opencv=' + str(opencv))
 print('torch=' + version)
 print('device=' + device)
@@ -1801,6 +1816,7 @@ print('cuda_supported=' + str(supported))
 print('installed_pytorch=' + str(installed_pytorch))
 print('installed_ncnn=' + str(installed_ncnn))
 print('installed_tensorrt=' + str(installed_tensorrt))
+print('tensorrt_error=' + tensorrt_error.replace('\\n', ' '))
 """
         probe = run_hidden_process([PYTHON, "-c", probe_code], capture_output=True, text=True, timeout=120)
         result["opencv_available"] = probe.returncode == 0 and "opencv=True" in probe.stdout
@@ -1830,7 +1846,9 @@ print('installed_tensorrt=' + str(installed_tensorrt))
                 result["opencv_available"], installed_backends,
                 cuda_available=lines.get("cuda", "False").lower() == "true",
             )
-            if "tensorrt" not in installed_backends:
+            if lines.get("tensorrt_error"):
+                result["backend_probe_output"] = lines["tensorrt_error"]
+            elif "tensorrt" not in installed_backends:
                 result["backend_probe_output"] = (
                     "TensorRT is incomplete: install the TensorRT backend from Runtime to add Torch-TensorRT and its runtime packages."
                 )
@@ -2228,13 +2246,13 @@ def backend_packages(backend, payload=None):
     backend = str(backend or "pytorch").lower()
     payload = payload or {}
     if backend in ("torch", "pytorch", "tensorrt"):
-        version = "2.8.0" if backend == "tensorrt" else str(payload.get("torch_version") or "2.7.0")
+        version = "2.8.0" if backend == "tensorrt" else str(payload.get("torch_version") or "2.8.0")
         if version == "2.6": version = "2.6.0"
         if version not in ("2.6.0", "2.7.0", "2.8.0", "2.9.0"):
             raise ValueError("Unsupported PyTorch version. Choose 2.6.0, 2.7.0, 2.8.0, or 2.9.0.")
         flavor = "cu128" if backend == "tensorrt" else str(payload.get("pytorch_backend") or "cuda").lower().replace("+", "")
         if flavor in ("cuda", "gpu"):
-            flavor = "cu128" if backend == "tensorrt" else {"2.6.0": "cu118", "2.7.0": "cu128", "2.8.0": "cu129", "2.9.0": "cu130"}[version]
+            flavor = "cu128" if backend == "tensorrt" else {"2.6.0": "cu118", "2.7.0": "cu128", "2.8.0": "cu128", "2.9.0": "cu130"}[version]
         allowed = {"cpu", "mps", "cu118", "cu126", "cu128", "cu129", "cu130", "rocm64", "xpu"}
         if flavor not in allowed:
             raise ValueError("Unsupported PyTorch runtime type.")
@@ -2273,7 +2291,7 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
             use_cuda = bool(shutil.which("nvidia-smi"))
             backend = "torch" if use_cuda or apple_silicon else "ncnn"
             torch_flavor = "cu128" if use_cuda else "mps" if apple_silicon else "cpu"
-            packages = backend_packages(backend, {"torch_version": "2.7.0", "pytorch_backend": torch_flavor})
+            packages = backend_packages(backend, {"torch_version": "2.8.0", "pytorch_backend": torch_flavor})
             for command in uv_backend_install_commands(uv, PYTHON, packages):
                 is_torch_wheel = command[-1].lower().startswith("torch==") and "--no-deps" in command
                 stage = "Installing PyTorch wheel from the official index" if is_torch_wheel else f"Installing {backend} dependencies from PyPI"
@@ -2282,7 +2300,7 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
             if backend == "torch":
                 tv_suffix = "+cu128" if torch_flavor.startswith("cu") else ""
                 torchvision_command = uv_pip_install_command(uv, PYTHON, pytorch_indexes=True, no_deps=True)
-                run_runtime_command(torchvision_command + [f"torchvision==0.22.0{tv_suffix}"], "Installing compatible torchvision", 86, env=uv_env)
+                run_runtime_command(torchvision_command + [f"torchvision==0.23.0{tv_suffix}"], "Installing compatible torchvision", 86, env=uv_env)
             ffmpeg = APP_DATA / "bin" / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
             if not ffmpeg.exists():
                 if os.name == "nt": asset = "ffmpeg.exe" if platform.machine() in ("AMD64", "x86_64") else "ffmpeg-windows-arm64.exe"
@@ -2327,11 +2345,11 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
                 progress = 60 if is_torch_wheel else 20
                 run_runtime_command(install_command, stage, progress, env=managed_uv_environment())
             if action == "install" and backend in ("torch", "pytorch", "tensorrt"):
-                version = "2.8.0" if backend == "tensorrt" else str(payload.get("torch_version") or "2.7.0")
+                version = "2.8.0" if backend == "tensorrt" else str(payload.get("torch_version") or "2.8.0")
                 version = {"2.6": "2.6.0"}.get(version, version)
                 tv_version = {"2.6.0": "0.21.0", "2.7.0": "0.22.0", "2.8.0": "0.23.0", "2.9.0": "0.24.0"}.get(version)
                 flavor = "cu128" if backend == "tensorrt" else str(payload.get("pytorch_backend") or "cuda").lower().replace("+", "")
-                flavor = {"cuda": {"2.6.0": "cu118", "2.7.0": "cu128", "2.8.0": "cu129", "2.9.0": "cu130"}.get(version, "cu128")}.get(flavor, flavor)
+                flavor = {"cuda": {"2.6.0": "cu118", "2.7.0": "cu128", "2.8.0": "cu128", "2.9.0": "cu130"}.get(version, "cu128")}.get(flavor, flavor)
                 suffix = "" if flavor == "cpu" else "+" + flavor
                 if tv_version:
                     torchvision_command = uv_pip_install_command(uv, PYTHON, pytorch_indexes=True, no_deps=True)

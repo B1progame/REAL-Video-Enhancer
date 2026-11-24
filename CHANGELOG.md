@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.79 — 2026-11-24
+
+- Keep the recommended and one-click PyTorch installs on PyTorch 2.8/CUDA 12.8 with torchvision 0.23 so they stay compatible with Torch-TensorRT 2.8 and TensorRT 10.12.
+- Check TensorRT package versions before loading its native DLLs, avoid Windows entry-point popups for stale stacks, and explain the repair steps in Runtime.
+
 ## 2.4.78 — 2026-11-24
 
 - Add a live, scrollable terminal panel to Runtime setup with color-coded output and retained logs after setup completes or fails.
