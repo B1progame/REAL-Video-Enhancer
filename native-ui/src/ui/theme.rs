@@ -77,14 +77,14 @@ pub fn palette(light: bool, accent: Color32) -> Palette {
         }
     } else {
         Palette {
-            canvas: Color32::from_rgb(13, 17, 22),
-            sidebar: Color32::from_rgb(16, 21, 27),
-            surface: Color32::from_rgb(23, 29, 36),
-            elevated: Color32::from_rgb(31, 39, 48),
-            border: Color32::from_rgb(43, 54, 65),
-            text: Color32::from_rgb(241, 245, 248),
-            secondary: Color32::from_rgb(171, 183, 192),
-            muted: Color32::from_rgb(126, 141, 153),
+            canvas: Color32::from_rgb(9, 17, 24),
+            sidebar: Color32::from_rgb(12, 22, 31),
+            surface: Color32::from_rgb(18, 31, 42),
+            elevated: Color32::from_rgb(26, 42, 54),
+            border: Color32::from_rgb(40, 62, 77),
+            text: Color32::from_rgb(239, 246, 249),
+            secondary: Color32::from_rgb(171, 191, 201),
+            muted: Color32::from_rgb(119, 145, 157),
             accent,
             success: Color32::from_rgb(75, 207, 157),
             warning: Color32::from_rgb(238, 190, 112),

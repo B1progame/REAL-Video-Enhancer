@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.67 — 2026-11-24
+
+- Rework the Process page into a responsive two-column video workspace with source and model selection above output and advanced render settings.
+- Bring backend, precision, frame multiplier, scale override, tiling, GPU, HDR, crop, overwrite, and preview controls directly into the processing workflow.
+- Refresh the dark theme with a deeper blue-black canvas, clearer surface contrast, and the existing user-selectable accent colors.
+
 ## 2.4.66 — 2026-11-24
 
 - Delete the complete app-managed Python environment, including uv-installed CPython builds, the virtual environment, and package cache.

@@ -38,7 +38,7 @@ const PAGES: [(&str, &str); 6] = [
 ];
 const PROCESS_PAGE: usize = 1;
 const RUNTIME_PAGE: usize = 3;
-const PROCESS_COLUMN_THRESHOLD: f32 = 1040.0;
+const PROCESS_COLUMN_THRESHOLD: f32 = 880.0;
 const RUNTIME_METRICS_COLUMN_THRESHOLD: f32 = 760.0;
 const HOME_HERO_COLUMN_THRESHOLD: f32 = 840.0;
 const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 880.0;
@@ -2111,8 +2111,7 @@ impl NativeApp {
 
     fn output_configuration_card(&mut self, ui: &mut egui::Ui) {
         let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        let installed_backends = self.bootstrap["system"]["available_backends"].clone();
-        Self::card(ui, "Output", |ui| {
+        Self::card(ui, "Output configuration", |ui| {
             if self.output_to_mpv {
                 components::status_dot(ui, palette.accent, "Send enhanced video to MPV");
             } else if ui.available_width() < 680.0 {
@@ -2153,9 +2152,19 @@ impl NativeApp {
                     }
                 });
             }
-            ui.add_space(theme::space::SM);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Processing engine").color(palette.secondary));
+        });
+    }
+
+    fn advanced_processing_card(&mut self, ui: &mut egui::Ui) {
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        let installed_backends = self.bootstrap["system"]["available_backends"].clone();
+        let mut changed = false;
+        let mut preview_enabled = self.saved_settings["advanced"]["preview_enabled"]
+            .as_bool()
+            .unwrap_or(true);
+        Self::card(ui, "Advanced settings", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Processing backend").color(palette.secondary));
                 let selected_backend_ready =
                     backend_is_installed(&installed_backends, &self.backend);
                 egui::ComboBox::from_id_salt("process-backend")
@@ -2179,29 +2188,102 @@ impl NativeApp {
                                 .inner
                                 .changed()
                             {
-                                self.save_render_defaults();
                                 self.get(&format!("/api/models?backend={}", self.backend));
+                                changed = true;
                             }
                         }
                     });
-                if selected_backend_ready {
-                    ui.label(
-                        RichText::new("Installed and ready")
-                            .size(11.0)
-                            .color(palette.success),
-                    );
-                } else {
-                    ui.label(
-                        RichText::new("This backend is not installed.")
-                            .size(11.0)
-                            .color(palette.warning),
-                    );
-                    if ui.small_button("Open Runtime").clicked() {
-                        self.page = RUNTIME_PAGE;
-                    }
+                components::status_dot(
+                    ui,
+                    if selected_backend_ready {
+                        palette.success
+                    } else {
+                        palette.warning
+                    },
+                    if selected_backend_ready {
+                        "Available"
+                    } else {
+                        "Setup required"
+                    },
+                );
+                if !selected_backend_ready && ui.small_button("Runtime setup").clicked() {
+                    self.page = RUNTIME_PAGE;
                 }
             });
+
+            ui.add_space(theme::space::SM);
+            ui.horizontal_wrapped(|ui| {
+                egui::ComboBox::from_id_salt("process-precision")
+                    .selected_text(format!("Precision · {}", self.precision))
+                    .show_ui(ui, |ui| {
+                        for option in ["auto", "float16", "float32"] {
+                            changed |= ui
+                                .selectable_value(&mut self.precision, option.to_owned(), option)
+                                .changed();
+                        }
+                    });
+                ui.label(RichText::new("Frame multiplier").color(palette.secondary));
+                changed |= ui
+                    .add(egui::Slider::new(&mut self.interpolate_factor, 2.0..=8.0).suffix("×"))
+                    .changed();
+                ui.label(RichText::new("Scale override").color(palette.secondary));
+                changed |= ui
+                    .add(egui::Slider::new(&mut self.upscale_scale, 0..=4).suffix("×"))
+                    .changed();
+            });
+
+            ui.add_space(theme::space::SM);
+            ui.horizontal_wrapped(|ui| {
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut self.tile_size)
+                            .range(0..=4096)
+                            .prefix("Tile "),
+                    )
+                    .on_hover_text("Use 0 for automatic tile sizing.")
+                    .changed();
+                changed |= ui
+                    .add(
+                        egui::DragValue::new(&mut self.overlap)
+                            .range(0..=256)
+                            .prefix("Overlap "),
+                    )
+                    .changed();
+                if self.backend == "pytorch" {
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.pytorch_gpu_id)
+                                .range(0..=64)
+                                .prefix("GPU "),
+                        )
+                        .changed();
+                } else if self.backend == "ncnn" {
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut self.ncnn_gpu_id)
+                                .range(0..=64)
+                                .prefix("GPU "),
+                        )
+                        .changed();
+                }
+            });
+
+            ui.add_space(theme::space::XS);
+            ui.horizontal_wrapped(|ui| {
+                changed |= ui.checkbox(&mut self.auto_hdr, "Automatic HDR").changed();
+                changed |= ui.checkbox(&mut self.uhd_mode, "UHD mode").changed();
+                changed |= ui.checkbox(&mut self.auto_crop, "Detect borders").changed();
+                changed |= ui.checkbox(&mut self.overwrite, "Replace output").changed();
+                changed |= ui.checkbox(&mut preview_enabled, "Live preview").changed();
+            });
         });
+        if changed {
+            if !self.saved_settings["advanced"].is_object() {
+                self.saved_settings["advanced"] = json!({});
+            }
+            self.saved_settings["advanced"]["preview_enabled"] = json!(preview_enabled);
+            self.save_render_defaults();
+        }
     }
 
     fn enhancement_models_card(&mut self, ui: &mut egui::Ui) {
@@ -2272,7 +2354,6 @@ impl NativeApp {
                                 .changed();
                             });
                         });
-                        let enabled = self.toggles.get(key).copied().unwrap_or(false);
                         let options = self.model_choices(key);
                         if !options.is_empty() {
                             ui.add_space(theme::space::XS);
@@ -2293,18 +2374,6 @@ impl NativeApp {
                                 };
                                 components::status_dot(ui, color, status);
                             }
-                        }
-                        if enabled && key == "interpolate" {
-                            ui.add(
-                                egui::Slider::new(&mut self.interpolate_factor, 2.0..=8.0)
-                                    .text("Frame multiplier"),
-                            );
-                        }
-                        if enabled && key == "upscale" {
-                            ui.add(
-                                egui::Slider::new(&mut self.upscale_scale, 0..=4)
-                                    .text("Scale override"),
-                            );
                         }
                     });
                 ui.add_space(theme::space::XS);
@@ -2616,14 +2685,22 @@ impl NativeApp {
             self.source_and_output_card(ui);
             ui.add_space(theme::space::MD);
             self.enhancement_models_card(ui);
+            ui.add_space(theme::space::MD);
+            self.output_configuration_card(ui);
+            ui.add_space(theme::space::MD);
+            self.advanced_processing_card(ui);
         } else {
             ui.columns(2, |columns| {
                 self.source_and_output_card(&mut columns[0]);
                 self.enhancement_models_card(&mut columns[1]);
             });
+            ui.add_space(theme::space::MD);
+            ui.columns(2, |columns| {
+                self.output_configuration_card(&mut columns[0]);
+                self.advanced_processing_card(&mut columns[1]);
+            });
         }
         ui.add_space(theme::space::MD);
-        self.output_configuration_card(ui);
         self.live_render_preview_card(ui);
         if let Some(lines) = self.render["log_lines"].as_array() {
             egui::CollapsingHeader::new("Render activity")
@@ -4416,10 +4493,10 @@ mod tests {
 
     #[test]
     fn process_switches_to_one_column_when_space_is_tight() {
-        assert!(!process_uses_two_columns(996.0));
-        assert!(!process_uses_two_columns(1039.0));
-        assert!(process_uses_two_columns(1040.0));
-        // At 1366 px the sidebar and margins leave roughly 1090 px for Process.
+        assert!(!process_uses_two_columns(839.0));
+        assert!(!process_uses_two_columns(879.0));
+        assert!(process_uses_two_columns(880.0));
+        // Keeps the two-column editing workspace usable on a 1184 px desktop.
         assert!(process_uses_two_columns(1090.0));
     }
 
