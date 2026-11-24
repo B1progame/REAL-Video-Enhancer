@@ -47,6 +47,15 @@ fn can_start_model_download(connected: bool, active: bool, busy: bool) -> bool {
     connected && !active && !busy
 }
 
+fn backend_is_installed(available: &Value, selected: &str) -> bool {
+    available.as_array().is_some_and(|backends| {
+        backends
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|backend| backend.trim().eq_ignore_ascii_case(selected.trim()))
+    })
+}
+
 fn pending_post_after_event(pending: bool, is_post: bool) -> bool {
     pending && !is_post
 }
@@ -832,11 +841,14 @@ impl NativeApp {
             json!({})
         };
         let advanced = &self.saved_settings["advanced"];
-        let configured_backend = self.saved_settings["backend"].as_str().unwrap_or("pytorch");
-        self.backend = if configured_backend == "auto" {
+        let configured_backend = self.saved_settings["backend"]
+            .as_str()
+            .unwrap_or("pytorch")
+            .trim();
+        self.backend = if configured_backend.eq_ignore_ascii_case("auto") {
             "pytorch".to_owned()
         } else {
-            configured_backend.to_owned()
+            configured_backend.to_ascii_lowercase()
         };
         for (key, default) in [
             ("interpolate", false),
@@ -1828,7 +1840,10 @@ impl NativeApp {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let selected_backend_ready = backends.contains(&self.backend);
+        let selected_backend_ready = backend_is_installed(
+            &self.bootstrap["system"]["available_backends"],
+            &self.backend,
+        );
         let model_count = self.models.as_object().map_or(0, |categories| {
             categories
                 .values()
@@ -2076,6 +2091,7 @@ impl NativeApp {
 
     fn output_configuration_card(&mut self, ui: &mut egui::Ui) {
         let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        let installed_backends = self.bootstrap["system"]["available_backends"].clone();
         Self::card(ui, "Output", |ui| {
             if self.output_to_mpv {
                 components::status_dot(ui, palette.accent, "Send enhanced video to MPV");
@@ -2120,16 +2136,27 @@ impl NativeApp {
             ui.add_space(theme::space::SM);
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Processing engine").color(palette.secondary));
+                let selected_backend_ready =
+                    backend_is_installed(&installed_backends, &self.backend);
                 egui::ComboBox::from_id_salt("process-backend")
                     .selected_text(self.backend.to_uppercase())
                     .show_ui(ui, |ui| {
                         for backend in ["pytorch", "ncnn", "tensorrt"] {
+                            let available = backend_is_installed(&installed_backends, backend);
+                            let label = if available {
+                                backend.to_uppercase()
+                            } else {
+                                format!("{} · Install in Runtime", backend.to_uppercase())
+                            };
                             if ui
-                                .selectable_value(
-                                    &mut self.backend,
-                                    backend.to_owned(),
-                                    backend.to_uppercase(),
-                                )
+                                .add_enabled_ui(available, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.backend,
+                                        backend.to_owned(),
+                                        label,
+                                    )
+                                })
+                                .inner
                                 .changed()
                             {
                                 self.save_render_defaults();
@@ -2137,11 +2164,22 @@ impl NativeApp {
                             }
                         }
                     });
-                ui.label(
-                    RichText::new("Choose an installed backend in Runtime.")
-                        .size(11.0)
-                        .color(palette.muted),
-                );
+                if selected_backend_ready {
+                    ui.label(
+                        RichText::new("Installed and ready")
+                            .size(11.0)
+                            .color(palette.success),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new("This backend is not installed.")
+                            .size(11.0)
+                            .color(palette.warning),
+                    );
+                    if ui.small_button("Open Runtime").clicked() {
+                        self.page = RUNTIME_PAGE;
+                    }
+                }
             });
         });
     }
@@ -2273,13 +2311,10 @@ impl NativeApp {
     }
 
     fn render_blockers(&self) -> Vec<String> {
-        let ready_backends = self.bootstrap["system"]["available_backends"]
-            .as_array()
-            .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
-            .unwrap_or_default();
-        let backend_ready = ready_backends
-            .iter()
-            .any(|backend| *backend == self.backend);
+        let backend_ready = backend_is_installed(
+            &self.bootstrap["system"]["available_backends"],
+            &self.backend,
+        );
         let active = matches!(
             self.render["status"].as_str(),
             Some("preparing" | "running" | "paused" | "stopping")
@@ -2514,6 +2549,13 @@ impl NativeApp {
                 });
                 self.render_action_controls(ui, active, preparing, paused, &status, can_start);
             });
+        }
+        if blockers
+            .first()
+            .is_some_and(|blocker| blocker.contains("processing backend"))
+            && ui.small_button("Open Runtime setup").clicked()
+        {
+            self.page = RUNTIME_PAGE;
         }
         if let Some(error) = self.render["error"]
             .as_str()
@@ -3103,15 +3145,15 @@ impl NativeApp {
                     system["os"].as_str().unwrap_or("Not detected").to_owned(),
                 ),
                 (
-                    "CUDA version",
-                    system["cuda_version"]
+                    "Graphics device",
+                    system["gpu_name"]
                         .as_str()
                         .unwrap_or("Not detected")
                         .to_owned(),
                 ),
                 (
-                    "Graphics device",
-                    system["gpu_name"]
+                    "CUDA version",
+                    system["cuda_version"]
                         .as_str()
                         .unwrap_or("Not detected")
                         .to_owned(),
@@ -3130,11 +3172,14 @@ impl NativeApp {
                     });
             };
             if runtime_metrics_use_two_columns(ui.available_width()) {
-                ui.columns(2, |columns| {
-                    for (index, (label, value)) in metrics.iter().enumerate() {
-                        draw_metric(&mut columns[index % 2], label, value);
-                    }
-                });
+                for row in metrics.chunks_exact(2) {
+                    ui.columns(2, |columns| {
+                        for (column, (label, value)) in columns.iter_mut().zip(row.iter()) {
+                            draw_metric(column, label, value);
+                        }
+                    });
+                    ui.add_space(theme::space::SM);
+                }
             } else {
                 for (label, value) in &metrics {
                     draw_metric(ui, label, value);

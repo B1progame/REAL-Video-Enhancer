@@ -75,7 +75,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.64")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.65")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -844,6 +844,7 @@ def python_capabilities(refresh=False):
               "available_backends": [], "runtime_root": str(APP_DATA), "working_directory": str(APP_DATA),
               "backend_script_path": str(BACKEND), "python_runtime": PYTHON, "python_target_path": PYTHON,
               "temp_directory": str(APP_DATA / "temp"), "version": APP_VERSION, "os": f"{platform.system()} {platform.release()} {platform.machine()}",
+              "gpu_name": "Not detected", "cuda_version": "Not detected",
               "cpu": platform.processor() or platform.machine(), "ram": "Unavailable", "available_disk_gb": None,
               "recommended_backend_label": "Install the project runtime dependencies", "recommended_backend_reason": "The API is connected; render support depends on PyTorch/OpenCV and model weights."}
     try:
@@ -867,11 +868,12 @@ try:
     arch = ('sm_' + ''.join(map(str, cap))) if cap else ''
     supported = (not cuda) or arch in torch.cuda.get_arch_list()
     device = torch.cuda.get_device_name(0) if cuda else 'CPU'
+    cuda_version = torch.version.cuda or 'Not detected'
     version = torch.__version__
     installed_pytorch = True
 except Exception:
     cuda, arch, supported = False, '', True
-    device, version, installed_pytorch = 'Unavailable', 'Unavailable', False
+    device, cuda_version, version, installed_pytorch = 'Unavailable', 'Not detected', 'Unavailable', False
 try:
     import rife_ncnn_vulkan_python
     installed_ncnn = ncnn_packages.issubset(distributions)
@@ -885,6 +887,7 @@ except Exception:
 print('opencv=' + str(opencv))
 print('torch=' + version)
 print('device=' + device)
+print('cuda_version=' + cuda_version)
 print('cuda_arch=' + arch)
 print('cuda_supported=' + str(supported))
 print('installed_pytorch=' + str(installed_pytorch))
@@ -895,6 +898,13 @@ print('installed_tensorrt=' + str(installed_tensorrt))
         result["opencv_available"] = probe.returncode == 0 and "opencv=True" in probe.stdout
         if probe.returncode == 0:
             lines = dict(line.split("=", 1) for line in probe.stdout.splitlines() if "=" in line)
+            detected_device = lines.get("device", "Unavailable")
+            result["gpu_name"] = (
+                "CPU only" if detected_device == "CPU"
+                else "Not detected" if detected_device == "Unavailable"
+                else detected_device
+            )
+            result["cuda_version"] = lines.get("cuda_version", "Not detected")
             installed_backends = [name for name in ("pytorch", "ncnn", "tensorrt")
                                   if lines.get(f"installed_{name}", "False").lower() == "true"]
             result["backend_management"] = {

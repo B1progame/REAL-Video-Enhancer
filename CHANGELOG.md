@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4.65 — 2026-11-24
+
+- Populate Runtime hardware details from the managed PyTorch probe so the graphics device and CUDA runtime are reported accurately.
+- Clearly identify CPU-only runtime setups instead of showing a missing graphics device.
+- Pair operating system with graphics device, and CUDA with available backends, in the hardware summary.
+- Normalize saved processing backend names, prevent selecting backends that are not installed, and link blocked renders directly to Runtime setup.
+
 ## 2.4.64 — 2026-11-24
 
 - Redesign the native app's shared visual system with a calmer, more refined light and dark palette, stronger typography, roomier cards, and clearer controls.
