@@ -89,7 +89,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.71")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.75")
 update_lock = threading.RLock()
 github_token_lock = threading.RLock()
 github_token_value = None
@@ -98,6 +98,7 @@ library_cache = {"checked_at": 0.0, "models": None, "error": ""}
 animescripter_status_cache = {"checked_at": 0.0, "value": None}
 LIBRARY_CACHE_FILE = APP_DATA / "model-library-cache.json"
 OPENMODELDB_API = "https://openmodeldb.info/api/v1/models.json"
+OPENMODELDB_IMAGE_HOSTS = {"openmodeldb.info", "www.openmodeldb.info", "imgsli.com", "i.imgsli.com"}
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
                 "current_version": APP_VERSION}
@@ -178,6 +179,18 @@ def custom_models_dir():
     if os.name == "nt" and os.environ.get("RVE_MODEL_STORAGE", "wsl").lower() != "windows":
         return MODEL_DIR / "custom_models"
     return APP_DATA / "custom_models"
+
+
+def activate_wsl_model_dir():
+    """Resolve the WSL model mount only when a user explicitly starts work."""
+    global MODEL_DIR
+    if os.name != "nt" or os.environ.get("RVE_MODEL_STORAGE", "wsl").lower() != "wsl":
+        return None
+    distro = wsl_distribution_name()
+    linux_home = wsl_home_directory(distro)
+    windows_home = linux_home.replace("/", "\\")
+    MODEL_DIR = Path(rf"\\wsl.localhost\{distro}{windows_home}\.local\share\REAL-Video-Enhancer\models")
+    return distro
 MODEL_DOWNLOAD_BASE = "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/"
 download_lock = threading.RLock()
 download_job = {"id": None, "status": "idle", "active": False, "progress": 0, "label": "", "detail": "", "error": "", "results": [], "bytes_received": 0, "bytes_total": 0, "stage": ""}
@@ -276,6 +289,24 @@ def get_github_token():
         return github_token_value
 
 
+def github_cli_token():
+    """Use the current Windows user's existing gh login without persisting its token."""
+    gh = shutil.which("gh.exe") or shutil.which("gh")
+    if not gh:
+        return ""
+    try:
+        result = run_hidden_process(
+            [gh, "auth", "token", "--hostname", "github.com"],
+            capture_output=True, timeout=8, text=True, encoding="utf-8", errors="replace",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    token = (result.stdout or "").strip()
+    if result.returncode == 0 and token.startswith(("github_pat_", "ghp_", "gho_")):
+        return token
+    return ""
+
+
 def save_github_token(token):
     global github_token_value
     token = str(token or "").strip()
@@ -307,18 +338,34 @@ def release_object_from_json(raw, source):
 def fetch_latest_release():
     headers = {"Accept": "application/vnd.github+json", "User-Agent": "REAL-Video-Enhancer-Native"}
     token = get_github_token()
+    access_method = "token" if token else None
+    if not token:
+        token = github_cli_token()
+        access_method = "gh" if token else None
     if token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(UPDATE_API, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
-            return release_object_from_json(response.read(2 * 1024 * 1024), "GitHub API"), "token" if token else None
+            return release_object_from_json(response.read(2 * 1024 * 1024), "GitHub API"), access_method
     except urllib.error.HTTPError as exc:
         if exc.code not in (401, 403, 404):
             raise
-        message = ("The saved GitHub token could not read this release. Give it Contents: read access to the repository."
+        if access_method == "token":
+            cli_token = github_cli_token()
+            if cli_token and cli_token != token:
+                retry_headers = dict(headers)
+                retry_headers["Authorization"] = f"Bearer {cli_token}"
+                retry = urllib.request.Request(UPDATE_API, headers=retry_headers)
+                try:
+                    with urllib.request.urlopen(retry, timeout=15) as response:
+                        return release_object_from_json(response.read(2 * 1024 * 1024), "GitHub API"), "gh"
+                except urllib.error.HTTPError as retry_error:
+                    if retry_error.code not in (401, 403, 404):
+                        raise
+        message = ("GitHub authentication could not read this release. Check that your saved token or `gh` login has repository Contents: read access."
                    if token else
-                   "This release repository is private. Add a read-only GitHub token in Settings → Updates to check and download releases. GitHub CLI is not required.")
+                   "This release repository is private. Sign in with GitHub CLI (`gh auth login`) or save a read-only token in Settings → Updates.")
         raise RuntimeError(message) from exc
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Could not reach GitHub: {exc.reason}. Check your connection and try again.") from exc
@@ -370,7 +417,7 @@ def check_github_update():
 def download_update_installer(release):
     try:
         url = str(release.get("installer_url") or "")
-        if release.get("access_method") == "token":
+        if release.get("access_method") in ("token", "gh"):
             url = str(release.get("installer_api_url") or "")
             if not url.startswith(f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/assets/"):
                 raise ValueError("GitHub did not provide a trusted private installer asset.")
@@ -392,7 +439,9 @@ def download_update_installer(release):
         received = 0
         headers = {"User-Agent": "REAL-Video-Enhancer-Native"}
         token = get_github_token()
-        if release.get("access_method") == "token" and token:
+        if release.get("access_method") == "gh" and not token:
+            token = github_cli_token()
+        if release.get("access_method") in ("token", "gh") and token:
             headers["Authorization"] = f"Bearer {token}"
             headers["Accept"] = "application/octet-stream"
         request = urllib.request.Request(url, headers=headers)
@@ -517,12 +566,42 @@ def openmodeldb_catalog(force=False):
             resources = record.get("resources") if isinstance(record.get("resources"), list) else []
             resources = [resource for resource in resources if isinstance(resource, dict)]
             model_page = f"https://openmodeldb.info/models/{urllib.parse.quote(str(model_id), safe='-_.')}"
+            previews = []
+            for preview in record.get("images", []) if isinstance(record.get("images"), list) else []:
+                if isinstance(preview, str):
+                    preview_url, caption = preview, ""
+                elif isinstance(preview, dict):
+                    preview_url = str(preview.get("url") or preview.get("src") or "")
+                    meta = preview.get("meta") if isinstance(preview.get("meta"), dict) else {}
+                    caption = str(preview.get("caption") or meta.get("caption") or "")
+                else:
+                    continue
+                parsed_preview = urllib.parse.urlsplit(preview_url)
+                if (parsed_preview.scheme == "https" and parsed_preview.hostname
+                        and parsed_preview.hostname.casefold() in OPENMODELDB_IMAGE_HOSTS):
+                    previews.append({"url": preview_url, "caption": caption[:180]})
+                if len(previews) == 6:
+                    break
+            description = str(record.get("description") or "")
+            marked_description = re.search(r"(?im)^\s*(?:#+\s*)?description\s*:\s*", description)
+            if marked_description:
+                description = description[marked_description.end():]
+            else:
+                structured_field = re.compile(r"(?i)^\s*(scale|architecture|architecture option|author|license|purpose|subject|input type|release date|dataset|dataset size|pretrained model|iterations|batch size|patch size)\s*:")
+                description = "\n".join(line for line in description.splitlines() if not structured_field.match(line))
+            description = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", description)
+            description = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", description)
+            description = re.sub(r"<[^>]+>", " ", description)
+            description = re.sub(r"(?m)^\s{0,3}#+\s*", "", description)
+            description = re.sub(r"[*_`>#]+", "", description)
+            description = re.sub(r"\s+", " ", description).strip()
             models.append({
                 "id": str(model_id), "name": name, "author": str(record.get("author") or "Community"),
                 "license": str(record.get("license") or "See source"),
                 "architecture": str(record.get("architecture") or "Unknown"),
                 "scale": record.get("scale"), "tags": record.get("tags") if isinstance(record.get("tags"), list) else [],
-                "description": str(record.get("description") or "")[:1200], "url": model_page,
+                "description": description[:1200], "url": model_page,
+                "images": previews,
                 "resources": [{"type": str(item.get("type") or item.get("platform") or ""),
                                "size": item.get("size"), "sha256": item.get("sha256"),
                                "urls": item.get("urls") if isinstance(item.get("urls"), list) else []}
@@ -579,6 +658,27 @@ def search_openmodeldb(query="", category="all", force=False):
         filtered.append(model)
     return {"source": "OpenModelDB", "url": "https://openmodeldb.info", "count": len(models),
             "results": filtered[:800], "error": library_cache.get("error", "")}
+
+
+def openmodeldb_thumbnail(model_id):
+    model = next((entry for entry in openmodeldb_catalog() if entry["id"] == str(model_id)), None)
+    if not model:
+        raise ValueError("The model preview is not in the current catalogue.")
+    preview = next(iter(model.get("images") or []), None)
+    if not preview:
+        raise FileNotFoundError("This model does not have a preview image.")
+    url = preview["url"]
+    request = urllib.request.Request(url, headers={"User-Agent": f"REAL-Video-Enhancer/{APP_VERSION}", "Accept": "image/avif,image/webp,image/png,image/jpeg"})
+    with urllib.request.urlopen(request, timeout=10) as response:
+        final = urllib.parse.urlsplit(response.geturl())
+        content_type = str(response.headers.get("Content-Type", "")).split(";", 1)[0].strip().lower()
+        if (final.scheme != "https" or final.hostname not in OPENMODELDB_IMAGE_HOSTS
+                or content_type not in ("image/jpeg", "image/png", "image/webp", "image/avif")):
+            raise RuntimeError("The model preview host returned an unsupported image response.")
+        data = response.read(5 * 1024 * 1024 + 1)
+    if len(data) > 5 * 1024 * 1024:
+        raise RuntimeError("The model preview is larger than 5 MB.")
+    return data, content_type
 
 
 def begin_openmodel_download(model_id):
@@ -719,39 +819,75 @@ def storage_footprint():
     tools_total = sum(_directory_size(app_bin / name) for name in ("ffmpeg.exe", "uv.exe", "ffmpeg", "uv"))
     uv_cache = Path(os.environ.get("UV_CACHE_DIR", LOCAL_DATA / "uv-cache"))
     components = [
-        {"id": "application", "label": "Windows app and bundled engine", "bytes": _directory_size(app_root), "location": str(app_root)},
-        {"id": "python", "label": "Managed Python and inference packages", "bytes": _directory_size(python_root), "location": str(python_root)},
-        {"id": "tools", "label": "FFmpeg and app-managed uv", "bytes": tools_total, "location": str(app_bin)},
-        {"id": "anime", "label": "AnimeScripter and its local files", "bytes": anime_total, "location": str(anime_roots[0])},
-        {"id": "uv_cache", "label": "uv package cache", "bytes": _directory_size(uv_cache), "location": str(uv_cache)},
+        {"id": "application", "label": "App and bundled engine", "bytes": _directory_size(app_root), "location": str(app_root), "storage": "windows"},
+        {"id": "python", "label": "Managed Python and inference packages", "bytes": _directory_size(python_root), "location": str(python_root), "storage": "windows"},
+        {"id": "tools", "label": "FFmpeg and app-managed uv", "bytes": tools_total, "location": str(app_bin), "storage": "windows"},
+        {"id": "anime", "label": "AnimeScripter and its local files", "bytes": anime_total, "location": str(anime_roots[0]), "storage": "windows"},
+        {"id": "uv_cache", "label": "uv package cache", "bytes": _directory_size(uv_cache), "location": str(uv_cache), "storage": "windows"},
+        {"id": "render_cache", "label": "Temporary render model staging", "bytes": _directory_size(APP_DATA / "render-model-cache"), "location": str(APP_DATA / "render-model-cache"), "storage": "windows"},
     ]
-    model_bytes = _directory_size(MODEL_DIR)
-    if os.environ.get("RVE_MODEL_STORAGE", "wsl" if os.name == "nt" else "windows").lower() == "windows":
+    selected_storage = os.environ.get("RVE_MODEL_STORAGE", "wsl" if os.name == "nt" else "windows").lower()
+    model_bytes = 0 if os.name == "nt" and selected_storage == "wsl" else _directory_size(MODEL_DIR)
+    if selected_storage == "windows":
         custom = custom_models_dir()
         if custom != MODEL_DIR and custom not in MODEL_DIR.parents:
             model_bytes += _directory_size(custom)
     storage_error = ""
+    wsl_running = False
+    wsl_free_bytes = None
+    wsl_size_known = not (os.name == "nt" and selected_storage == "wsl")
+    wsl_cache_file = APP_DATA / "wsl-model-size.json"
     if os.name == "nt" and os.environ.get("RVE_MODEL_STORAGE", "wsl").lower() == "wsl":
         try:
             distro = wsl_distribution_name()
-            command = [shutil.which("wsl.exe") or "wsl.exe", "--distribution", distro, "--exec", "bash", "-lc",
-                       'du -sb -- "$HOME/.local/share/REAL-Video-Enhancer/models" 2>/dev/null | cut -f1']
-            result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                                    timeout=60, **hidden_subprocess_kwargs())
-            value = (result.stdout or "").strip().splitlines()
-            if result.returncode == 0 and value and value[0].isdigit():
-                model_bytes = int(value[0])
+            wsl = shutil.which("wsl.exe") or "wsl.exe"
+            running = subprocess.run([wsl, "--list", "--running", "--quiet"], capture_output=True, timeout=20,
+                                     **hidden_subprocess_kwargs())
+            running_names = [line.strip().lstrip("* ").strip().casefold() for line in _decode_wsl_list_output(running.stdout).splitlines() if line.strip()]
+            wsl_running = distro.casefold() in running_names
+            if wsl_running:
+                command = [wsl, "--distribution", distro, "--exec", "bash", "-lc",
+                           'du -sb -- "$HOME/.local/share/REAL-Video-Enhancer/models" 2>/dev/null | cut -f1']
+                result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                        timeout=60, **hidden_subprocess_kwargs())
+                value = (result.stdout or "").strip().splitlines()
+                if result.returncode == 0 and value and value[0].isdigit():
+                    model_bytes = int(value[0])
+                    wsl_size_known = True
+                    APP_DATA.mkdir(parents=True, exist_ok=True)
+                    wsl_cache_file.write_text(json.dumps({"bytes": model_bytes, "measured_at": int(time.time()), "distro": distro}), encoding="utf-8")
+                    disk_result = subprocess.run([wsl, "--distribution", distro, "--exec", "bash", "-lc",
+                                                  "df -B1 --output=avail \"$HOME\" | tail -n 1"],
+                                                 capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                                 timeout=30, **hidden_subprocess_kwargs())
+                    disk_value = (disk_result.stdout or "").strip()
+                    if disk_result.returncode == 0 and disk_value.isdigit():
+                        wsl_free_bytes = int(disk_value)
+                else:
+                    storage_error = (result.stderr or "Could not measure the WSL model directory.").strip()
             else:
-                storage_error = (result.stderr or "Could not measure the WSL model directory.").strip()
+                try:
+                    cached = json.loads(wsl_cache_file.read_text(encoding="utf-8"))
+                    model_bytes = max(0, int(cached.get("bytes", 0)))
+                    wsl_size_known = "bytes" in cached
+                except (OSError, ValueError, TypeError):
+                    model_bytes = 0
         except Exception as exc:
             storage_error = str(exc)
-    components.append({"id": "models", "label": "Model weights (selected Windows or WSL storage)",
-                       "bytes": model_bytes, "location": str(MODEL_DIR)})
+    components.append({"id": "models", "label": "Model library and custom models",
+                       "bytes": model_bytes, "location": str(MODEL_DIR),
+                       "storage": "wsl" if os.name == "nt" and os.environ.get("RVE_MODEL_STORAGE", "wsl").lower() == "wsl" else "windows"})
+    windows_total = sum(item["bytes"] for item in components if item["storage"] == "windows")
+    wsl_total = sum(item["bytes"] for item in components if item["storage"] == "wsl")
     try:
         free_bytes = shutil.disk_usage(LOCAL_DATA).free
     except OSError:
         free_bytes = None
-    return {"components": components, "total_bytes": sum(item["bytes"] for item in components),
+    return {"components": components, "total_bytes": windows_total + wsl_total,
+            "windows_bytes": windows_total, "wsl_bytes": wsl_total, "wsl_running": wsl_running,
+            "wsl_measurement_cached": not wsl_running and wsl_total > 0,
+            "wsl_size_known": wsl_size_known,
+            "wsl_free_bytes": wsl_free_bytes,
             "free_bytes": free_bytes, "model_storage": os.environ.get("RVE_MODEL_STORAGE", "wsl" if os.name == "nt" else "windows"),
             "error": storage_error, "measured_at": int(time.time())}
 
@@ -782,12 +918,41 @@ def find_model_file(filename):
     return None
 
 
+def wsl_distro_is_running(distro=None):
+    if os.name != "nt":
+        return True
+    try:
+        distro = distro or wsl_distribution_name()
+        result = subprocess.run([shutil.which("wsl.exe") or "wsl.exe", "--list", "--running", "--quiet"],
+                                capture_output=True, timeout=20, **hidden_subprocess_kwargs())
+        names = [line.strip().lstrip("* ").strip().casefold() for line in _decode_wsl_list_output(result.stdout).splitlines() if line.strip()]
+        return result.returncode == 0 and distro.casefold() in names
+    except Exception:
+        return False
+
+
+MODEL_STATUS_CACHE = APP_DATA / "model-status-cache.json"
+
+
 def catalog_model_status(catalog):
+    wsl_selected = os.name == "nt" and os.environ.get("RVE_MODEL_STORAGE", "wsl").lower() == "wsl"
+    if wsl_selected and not wsl_distro_is_running():
+        try:
+            cached = json.loads(MODEL_STATUS_CACHE.read_text(encoding="utf-8"))
+            return cached.get("models", {})
+        except (OSError, ValueError, AttributeError):
+            return {category: {label: False for label in entries} for category, entries in catalog.items()}
     result = {}
     for category, entries in catalog.items():
         result[category] = {}
         for label, spec in entries.items():
             result[category][label] = bool(find_model_file(spec[0]))
+    if wsl_selected:
+        try:
+            APP_DATA.mkdir(parents=True, exist_ok=True)
+            MODEL_STATUS_CACHE.write_text(json.dumps({"models": result, "measured_at": int(time.time())}), encoding="utf-8")
+        except OSError:
+            pass
     return result
 
 
@@ -859,7 +1024,9 @@ def _benchmark_clip(ffmpeg, destination, width, height, frame_count):
 def run_model_benchmarks(backend, categories, resolutions, frame_count, precision, pytorch_gpu_id, ncnn_gpu_id):
     global benchmark_process
     results = list(benchmark_job.get("results") or [])
+    benchmark_staged_dirs = []
     try:
+        activate_wsl_model_dir()
         ffmpeg = find_ffmpeg_path()
         if not ffmpeg:
             raise RuntimeError("FFmpeg is required to generate repeatable benchmark clips. Install the app runtime first.")
@@ -893,6 +1060,13 @@ def run_model_benchmarks(backend, categories, resolutions, frame_count, precisio
 
             completed = 0
             for category, label, model_path in entries:
+                staged_model_path = model_path
+                staging_payload = {"backend": backend, "models": {category: label}, "toggles": {category: True}}
+                staged_dir = stage_render_models_in_windows(
+                    staging_payload, stop_wsl=False, cancellation_event=benchmark_cancel_event)
+                if staged_dir:
+                    benchmark_staged_dirs.append(staged_dir)
+                    staged_model_path = staging_payload["models"][category]
                 for resolution in resolutions:
                     if benchmark_cancel_event.is_set():
                         raise InterruptedError("Benchmark cancelled.")
@@ -909,7 +1083,7 @@ def run_model_benchmarks(backend, categories, resolutions, frame_count, precisio
                     payload = {
                         "engine": "rve", "backend": backend,
                         "input_path": str(clips[resolution]), "output_folder": str(temp_root / "output"),
-                        "models": {category: model_path},
+                        "models": {category: staged_model_path},
                         "toggles": {category: True, "slomo": False},
                         "interpolate_factor": 2.0,
                         "settings": {"precision": precision, "device": "auto", "tile_size": 256,
@@ -984,6 +1158,9 @@ def run_model_benchmarks(backend, categories, resolutions, frame_count, precisio
                     save_benchmark_results(results)
                     completed += 1
                     _set_benchmark_state(completed=completed, progress=round(completed * 100 / total), current=item)
+                if staged_dir:
+                    shutil.rmtree(staged_dir, ignore_errors=True)
+                    benchmark_staged_dirs.remove(staged_dir)
         final_status = "cancelled" if benchmark_cancel_event.is_set() else "completed"
         _set_benchmark_state(status=final_status, progress=100 if final_status == "completed" else benchmark_job.get("progress", 0),
                              stage="Benchmark complete" if final_status == "completed" else "Benchmark cancelled",
@@ -995,6 +1172,8 @@ def run_model_benchmarks(backend, categories, resolutions, frame_count, precisio
     except Exception as exc:
         _set_benchmark_state(status="error", stage="Benchmark needs attention", detail=str(exc), error=str(exc), current=None)
     finally:
+        for staged_dir in benchmark_staged_dirs:
+            shutil.rmtree(staged_dir, ignore_errors=True)
         with benchmark_process_lock:
             benchmark_process = None
         benchmark_cancel_event.clear()
@@ -1127,6 +1306,7 @@ def download_one_model(label, spec, index=1, count=1):
 
 def run_model_download(job_id, backend, selections=None, categories=None):
     try:
+        activate_wsl_model_dir()
         if backend == "all":
             catalogs = {name: model_catalog(name)[1] for name in ("pytorch", "ncnn", "directml", "tensorrt")}
         else:
@@ -1244,6 +1424,89 @@ def ensure_render_models(payload):
         raise ValueError("Unable to prepare selected model(s): " + "; ".join(errors))
 
 
+def stage_render_models_in_windows(payload, *, stop_wsl=True, cancellation_event=None):
+    """Copy selected WSL weights to a temporary Windows cache for native inference."""
+    if (os.name != "nt" or os.environ.get("RVE_MODEL_STORAGE", "wsl").lower() != "wsl"
+            or str(payload.get("engine") or "rve").lower() == "animescripter"):
+        return None
+    toggles, models = payload.get("toggles") or {}, payload.get("models") or {}
+    backend = str(payload.get("backend") or "pytorch").lower()
+    if backend == "auto":
+        backend = "pytorch"
+    cancellation_event = cancellation_event or render_cancel_event
+    selected = [(key, str(models.get(key) or "")) for key in ("interpolate", "upscale", "decompress", "denoise", "deblur") if toggles.get(key)]
+    sources = []
+    for category, label in selected:
+        source = resolve_model(label, backend, category)
+        if not source:
+            raise FileNotFoundError(f"Could not find selected {category} model in WSL: {label}")
+        source_path = Path(source)
+        # Model weights under \wsl.localhost are copied; local Windows models stay put.
+        if not str(source_path).startswith("\\\\wsl.localhost\\") and not str(source_path).startswith("\\\\wsl$\\"):
+            continue
+        sources.append((category, source_path))
+        # NCNN networks are a paired .param/.bin model. Copy its sibling weights too.
+        if source_path.suffix.lower() in (".param", ".bin"):
+            for suffix in (".param", ".bin"):
+                companion = source_path.with_suffix(suffix)
+                if companion.is_file() and all(existing != companion for _, existing in sources):
+                    sources.append((category, companion))
+    if not sources:
+        return None
+
+    stage_dir = APP_DATA / "render-model-cache" / uuid.uuid4().hex
+    stage_dir.mkdir(parents=True, exist_ok=False)
+    copied = {}
+    try:
+        total = sum(max(0, source.stat().st_size) for _, source in sources)
+        completed = 0
+        for category, source in sources:
+            if cancellation_event.is_set():
+                raise InterruptedError("Model staging cancelled.")
+            category_dir = stage_dir / category
+            category_dir.mkdir(parents=True, exist_ok=True)
+            target = category_dir / source.name
+            with source.open("rb") as input_file, target.open("wb") as output_file:
+                while True:
+                    if cancellation_event.is_set():
+                        raise InterruptedError("Model staging cancelled.")
+                    block = input_file.read(1024 * 1024)
+                    if not block:
+                        break
+                    output_file.write(block)
+                    completed += len(block)
+                    if stop_wsl:
+                        with state_lock:
+                            render["log_lines"] = (render.get("log_lines") or [])[-499:] + [
+                                f"Preparing selected models in Windows · {completed * 100 // total if total else 100}% · {source.name}"]
+            copied.setdefault(category, target)
+        for category, target in copied.items():
+            models[category] = str(target)
+        if stop_wsl:
+            with state_lock:
+                render["log_lines"] = (render.get("log_lines") or [])[-499:] + [
+                    f"Copied {len(sources)} selected model file(s) to a temporary Windows cache."]
+
+        # Stop only the configured Ubuntu distro. This intentionally happens
+        # after model staging and before inference; other WSL distros are untouched.
+        if stop_wsl:
+            distro = wsl_distribution_name()
+            result = subprocess.run([shutil.which("wsl.exe") or "wsl.exe", "--terminate", distro],
+                                    capture_output=True, text=True, timeout=60, **hidden_subprocess_kwargs())
+            if result.returncode:
+                with state_lock:
+                    render["log_lines"] = (render.get("log_lines") or [])[-499:] + [
+                        f"WSL model files are staged, but {distro} could not be stopped: {(result.stderr or result.stdout).strip()}"]
+            else:
+                with state_lock:
+                    render["log_lines"] = (render.get("log_lines") or [])[-499:] + [
+                        f"Stopped WSL distribution {distro} after staging render models."]
+        return stage_dir
+    except Exception:
+        shutil.rmtree(stage_dir, ignore_errors=True)
+        raise
+
+
 def respond_json(handler, value, status=200):
     body = json.dumps(value, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
@@ -1252,6 +1515,16 @@ def respond_json(handler, value, status=200):
     handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def respond_bytes(handler, content, content_type, status=200):
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(content)))
+    handler.send_header("Cache-Control", "private, max-age=86400")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.end_headers()
+    handler.wfile.write(content)
 
 
 def load_settings():
@@ -1445,11 +1718,12 @@ def begin_model_storage_setup(mode):
     return storage_snapshot()
 
 
-def available_backends_from_probe(opencv_available, installed_backends):
-    """Keep CPU PyTorch available even when the detected CUDA arch is unsupported."""
+def available_backends_from_probe(opencv_available, installed_backends, cuda_available=False):
+    """Expose only installed backends that have the hardware required to run."""
     if not opencv_available:
         return []
-    return [name for name in ("pytorch", "ncnn", "tensorrt") if name in installed_backends]
+    return [name for name in ("pytorch", "ncnn", "tensorrt")
+            if name in installed_backends and (name != "tensorrt" or cuda_available)]
 
 
 def selected_backend_is_available(capabilities, backend):
@@ -1487,7 +1761,7 @@ def python_capabilities(refresh=False):
 from importlib import metadata
 distributions = {dist.metadata.get('Name', '').lower().replace('_', '-') for dist in metadata.distributions()}
 ncnn_packages = {'rife-ncnn-vulkan-python-tntwise', 'upscale-ncnn-py', 'ncnn'}
-tensorrt_packages = {'tensorrt', 'tensorrt-cu12-bindings', 'tensorrt-cu12-libs'}
+tensorrt_packages = {'torch-tensorrt', 'tensorrt', 'tensorrt-cu12-bindings', 'tensorrt-cu12-libs'}
 try:
     import cv2
     opencv = True
@@ -1514,6 +1788,7 @@ except Exception:
     installed_ncnn = False
 try:
     import tensorrt
+    import torch_tensorrt
     installed_tensorrt = tensorrt_packages.issubset(distributions)
 except Exception:
     installed_tensorrt = False
@@ -1552,8 +1827,15 @@ print('installed_tensorrt=' + str(installed_tensorrt))
                 "tensorrt_supported": True,
             }
             result["available_backends"] = available_backends_from_probe(
-                result["opencv_available"], installed_backends
+                result["opencv_available"], installed_backends,
+                cuda_available=lines.get("cuda", "False").lower() == "true",
             )
+            if "tensorrt" not in installed_backends:
+                result["backend_probe_output"] = (
+                    "TensorRT is incomplete: install the TensorRT backend from Runtime to add Torch-TensorRT and its runtime packages."
+                )
+            elif not lines.get("cuda", "False").lower() == "true":
+                result["backend_probe_output"] = "TensorRT needs a CUDA-capable NVIDIA GPU; choose PyTorch or NCNN on this PC."
             if "pytorch" in result["available_backends"] and lines.get("cuda_supported", "True").lower() == "false":
                 result["backend_probe_output"] = f"Installed PyTorch does not include kernels for {lines.get('cuda_arch', 'this GPU')}. Install the recommended CUDA 12.8 backend."
                 result["recommended_backend_label"] = f"PyTorch CPU available · CUDA 12.8 recommended for {lines.get('device', 'this GPU')}"
@@ -1967,7 +2249,7 @@ def backend_packages(backend, payload=None):
         if flavor.startswith("cu12"):
             packages.append("cupy-cuda12x==13.3.0")
         if backend == "tensorrt":
-            packages += ["tensorrt==10.12.0.36", "tensorrt_cu12==10.12.0.36", "tensorrt-cu12_libs==10.12.0.36", "tensorrt_cu12_bindings==10.12.0.36"]
+            packages += ["torch-tensorrt==2.7.0", "tensorrt==10.12.0.36", "tensorrt_cu12==10.12.0.36", "tensorrt-cu12_libs==10.12.0.36", "tensorrt_cu12_bindings==10.12.0.36"]
         return packages
     if backend == "ncnn":
         return ["rife-ncnn-vulkan-python-tntwise==1.4.5", "upscale_ncnn_py==1.2.0", "ncnn==1.0.20250916", "numpy==2.2.2"]
@@ -2723,6 +3005,7 @@ def build_animescripter_command(payload, info):
 def prepare_and_start_render(payload, engine, output_file):
     pause_memory = None
     preview_memory = None
+    staged_models = None
     try:
         if render_cancel_event.is_set():
             raise InterruptedError("Render cancelled before engine startup.")
@@ -2734,11 +3017,16 @@ def prepare_and_start_render(payload, engine, output_file):
             if not selected_backend_is_available(capabilities, backend):
                 probe = str(capabilities.get("backend_probe_output") or f"{backend} and OpenCV were not detected in the managed Python runtime.").strip()
                 raise RuntimeError(f"The selected {backend} backend is unavailable. Open Runtime and install or select an available backend. Details: " + probe)
+        activate_wsl_model_dir()
         ensure_render_models(payload)
+        staged_models = stage_render_models_in_windows(payload)
         if render_cancel_event.is_set():
             raise InterruptedError("Render cancelled before the engine started.")
         with state_lock:
             if render.get("status") != "preparing":
+                if staged_models is not None:
+                    shutil.rmtree(staged_models, ignore_errors=True)
+                    staged_models = None
                 return
             if engine == "animescripter":
                 info = animescripter_status()
@@ -2767,8 +3055,11 @@ def prepare_and_start_render(payload, engine, output_file):
                           preview_enabled=preview_enabled, engine=engine,
                           log_lines=[f"Starting {engine} renderer...", "Command: " + subprocess.list2cmdline(cmd)],
                           current_frame=0, gen_fps=None, eta="--", output_file=str(output_file) if output_file else None)
-        threading.Thread(target=read_render_output, args=(proc, pause_memory, preview_memory), daemon=True).start()
+        threading.Thread(target=read_render_output, args=(proc, pause_memory, preview_memory, staged_models), daemon=True).start()
+        staged_models = None
     except Exception as exc:
+        if staged_models is not None:
+            shutil.rmtree(staged_models, ignore_errors=True)
         for memory in (pause_memory, preview_memory):
             if memory is not None:
                 try:
@@ -2838,6 +3129,16 @@ class Handler(BaseHTTPRequestHandler):
                 respond_json(self, {"source": "OpenModelDB", "url": "https://openmodeldb.info", "count": 0,
                                     "results": [], "error": str(exc)}, 503)
             return
+        if path == "/api/library/thumbnail":
+            model_id = urllib.parse.parse_qs(url.query).get("id", [""])[0]
+            try:
+                image_data, content_type = openmodeldb_thumbnail(model_id)
+                respond_bytes(self, image_data, content_type)
+            except FileNotFoundError as exc:
+                respond_json(self, {"error": str(exc)}, 404)
+            except Exception as exc:
+                respond_json(self, {"error": str(exc)}, 503)
+            return
         if path == "/api/app/update/check":
             try:
                 release = check_github_update()
@@ -2857,7 +3158,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/python/info":
             respond_json(self, python_info_payload()); return
         if path == "/api/models":
-            backend, catalog = model_catalog(urllib.parse.parse_qs(url.query).get("backend", ["pytorch"])[0])
+            params = urllib.parse.parse_qs(url.query)
+            backend, catalog = model_catalog(params.get("backend", ["pytorch"])[0])
+            if params.get("refresh_wsl", [""])[0] == "1":
+                activate_wsl_model_dir()
             models = {category: list(entries) for category, entries in catalog.items()}
             models.update({"backend": backend, "model_status": catalog_model_status(catalog)})
             respond_json(self, models); return
@@ -3180,7 +3484,7 @@ class Handler(BaseHTTPRequestHandler):
             respond_json(self, {"ok": False, "error": str(exc)}, 500)
 
 
-def read_render_output(proc, memory=None, preview_memory=None):
+def read_render_output(proc, memory=None, preview_memory=None, staged_models=None):
     try:
         for line in proc.stdout:
             line = line.strip()
@@ -3222,7 +3526,11 @@ def read_render_output(proc, memory=None, preview_memory=None):
                 preview_memory.close(); preview_memory.unlink()
             except FileNotFoundError:
                 pass
+        if staged_models is not None:
+            shutil.rmtree(staged_models, ignore_errors=True)
     except Exception as exc:
+        if staged_models is not None:
+            shutil.rmtree(staged_models, ignore_errors=True)
         if preview_memory is not None:
             try:
                 preview_memory.close(); preview_memory.unlink()

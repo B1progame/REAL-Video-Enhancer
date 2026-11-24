@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.4.75 — 2026-11-24
+
+- Fix WSL model benchmarks by staging one selected model at a time into a temporary Windows cache while keeping Ubuntu running; remove staged weights after each model finishes.
+- Install and detect Torch-TensorRT as part of the TensorRT backend, require CUDA-capable hardware before offering TensorRT for benchmarks, and show why it is unavailable.
+- Show benchmark failure details in the results page instead of hiding them only in hover text.
+- Use the current user's authenticated GitHub CLI login automatically for private release checks and installer downloads, with secure saved tokens as an alternative.
+
+## 2.4.74 — 2026-11-24
+
+- Redesigned the community model library as a responsive, image-first native card grid with compact model metadata, purpose filters, and progressive loading.
+- Display OpenModelDB example thumbnails when available, with lightweight cached textures and a branded fallback for models without working previews.
+- Strip Markdown noise from model descriptions and keep full catalogue details on the model source page.
+
+## 2.4.73 — 2026-11-24
+
+- Split the storage footprint into Windows and WSL totals, with WSL status and a cached model-size reading while Ubuntu is stopped.
+- Keep WSL from starting for model status and storage checks when its distro is stopped; regular app startup no longer launches model setup automatically.
+- For real RVE video renders using WSL storage, copy only selected model weights into a temporary Windows cache, stop the selected WSL distro before inference, and remove staged files when rendering ends or is cancelled. Benchmarks and other operations retain their normal WSL behavior.
+
+## 2.4.72 — 2026-11-24
+
+- Make the source video drop zone clearly clickable and open the native Windows file picker; keep drag-and-drop available.
+- Add lightweight in-app toasts when renders, benchmarks, downloads, runtime/storage setup, updates, and cleanup start or finish, including errors and cancellations.
+
 ## 2.4.71 — 2026-11-24
 
 - Fix Start render silently dropping its request after saving render preferences.

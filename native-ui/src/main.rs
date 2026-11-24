@@ -3,7 +3,7 @@
 use eframe::egui::{self, Align, Color32, Layout, RichText, Stroke, Vec2};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet, VecDeque},
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -137,6 +137,20 @@ struct ApiBridge {
     receive: Receiver<ApiEvent>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToastKind {
+    Info,
+    Success,
+    Error,
+}
+
+struct AppToast {
+    title: String,
+    detail: String,
+    kind: ToastKind,
+    expires_at: Instant,
+}
+
 #[derive(Clone, Copy)]
 enum TrayCommand {
     Open,
@@ -165,6 +179,32 @@ fn active_task_from(
         Some("AnimeScripter setup")
     } else {
         None
+    }
+}
+
+fn task_started_title(task: &str) -> &'static str {
+    match task {
+        "A video render" => "Render started",
+        "A model benchmark" => "Benchmark started",
+        "A model download" => "Model download started",
+        "Runtime setup" => "Runtime setup started",
+        "Model storage setup" => "Model storage setup started",
+        "An app update" => "Update started",
+        "AnimeScripter setup" => "AnimeScripter setup started",
+        _ => "Work started",
+    }
+}
+
+fn task_started_detail(task: &str) -> &'static str {
+    match task {
+        "A video render" => "Your video is being processed.",
+        "A model benchmark" => "Measuring the selected models on this PC.",
+        "A model download" => "Downloading model files to your selected storage.",
+        "Runtime setup" => "Preparing the app-managed Python and inference runtime.",
+        "Model storage setup" => "Preparing the selected model storage location.",
+        "An app update" => "Downloading or installing the latest Windows release.",
+        "AnimeScripter setup" => "Installing and checking the optional AnimeScripter engine.",
+        _ => "The app is working on your request.",
     }
 }
 
@@ -340,6 +380,7 @@ fn start_api_worker(ctx: egui::Context) -> ApiBridge {
                     Ok(ApiCommand::Get(endpoint)) => {
                         let image = if endpoint.starts_with("/api/video/first_frame?")
                             || endpoint == "/api/render/preview_frame"
+                            || endpoint.starts_with("/api/library/thumbnail?id=")
                         {
                             Some(api_get_image(&client, &endpoint))
                         } else {
@@ -471,7 +512,7 @@ fn app_directory() -> PathBuf {
         .to_path_buf()
 }
 
-fn start_engine(model_storage: &str, first_setup: bool) -> Result<Option<Child>, String> {
+fn start_engine(model_storage: &str) -> Result<Option<Child>, String> {
     let probe_client = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_millis(450)))
         .build()
@@ -554,7 +595,7 @@ fn start_engine(model_storage: &str, first_setup: bool) -> Result<Option<Child>,
         .env("RVE_API_PORT", api_port.to_string())
         .env("RVE_MODEL_STORAGE", model_storage)
         .env("RVE_APP_VERSION", APP_VERSION)
-        .env("RVE_AUTO_SETUP_MODELS", if first_setup { "0" } else { "1" })
+        .env("RVE_AUTO_SETUP_MODELS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -753,6 +794,11 @@ struct NativeApp {
     library: Value,
     library_loading: bool,
     library_download_refresh_pending: bool,
+    library_images: HashMap<String, egui::TextureHandle>,
+    library_image_loading: HashSet<String>,
+    library_image_failed: HashSet<String>,
+    library_image_order: VecDeque<String>,
+    library_visible_count: usize,
     footprint: Value,
     footprint_loading: bool,
     python: Value,
@@ -771,6 +817,7 @@ struct NativeApp {
     anime_options: Value,
     model_search: String,
     library_search: String,
+    library_category: String,
     benchmark_search: String,
     benchmark_category: String,
     benchmark_resolutions: HashMap<String, bool>,
@@ -794,6 +841,8 @@ struct NativeApp {
     overwrite: bool,
     logs: Vec<String>,
     busy: bool,
+    toast: Option<AppToast>,
+    last_active_task: Option<&'static str>,
     launch_time: Instant,
 }
 
@@ -808,7 +857,7 @@ impl NativeApp {
         let reduce_motion = saved_reduce_motion();
         let model_storage = saved_model_storage();
         let first_setup = !model_storage_configured();
-        let (engine, engine_error) = match start_engine(&model_storage, first_setup) {
+        let (engine, engine_error) = match start_engine(&model_storage) {
             Ok(engine) => (engine, None),
             Err(error) => (None, Some(error)),
         };
@@ -860,6 +909,11 @@ impl NativeApp {
             library: Value::Null,
             library_loading: false,
             library_download_refresh_pending: false,
+            library_images: HashMap::new(),
+            library_image_loading: HashSet::new(),
+            library_image_failed: HashSet::new(),
+            library_image_order: VecDeque::new(),
+            library_visible_count: 12,
             footprint: Value::Null,
             footprint_loading: false,
             python: Value::Null,
@@ -878,6 +932,7 @@ impl NativeApp {
             anime_options: json!({"methods": {"upscale": "shufflecugan", "interpolate": "rife4.6", "restore": "anime1080fixer"}}),
             model_search: String::new(),
             library_search: String::new(),
+            library_category: "all".to_owned(),
             benchmark_search: String::new(),
             benchmark_category: "all".to_owned(),
             benchmark_resolutions: ["720p", "1080p", "4K"]
@@ -909,6 +964,8 @@ impl NativeApp {
             overwrite: false,
             logs: Vec::new(),
             busy: false,
+            toast: None,
+            last_active_task: None,
             launch_time: Instant::now(),
         }
     }
@@ -1045,6 +1102,52 @@ impl NativeApp {
         if self.busy {
             return;
         }
+        let task = match endpoint {
+            "/api/render/start" => Some((
+                "A video render",
+                "Render started",
+                "Preparing your video for processing.",
+            )),
+            "/api/benchmarks/start" => Some((
+                "A model benchmark",
+                "Benchmark started",
+                "Measuring the selected models on this PC.",
+            )),
+            "/api/models/download" | "/api/library/download" => Some((
+                "A model download",
+                "Model download started",
+                "Downloading model files to your selected storage.",
+            )),
+            "/api/startup/install" => Some((
+                "Runtime setup",
+                "Runtime setup started",
+                "Preparing the app-managed Python and inference runtime.",
+            )),
+            "/api/animescripter/install" => Some((
+                "AnimeScripter setup",
+                "AnimeScripter setup started",
+                "Installing and checking the optional AnimeScripter engine.",
+            )),
+            "/api/storage/configure" => Some((
+                "Model storage setup",
+                "Model storage setup started",
+                "Preparing your chosen Windows or WSL model library.",
+            )),
+            "/api/app/update/download" => Some((
+                "An app update",
+                "Update download started",
+                "Downloading the latest Windows installer.",
+            )),
+            "/api/data/delete" => Some((
+                "Managed files cleanup",
+                "Cleanup started",
+                "Removing the selected app-managed files.",
+            )),
+            _ => None,
+        };
+        if let Some((_active_task, title, detail)) = task {
+            self.show_toast(title, detail, ToastKind::Info);
+        }
         self.busy = true;
         if self
             .api
@@ -1054,6 +1157,165 @@ impl NativeApp {
         {
             self.busy = false;
         }
+    }
+
+    fn show_toast(&mut self, title: impl Into<String>, detail: impl Into<String>, kind: ToastKind) {
+        let title = title.into();
+        let now = Instant::now();
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.title == title && toast.expires_at > now)
+        {
+            return;
+        }
+        self.toast = Some(AppToast {
+            title,
+            detail: detail.into(),
+            kind,
+            expires_at: now + Duration::from_secs(5),
+        });
+    }
+
+    fn check_task_toast(&mut self) {
+        let current = self
+            .active_task()
+            .filter(|task| *task != "An engine operation" && *task != "Local engine startup");
+        match (self.last_active_task, current) {
+            (None, Some(task)) => {
+                self.last_active_task = Some(task);
+                self.show_toast(
+                    task_started_title(task),
+                    task_started_detail(task),
+                    ToastKind::Info,
+                );
+            }
+            (Some(previous), None) => {
+                self.last_active_task = None;
+                let (title, detail, kind) = self.task_finished_toast(previous);
+                self.show_toast(title, detail, kind);
+            }
+            (_, Some(task)) => self.last_active_task = Some(task),
+            (None, None) => {}
+        }
+    }
+
+    fn task_finished_toast(&self, task: &str) -> (String, String, ToastKind) {
+        let (status, detail, error) = match task {
+            "A video render" => (
+                self.render["status"].as_str().unwrap_or_default(),
+                self.render["detail"]
+                    .as_str()
+                    .or_else(|| self.render["message"].as_str()),
+                self.render["error"].as_str(),
+            ),
+            "A model benchmark" => (
+                self.benchmarks["status"].as_str().unwrap_or_default(),
+                self.benchmarks["detail"].as_str(),
+                self.benchmarks["error"].as_str(),
+            ),
+            "A model download" => (
+                self.download["status"].as_str().unwrap_or_default(),
+                self.download["detail"].as_str(),
+                self.download["error"].as_str(),
+            ),
+            "Model storage setup" => (
+                self.storage_status["status"].as_str().unwrap_or_default(),
+                self.storage_status["detail"].as_str(),
+                self.storage_status["error"].as_str(),
+            ),
+            "Runtime setup" | "AnimeScripter setup" => (
+                if task == "AnimeScripter setup" {
+                    self.anime["status"].as_str().unwrap_or_default()
+                } else {
+                    self.install["status"].as_str().unwrap_or_default()
+                },
+                self.install["detail"]
+                    .as_str()
+                    .or_else(|| self.anime["detail"].as_str()),
+                self.install["error"]
+                    .as_str()
+                    .or_else(|| self.anime["error"].as_str()),
+            ),
+            "An app update" => (
+                self.update["status"].as_str().unwrap_or_default(),
+                self.update["detail"].as_str(),
+                self.update["error"].as_str(),
+            ),
+            _ => ("", None, None),
+        };
+        if matches!(status, "error" | "failed") || error.is_some_and(|value| !value.is_empty()) {
+            (
+                "Task needs attention".to_owned(),
+                error.or(detail).unwrap_or("The task failed.").to_owned(),
+                ToastKind::Error,
+            )
+        } else if matches!(status, "cancelled" | "canceled" | "stopped") {
+            (
+                "Task cancelled".to_owned(),
+                detail.unwrap_or("The operation was stopped.").to_owned(),
+                ToastKind::Info,
+            )
+        } else {
+            (
+                "Task complete".to_owned(),
+                detail
+                    .unwrap_or("The operation finished successfully.")
+                    .to_owned(),
+                ToastKind::Success,
+            )
+        }
+    }
+
+    fn draw_toast(&mut self, ctx: &egui::Context) {
+        let Some(toast) = self.toast.as_ref() else {
+            return;
+        };
+        if Instant::now() >= toast.expires_at {
+            self.toast = None;
+            return;
+        }
+        let palette = theme::palette(self.appearance == "light", self.accent);
+        let accent = match toast.kind {
+            ToastKind::Info => palette.accent,
+            ToastKind::Success => palette.success,
+            ToastKind::Error => palette.error,
+        };
+        egui::Area::new(egui::Id::unique("rve-operation-toast"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-22.0, 54.0))
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(palette.elevated)
+                    .stroke(Stroke::new(1.0, palette.border))
+                    .corner_radius(12.0)
+                    .inner_margin(egui::Margin::symmetric(15, 12))
+                    .shadow(egui::Shadow {
+                        offset: [0, 5],
+                        blur: 18,
+                        spread: 0,
+                        color: Color32::from_black_alpha(90),
+                    })
+                    .show(ui, |ui| {
+                        ui.set_max_width(390.0);
+                        ui.horizontal_top(|ui| {
+                            ui.add_space(2.0);
+                            let (dot_rect, _) =
+                                ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
+                            ui.painter().circle_filled(dot_rect.center(), 4.0, accent);
+                            ui.add_space(4.0);
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(&toast.title).strong().color(palette.text));
+                                ui.label(
+                                    RichText::new(&toast.detail)
+                                        .size(12.0)
+                                        .color(palette.secondary),
+                                );
+                            });
+                        });
+                    });
+            });
+        ctx.request_repaint_after(Duration::from_millis(150));
     }
 
     fn start_recommended_runtime_setup(&mut self) {
@@ -1199,6 +1461,44 @@ impl NativeApp {
     fn consume_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.api.receive.try_recv() {
             if let Some(image) = event.image {
+                if let Some(model_id) = event.endpoint.strip_prefix("/api/library/thumbnail?id=") {
+                    let model_id = model_id.to_owned();
+                    self.library_image_loading.remove(&model_id);
+                    match image {
+                        Ok(bytes) => match image::load_from_memory(&bytes) {
+                            Ok(decoded) => {
+                                let thumbnail = decoded.thumbnail(384, 256);
+                                let rgba = thumbnail.to_rgba8();
+                                let size = [rgba.width() as usize, rgba.height() as usize];
+                                let color_image =
+                                    egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                                if self.library_images.len() >= 48
+                                    && let Some(expired) = self.library_image_order.pop_front()
+                                {
+                                    self.library_images.remove(&expired);
+                                    self.library_image_failed.insert(expired);
+                                }
+                                self.library_images.insert(
+                                    model_id.clone(),
+                                    ctx.load_texture(
+                                        format!("rve-model-preview-{model_id}"),
+                                        color_image,
+                                        egui::TextureOptions::LINEAR,
+                                    ),
+                                );
+                                self.library_image_order.push_back(model_id.clone());
+                            }
+                            Err(_) => {
+                                self.library_image_failed.insert(model_id);
+                            }
+                        },
+                        Err(_) => {
+                            self.library_image_failed.insert(model_id);
+                        }
+                    }
+                    ctx.request_repaint();
+                    continue;
+                }
                 if event.endpoint == "/api/render/preview_frame" {
                     if let Ok(bytes) = image
                         && let Ok(decoded) = image::load_from_memory(&bytes)
@@ -1335,6 +1635,23 @@ impl NativeApp {
                         self.managed_data_failed = value["ok"].as_bool() == Some(false);
                         self.managed_data_pending = false;
                         self.logs.push(detail);
+                        let toast_detail = self
+                            .managed_data_message
+                            .clone()
+                            .unwrap_or_else(|| "Managed app data cleanup finished.".to_owned());
+                        self.show_toast(
+                            if self.managed_data_failed {
+                                "Cleanup failed"
+                            } else {
+                                "Cleanup complete"
+                            },
+                            toast_detail,
+                            if self.managed_data_failed {
+                                ToastKind::Error
+                            } else {
+                                ToastKind::Success
+                            },
+                        );
                         self.get(&format!("/api/models?backend={}", self.backend));
                         self.get("/api/python/info");
                         self.get("/api/storage/status");
@@ -1356,11 +1673,16 @@ impl NativeApp {
                             json!(value["configured"].as_bool().unwrap_or(false));
                     }
                     "/api/dialog/select_input" => {
-                        self.input_path = value["path"].as_str().unwrap_or_default().to_owned();
-                        self.input_info = value["video_info"].clone();
-                        self.request_source_preview();
-                        if let Some(parent) = Path::new(&self.input_path).parent() {
-                            self.output_folder = parent.to_string_lossy().into_owned();
+                        let selected = value["path"].as_str().unwrap_or_default().trim();
+                        // Cancelling the picker leaves the current source and its
+                        // preview intact instead of silently clearing the project.
+                        if !selected.is_empty() {
+                            self.input_path = selected.to_owned();
+                            self.input_info = value["video_info"].clone();
+                            self.request_source_preview();
+                            if let Some(parent) = Path::new(&self.input_path).parent() {
+                                self.output_folder = parent.to_string_lossy().into_owned();
+                            }
                         }
                     }
                     "/api/dialog/select_output" => {
@@ -1376,6 +1698,13 @@ impl NativeApp {
                     }
                 },
                 Err(error) => {
+                    if event.is_post || event.endpoint == "/api/dialog/select_input" {
+                        self.show_toast(
+                            "Could not complete that action",
+                            error.clone(),
+                            ToastKind::Error,
+                        );
+                    }
                     if event.endpoint == "/api/render/start" {
                         self.render["status"] = json!("error");
                         self.render["error"] = json!(error);
@@ -1481,7 +1810,7 @@ impl NativeApp {
         let title = if files_hovered {
             "Release to add your video"
         } else if self.input_path.is_empty() {
-            "Drop a video here"
+            "Choose a video"
         } else {
             "Replace source video"
         };
@@ -1498,10 +1827,13 @@ impl NativeApp {
         ui.painter().text(
             rect.center() + Vec2::new(0.0, 28.0),
             egui::Align2::CENTER_CENTER,
-            "Choose a file or drag it into this window",
+            "Click to browse, or drag a video into this window",
             egui::FontId::proportional(12.0),
             palette.secondary,
         );
+        let response = response
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Click to open File Explorer and choose a video");
         if response.clicked() {
             self.get("/api/dialog/select_input");
         }
@@ -3492,75 +3824,92 @@ impl NativeApp {
             self.library_loading = true;
             self.get("/api/library/models");
         }
-        Self::card(ui, "Discover video models", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new("Search 600+ community upscaling models in OpenModelDB.")
-                        .strong(),
-                );
-                ui.hyperlink_to("Open OpenModelDB ↗", "https://openmodeldb.info");
-                ui.hyperlink_to(
-                    "Hugging Face models ↗",
-                    "https://huggingface.co/models?pipeline_tag=image-to-image&sort=downloads",
-                );
-                ui.hyperlink_to(
-                    "OpenModelDB model hub ↗",
-                    "https://github.com/OpenModelDB/model-hub",
-                );
+        let mut search_requested = false;
+        let mut refresh_requested = false;
+        Self::card(ui, "Explore the model community", |ui| {
+            ui.horizontal(|ui| {
+                ui.add(icons::styled("sparkles", palette.accent, 24.0));
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("Find the right look for your footage").strong().size(19.0));
+                    ui.label(RichText::new("Browse community models, inspect examples, and compare their formats before installing.").size(12.0).color(palette.secondary));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.hyperlink_to("OpenModelDB ↗", "https://openmodeldb.info");
+                });
             });
-            ui.add_space(theme::space::SM);
-            ui.label(RichText::new("Search the full catalogue by name, author, architecture, tag, scale, or license. Model weights have individual licenses; review each model before downloading or sharing it.").size(12.0).color(palette.secondary));
+            ui.add_space(theme::space::MD);
             ui.horizontal_wrapped(|ui| {
-                ui.add(icons::styled("search", palette.muted, 17.0));
+                ui.add(icons::styled("search", palette.muted, 18.0));
                 let response = ui.add_sized(
-                    Vec2::new(ui.available_width().min(420.0), 38.0),
+                    Vec2::new(ui.available_width().min(520.0), 40.0),
                     egui::TextEdit::singleline(&mut self.library_search)
-                        .hint_text("Search model library…"),
+                        .hint_text("Try ‘anime’, ‘realistic’, ‘denoise’ or a model name"),
                 );
                 let submit =
                     response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                egui::ComboBox::from_id_salt("library-category")
+                    .selected_text(match self.library_category.as_str() {
+                        "anime" => "Anime",
+                        "realistic" => "Realistic",
+                        "restoration" => "Restoration",
+                        "denoise" => "Denoise",
+                        "compression" => "Compression",
+                        _ => "All purposes",
+                    })
+                    .show_ui(ui, |ui| {
+                        for (key, label) in [
+                            ("all", "All purposes"),
+                            ("anime", "Anime"),
+                            ("realistic", "Realistic"),
+                            ("restoration", "Restoration"),
+                            ("denoise", "Denoise"),
+                            ("compression", "Compression"),
+                        ] {
+                            ui.selectable_value(&mut self.library_category, key.to_owned(), label);
+                        }
+                    });
                 if ui
-                    .add_enabled(!self.library_loading, egui::Button::new("Search library"))
+                    .add_enabled(!self.library_loading, egui::Button::new("Search models"))
                     .clicked()
                     || submit
                 {
-                    self.library_loading = true;
-                    self.get(&format!(
-                        "/api/library/models?q={}",
-                        encoded_query_value(&self.library_search)
-                    ));
+                    search_requested = true;
                 }
                 if ui
-                    .add_enabled(!self.library_loading, egui::Button::new("Refresh catalog"))
+                    .add_enabled(!self.library_loading, egui::Button::new("Refresh"))
                     .clicked()
                 {
-                    self.library_loading = true;
-                    self.get(&format!(
-                        "/api/library/models?q={}&refresh=1",
-                        encoded_query_value(&self.library_search)
-                    ));
+                    refresh_requested = true;
                 }
                 if self.library_loading {
                     ui.spinner();
                 }
             });
+            ui.add_space(theme::space::SM);
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new(format!(
-                        "{} models in source catalog",
+                        "{} community models",
                         self.library["count"].as_u64().unwrap_or(0)
                     ))
-                    .color(palette.secondary),
+                    .strong()
+                    .color(palette.text),
                 );
                 ui.label(
                     RichText::new(format!(
-                        "Showing {} matches",
+                        "{} matching this search",
                         self.library["results"]
                             .as_array()
                             .map(Vec::len)
                             .unwrap_or(0)
                     ))
+                    .size(12.0)
                     .color(palette.secondary),
+                );
+                ui.label(
+                    RichText::new("Preview images · architecture · scale · license")
+                        .size(11.0)
+                        .color(palette.muted),
                 );
                 if !self.library["error"]
                     .as_str()
@@ -3574,56 +3923,70 @@ impl NativeApp {
                 }
             });
         });
+        if search_requested || refresh_requested {
+            self.library_loading = true;
+            self.library_visible_count = 12;
+            self.library_image_failed.clear();
+            let endpoint = format!(
+                "/api/library/models?q={}&category={}{}",
+                encoded_query_value(&self.library_search),
+                encoded_query_value(&self.library_category),
+                if refresh_requested { "&refresh=1" } else { "" },
+            );
+            self.get(&endpoint);
+        }
+
         ui.add_space(theme::space::MD);
-        Self::card(ui, "Community model results", |ui| {
-            egui::ScrollArea::vertical().max_height(640.0).show(ui, |ui| {
-                let Some(results) = self.library["results"].as_array().cloned() else {
-                    ui.label(if self.library_loading { "Loading OpenModelDB…" } else { "The catalogue will appear when the local engine connects." });
-                    return;
-                };
-                if results.is_empty() {
-                    ui.label("No models match that search. Try another name, architecture, or tag.");
-                }
-                for model in results {
-                    let name = model["name"].as_str().unwrap_or("Unnamed model");
-                    let url = model["url"].as_str().unwrap_or("https://openmodeldb.info");
-                    let install_resource = model["resources"].as_array().and_then(|items|
-                        items.iter().find(|resource| resource["installable"].as_bool() == Some(true)));
-                    egui::Frame::new().fill(palette.surface).stroke(Stroke::new(1.0, palette.border))
-                        .corner_radius(10.0).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.vertical(|ui| {
-                                    ui.label(RichText::new(name).strong().size(15.0));
-                                    ui.label(RichText::new(format!("{} · {} · {}× · {}", model["author"].as_str().unwrap_or("Community"), model["architecture"].as_str().unwrap_or("Unknown"), model["scale"].as_i64().unwrap_or(0), model["license"].as_str().unwrap_or("License not listed"))).size(11.0).color(palette.secondary));
-                                });
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if let Some(resource) = install_resource {
-                                        if ui.add_enabled(!self.download["active"].as_bool().unwrap_or(false), egui::Button::new("Install compatible .pth")).clicked() {
-                                            self.post("/api/library/download", json!({"id": model["id"]}));
-                                        }
-                                        if let Some(bytes) = resource["size"].as_u64() {
-                                            ui.label(RichText::new(format_bytes(bytes)).size(11.0).color(palette.muted));
-                                        }
-                                    }
-                                    ui.hyperlink_to("Details ↗", url);
-                                });
-                            });
-                            if let Some(description) = model["description"].as_str().filter(|text| !text.is_empty()) {
-                                ui.add_space(theme::space::XS);
-                                ui.label(RichText::new(description).size(12.0).color(palette.secondary));
-                            }
-                            if let Some(tags) = model["tags"].as_array() {
-                                ui.horizontal_wrapped(|ui| for tag in tags.iter().take(7).filter_map(Value::as_str) {
-                                    ui.label(RichText::new(tag).size(10.0).color(palette.muted));
-                                });
-                            }
-                            if install_resource.is_none() {
-                                ui.label(RichText::new("Browse at source · this format or architecture is not eligible for automatic install.").size(11.0).color(palette.muted));
-                            }
-                        });
-                    ui.add_space(theme::space::XS);
-                }
+        let total_matches = self.library["results"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0);
+        let shown_count = total_matches.min(self.library_visible_count);
+        let results = self.library["results"]
+            .as_array()
+            .map(|items| items.iter().take(shown_count).cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        Self::card(ui, "Community models", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!("Showing {shown_count} of {total_matches}")).strong(),
+                );
+                ui.label(
+                    RichText::new("Select a preview to inspect the model examples on OpenModelDB.")
+                        .size(11.0)
+                        .color(palette.secondary),
+                );
             });
+            ui.add_space(theme::space::SM);
+            if results.is_empty() {
+                ui.label(if self.library_loading {
+                    "Loading model catalogue…"
+                } else {
+                    "No models match that search. Try another name, purpose, or architecture."
+                });
+            } else {
+                egui::ScrollArea::vertical()
+                    .max_height(640.0)
+                    .show(ui, |ui| {
+                        let columns = if ui.available_width() >= 940.0 { 2 } else { 1 };
+                        for row in results.chunks(columns) {
+                            ui.columns(columns, |columns_ui| {
+                                for (column, model) in row.iter().enumerate() {
+                                    self.community_model_card(
+                                        &mut columns_ui[column],
+                                        model,
+                                        palette,
+                                    );
+                                }
+                            });
+                            ui.add_space(theme::space::SM);
+                        }
+                        if shown_count < total_matches && ui.button("Load more models").clicked() {
+                            self.library_visible_count =
+                                (self.library_visible_count + 12).min(total_matches);
+                        }
+                    });
+            }
         });
         if self.download["active"].as_bool() == Some(true) {
             ui.add_space(theme::space::SM);
@@ -3639,6 +4002,184 @@ impl NativeApp {
                 }
             });
         }
+    }
+
+    fn community_model_card(&mut self, ui: &mut egui::Ui, model: &Value, palette: theme::Palette) {
+        let model_id = model["id"].as_str().unwrap_or_default();
+        let name = model["name"].as_str().unwrap_or("Unnamed model");
+        let url = model["url"].as_str().unwrap_or("https://openmodeldb.info");
+        let architecture = model["architecture"]
+            .as_str()
+            .unwrap_or("Unknown architecture");
+        let scale = model["scale"].as_i64().unwrap_or(0);
+        let license = model["license"].as_str().unwrap_or("License not listed");
+        let preview = model["images"].as_array().and_then(|images| images.first());
+        let install_resource = model["resources"].as_array().and_then(|items| {
+            items
+                .iter()
+                .find(|resource| resource["installable"].as_bool() == Some(true))
+        });
+        if preview.is_some()
+            && !model_id.is_empty()
+            && !self.library_images.contains_key(model_id)
+            && !self.library_image_loading.contains(model_id)
+            && !self.library_image_failed.contains(model_id)
+        {
+            self.library_image_loading.insert(model_id.to_owned());
+            self.get(&format!(
+                "/api/library/thumbnail?id={}",
+                encoded_query_value(model_id)
+            ));
+        }
+
+        egui::Frame::new()
+            .fill(palette.surface)
+            .stroke(Stroke::new(1.0, palette.border))
+            .corner_radius(14.0)
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    let preview_width = (ui.available_width() * 0.40).clamp(150.0, 220.0);
+                    let preview_size = Vec2::new(preview_width, preview_width * 0.66);
+                    egui::Frame::new()
+                        .fill(palette.elevated)
+                        .corner_radius(10.0)
+                        .stroke(Stroke::new(1.0, palette.border))
+                        .show(ui, |ui| {
+                            if let Some(texture) = self.library_images.get(model_id) {
+                                ui.add(
+                                    egui::Image::new((texture.id(), preview_size))
+                                        .fit_to_exact_size(preview_size)
+                                        .corner_radius(9.0),
+                                );
+                            } else {
+                                let (rect, _) =
+                                    ui.allocate_exact_size(preview_size, egui::Sense::hover());
+                                let painter = ui.painter();
+                                painter.rect_filled(rect, 9.0, palette.elevated);
+                                painter.circle_filled(
+                                    rect.right_top() + Vec2::new(-34.0, 34.0),
+                                    16.0,
+                                    palette.accent.gamma_multiply(0.75),
+                                );
+                                painter.add(egui::Shape::convex_polygon(
+                                    vec![
+                                        rect.left_bottom() + Vec2::new(0.0, -7.0),
+                                        rect.center() + Vec2::new(0.0, 8.0),
+                                        rect.right_bottom() + Vec2::new(0.0, -7.0),
+                                    ],
+                                    palette.accent.gamma_multiply(0.28),
+                                    Stroke::NONE,
+                                ));
+                                painter.text(
+                                    rect.left_top() + Vec2::new(12.0, 12.0),
+                                    egui::Align2::LEFT_TOP,
+                                    if scale > 0 {
+                                        format!("{scale}×")
+                                    } else {
+                                        "MODEL".to_owned()
+                                    },
+                                    egui::FontId::proportional(28.0),
+                                    palette.text,
+                                );
+                                painter.text(
+                                    rect.left_bottom() + Vec2::new(12.0, -12.0),
+                                    egui::Align2::LEFT_BOTTOM,
+                                    architecture.to_uppercase(),
+                                    egui::FontId::proportional(10.0),
+                                    palette.secondary,
+                                );
+                                if self.library_image_loading.contains(model_id) {
+                                    painter.circle_stroke(
+                                        rect.right_bottom() - Vec2::splat(17.0),
+                                        7.0,
+                                        Stroke::new(1.5, palette.accent),
+                                    );
+                                }
+                            }
+                        });
+                    ui.add_space(theme::space::SM);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(name).strong().size(15.0).color(palette.text));
+                        ui.label(
+                            RichText::new(format!(
+                                "by {}",
+                                model["author"].as_str().unwrap_or("Community contributor")
+                            ))
+                            .size(11.0)
+                            .color(palette.secondary),
+                        );
+                        ui.add_space(theme::space::XS);
+                        ui.horizontal_wrapped(|ui| {
+                            for label in [
+                                architecture.to_owned(),
+                                if scale > 0 {
+                                    format!("{scale}×")
+                                } else {
+                                    "General".to_owned()
+                                },
+                                license.to_owned(),
+                            ] {
+                                egui::Frame::new()
+                                    .fill(palette.elevated)
+                                    .corner_radius(6.0)
+                                    .inner_margin(egui::Margin::symmetric(7, 3))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new(label)
+                                                .size(10.0)
+                                                .color(palette.secondary),
+                                        );
+                                    });
+                            }
+                        });
+                        if let Some(description) = model["description"]
+                            .as_str()
+                            .filter(|text| !text.is_empty())
+                        {
+                            let preview_text = description.chars().take(190).collect::<String>();
+                            ui.add_space(theme::space::XS);
+                            ui.label(
+                                RichText::new(if description.chars().count() > 190 {
+                                    format!("{preview_text}…")
+                                } else {
+                                    preview_text
+                                })
+                                .size(11.0)
+                                .color(palette.secondary),
+                            );
+                        }
+                        if let Some(tags) = model["tags"].as_array() {
+                            ui.horizontal_wrapped(|ui| {
+                                for tag in tags.iter().take(4).filter_map(Value::as_str) {
+                                    ui.label(RichText::new(tag).size(10.0).color(palette.muted));
+                                }
+                            });
+                        }
+                        ui.add_space(theme::space::XS);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.hyperlink_to("View examples ↗", url);
+                            if let Some(resource) = install_resource {
+                                let bytes = resource["size"].as_u64().map(format_bytes);
+                                let install_label = bytes.map_or_else(
+                                    || "Install .pth".to_owned(),
+                                    |size| format!("Install · {size}"),
+                                );
+                                if ui
+                                    .add_enabled(
+                                        !self.download["active"].as_bool().unwrap_or(false),
+                                        egui::Button::new(install_label),
+                                    )
+                                    .clicked()
+                                {
+                                    self.post("/api/library/download", json!({"id": model_id}));
+                                }
+                            }
+                        });
+                    });
+                });
+            });
+        ui.add_space(theme::space::XS);
     }
 
     fn benchmarks_page(&mut self, ui: &mut egui::Ui) {
@@ -3789,6 +4330,17 @@ impl NativeApp {
                         .size(11.0)
                         .color(palette.muted),
                 );
+                if self.model_storage == "wsl" && ui.button("Scan Ubuntu library").clicked() {
+                    self.show_toast(
+                        "Scanning WSL models",
+                        "Ubuntu will stay available for the benchmark and other WSL tasks.",
+                        ToastKind::Info,
+                    );
+                    self.get(&format!(
+                        "/api/models?backend={}&refresh_wsl=1",
+                        self.backend
+                    ));
+                }
                 let gpu_id = if self.backend == "ncnn" {
                     self.ncnn_gpu_id
                 } else {
@@ -3852,6 +4404,13 @@ impl NativeApp {
                 }
                 if !self.connected {
                     ui.label(RichText::new("Waiting for the local engine.").color(palette.warning));
+                } else if !backend_is_installed(&available_backends, &self.backend) {
+                    let detail = if self.backend == "tensorrt" {
+                        "TensorRT needs a CUDA-capable NVIDIA GPU and the complete TensorRT runtime. Open Runtime to install it; otherwise choose PyTorch or NCNN."
+                    } else {
+                        "This backend is not installed. Open Runtime to install it or choose an available backend."
+                    };
+                    ui.label(RichText::new(detail).color(palette.warning));
                 } else if installed_count == 0 {
                     ui.label(
                         RichText::new("Install models from Downloads before benchmarking.")
@@ -3947,6 +4506,58 @@ impl NativeApp {
                 ui.add_sized(Vec2::new(ui.available_width().min(280.0), 36.0),
                     egui::TextEdit::singleline(&mut self.benchmark_search).hint_text("Filter model names…"));
             });
+            let failures = self.benchmarks["results"]
+                .as_array()
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter(|item| {
+                            item["backend"].as_str() == Some(self.backend.as_str())
+                                && item["status"] == "error"
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !failures.is_empty() {
+                ui.add_space(theme::space::SM);
+                egui::CollapsingHeader::new(format!(
+                    "Benchmark errors · {} details",
+                    failures.len()
+                ))
+                .id_salt("benchmark-error-details")
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(190.0)
+                        .show(ui, |ui| {
+                            for result in failures.iter().rev().take(40) {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} · {} · {}",
+                                        result["category"].as_str().unwrap_or("model"),
+                                        result["model"].as_str().unwrap_or("Unknown model"),
+                                        result["resolution"].as_str().unwrap_or("resolution")
+                                    ))
+                                    .strong(),
+                                );
+                                ui.label(
+                                    RichText::new(result["error"].as_str().unwrap_or(
+                                        "The benchmark failed without an error message.",
+                                    ))
+                                    .size(11.0)
+                                    .color(palette.error),
+                                );
+                                ui.add_space(theme::space::XS);
+                            }
+                            if failures.len() > 40 {
+                                ui.label(
+                                    RichText::new("Showing the latest 40 errors.")
+                                        .size(11.0)
+                                        .color(palette.muted),
+                                );
+                            }
+                        });
+                });
+            }
             ui.add_space(theme::space::SM);
             egui::ScrollArea::vertical().max_height(650.0).show(ui, |ui| {
                 for (category, title) in categories {
@@ -4700,7 +5311,7 @@ impl NativeApp {
             );
             ui.add_space(theme::space::SM);
             ui.label(RichText::new("Private repository access · optional").strong());
-            ui.label(RichText::new("A public release works without sign-in. For this private feed, save a read-only GitHub token here; GitHub CLI is not required. The token is encrypted for this Windows account.").size(11.0).color(secondary_text_color(!ui.visuals().dark_mode)));
+            ui.label(RichText::new("The app uses a saved token or your existing GitHub CLI login for private releases. Public releases need no sign-in. Saved tokens are encrypted for this Windows account.").size(11.0).color(secondary_text_color(!ui.visuals().dark_mode)));
             ui.horizontal_wrapped(|ui| {
                 ui.add_sized(
                     Vec2::new(ui.available_width().min(360.0), 36.0),
@@ -4855,12 +5466,12 @@ impl NativeApp {
             self.get("/api/storage/footprint");
         }
         Self::card(ui, "App storage footprint", |ui| {
-            ui.label(RichText::new("Measured from installed files, app-managed runtimes, package cache, and the selected model store.").size(12.0).color(palette.secondary));
+            ui.label(RichText::new("Windows runs the desktop app and inference runtime. The model library stays in WSL and selected weights are copied to Windows only for a video render.").size(12.0).color(palette.secondary));
             ui.add_space(theme::space::SM);
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new(format!(
-                        "Installed total · {}",
+                        "Measured managed storage · {}",
                         format_bytes(self.footprint["total_bytes"].as_u64().unwrap_or(0))
                     ))
                     .strong()
@@ -4884,10 +5495,89 @@ impl NativeApp {
                 }
             });
             ui.add_space(theme::space::XS);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "WINDOWS · {}",
+                        format_bytes(self.footprint["windows_bytes"].as_u64().unwrap_or(0))
+                    ))
+                    .strong()
+                    .color(palette.text),
+                );
+                ui.label(
+                    RichText::new(if self.footprint["free_bytes"].as_u64().is_some() {
+                        format!(
+                            "{} free",
+                            format_bytes(self.footprint["free_bytes"].as_u64().unwrap_or(0))
+                        )
+                    } else {
+                        "Windows free space unavailable".to_owned()
+                    })
+                    .size(11.0)
+                    .color(palette.secondary),
+                );
+            });
             if let Some(items) = self.footprint["components"].as_array() {
                 for component in items {
+                    if component["storage"].as_str().unwrap_or("windows") != "windows" {
+                        continue;
+                    }
                     ui.horizontal_wrapped(|ui| {
                         ui.label(component["label"].as_str().unwrap_or("Managed data"));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format_bytes(
+                                    component["bytes"].as_u64().unwrap_or(0),
+                                ))
+                                .strong()
+                                .color(palette.text),
+                            );
+                        });
+                    });
+                }
+            }
+            ui.add_space(theme::space::SM);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "WSL UBUNTU · {}",
+                        if self.model_storage != "wsl" {
+                            "not selected".to_owned()
+                        } else if self.footprint["wsl_size_known"].as_bool().unwrap_or(false) {
+                            format_bytes(self.footprint["wsl_bytes"].as_u64().unwrap_or(0))
+                        } else {
+                            "model size not measured".to_owned()
+                        }
+                    ))
+                    .strong()
+                    .color(palette.text),
+                );
+                ui.label(
+                    RichText::new(if self.model_storage != "wsl" {
+                        "Not selected"
+                    } else if self.footprint["wsl_running"].as_bool().unwrap_or(false) {
+                        "Running"
+                    } else {
+                        "Ubuntu stopped"
+                    })
+                    .size(11.0)
+                    .color(palette.secondary),
+                );
+                if let Some(free) = self.footprint["wsl_free_bytes"].as_u64() {
+                    ui.label(
+                        RichText::new(format!("{} free", format_bytes(free)))
+                            .size(11.0)
+                            .color(palette.secondary),
+                    );
+                }
+            });
+            if let Some(items) = self.footprint["components"].as_array() {
+                for component in items {
+                    if component["storage"].as_str().unwrap_or_default() != "wsl" {
+                        continue;
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(component["label"].as_str().unwrap_or("Managed WSL data"));
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             ui.label(
                                 RichText::new(format_bytes(
@@ -4910,7 +5600,15 @@ impl NativeApp {
                     self.footprint["error"].as_str().unwrap_or_default(),
                 );
             }
-            ui.label(RichText::new("AnimeScripter model files cached outside its install folder may not be included. WSL measurements require the selected Ubuntu distribution to start.").size(11.0).color(palette.muted));
+            ui.label(RichText::new(if self.model_storage != "wsl" {
+                "Model storage is set to Windows. The managed model library stays on the Windows drive."
+            } else if !self.footprint["wsl_size_known"].as_bool().unwrap_or(false) {
+                "Ubuntu is stopped and its model size has not been measured yet. Storage checks do not start WSL. A video render stages only selected models temporarily, stops Ubuntu before inference, and removes the copy afterward."
+            } else if self.footprint["wsl_measurement_cached"].as_bool().unwrap_or(false) {
+                "Ubuntu is stopped; its model size is the last saved measurement. A render stages only selected models temporarily, then removes them when finished."
+            } else {
+                "Starting or downloading models can use WSL. Real video renders stage only selected weights in Windows, stop Ubuntu before inference, and remove the temporary copy when finished. Benchmarks keep their normal WSL behavior."
+            }).size(11.0).color(palette.muted));
         });
     }
 
@@ -5143,6 +5841,7 @@ impl eframe::App for NativeApp {
             self.close_confirmation = true;
         }
         self.consume_events(&ctx);
+        self.check_task_toast();
         if self.update["status"] == "downloaded" && !self.update_install_started {
             self.install_downloaded_update(&ctx);
         }
@@ -5232,7 +5931,7 @@ impl eframe::App for NativeApp {
                 }
                 for (index, (label, icon)) in PAGES.iter().enumerate() {
                     let group = match index {
-                        2 => Some("LIBRARY"),
+                        2 => Some("DISCOVER"),
                         5 => Some("ENGINE"),
                         7 => Some("PREFERENCES"),
                         _ => None,
@@ -5512,6 +6211,7 @@ impl eframe::App for NativeApp {
         }
 
         self.draw_startup_animation(&ctx);
+        self.draw_toast(&ctx);
     }
 }
 
