@@ -89,7 +89,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.75")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.76")
 update_lock = threading.RLock()
 github_token_lock = threading.RLock()
 github_token_value = None
@@ -2228,13 +2228,13 @@ def backend_packages(backend, payload=None):
     backend = str(backend or "pytorch").lower()
     payload = payload or {}
     if backend in ("torch", "pytorch", "tensorrt"):
-        version = str(payload.get("torch_version") or "2.7.0")
+        version = "2.8.0" if backend == "tensorrt" else str(payload.get("torch_version") or "2.7.0")
         if version == "2.6": version = "2.6.0"
         if version not in ("2.6.0", "2.7.0", "2.8.0", "2.9.0"):
             raise ValueError("Unsupported PyTorch version. Choose 2.6.0, 2.7.0, 2.8.0, or 2.9.0.")
-        flavor = str(payload.get("pytorch_backend") or "cuda").lower().replace("+", "")
+        flavor = "cu128" if backend == "tensorrt" else str(payload.get("pytorch_backend") or "cuda").lower().replace("+", "")
         if flavor in ("cuda", "gpu"):
-            flavor = {"2.6.0": "cu118", "2.7.0": "cu128", "2.8.0": "cu129", "2.9.0": "cu130"}[version]
+            flavor = "cu128" if backend == "tensorrt" else {"2.6.0": "cu118", "2.7.0": "cu128", "2.8.0": "cu129", "2.9.0": "cu130"}[version]
         allowed = {"cpu", "mps", "cu118", "cu126", "cu128", "cu129", "cu130", "rocm64", "xpu"}
         if flavor not in allowed:
             raise ValueError("Unsupported PyTorch runtime type.")
@@ -2249,7 +2249,7 @@ def backend_packages(backend, payload=None):
         if flavor.startswith("cu12"):
             packages.append("cupy-cuda12x==13.3.0")
         if backend == "tensorrt":
-            packages += ["torch-tensorrt==2.7.0", "tensorrt==10.12.0.36", "tensorrt_cu12==10.12.0.36", "tensorrt-cu12_libs==10.12.0.36", "tensorrt_cu12_bindings==10.12.0.36"]
+            packages += ["torch-tensorrt==2.8.0", "tensorrt==10.12.0.36", "tensorrt_cu12==10.12.0.36", "tensorrt-cu12_libs==10.12.0.36", "tensorrt_cu12_bindings==10.12.0.36"]
         return packages
     if backend == "ncnn":
         return ["rife-ncnn-vulkan-python-tntwise==1.4.5", "upscale_ncnn_py==1.2.0", "ncnn==1.0.20250916", "numpy==2.2.2"]
@@ -2327,10 +2327,10 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
                 progress = 60 if is_torch_wheel else 20
                 run_runtime_command(install_command, stage, progress, env=managed_uv_environment())
             if action == "install" and backend in ("torch", "pytorch", "tensorrt"):
-                version = str(payload.get("torch_version") or "2.7.0")
+                version = "2.8.0" if backend == "tensorrt" else str(payload.get("torch_version") or "2.7.0")
                 version = {"2.6": "2.6.0"}.get(version, version)
                 tv_version = {"2.6.0": "0.21.0", "2.7.0": "0.22.0", "2.8.0": "0.23.0", "2.9.0": "0.24.0"}.get(version)
-                flavor = str(payload.get("pytorch_backend") or "cuda").lower().replace("+", "")
+                flavor = "cu128" if backend == "tensorrt" else str(payload.get("pytorch_backend") or "cuda").lower().replace("+", "")
                 flavor = {"cuda": {"2.6.0": "cu118", "2.7.0": "cu128", "2.8.0": "cu129", "2.9.0": "cu130"}.get(version, "cu128")}.get(flavor, flavor)
                 suffix = "" if flavor == "cpu" else "+" + flavor
                 if tv_version:

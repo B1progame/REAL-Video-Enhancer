@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4.76 — 2026-11-24
+
+- Fix TensorRT dependency resolution by installing the matched PyTorch 2.8.0 + CUDA 12.8, Torch-TensorRT 2.8.0, and TensorRT 10.12 stack.
+
 ## 2.4.75 — 2026-11-24
 
 - Fix WSL model benchmarks by staging one selected model at a time into a temporary Windows cache while keeping Ubuntu running; remove staged weights after each model finishes.
