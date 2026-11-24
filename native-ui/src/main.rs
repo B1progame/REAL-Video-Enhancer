@@ -28,19 +28,20 @@ const APP_VERSION: &str = match option_env!("RVE_APP_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
-const PAGES: [(&str, &str); 7] = [
+const PAGES: [(&str, &str); 8] = [
     ("Home", "home"),
     ("Process", "process"),
     ("Downloads", "download"),
+    ("Model library", "library"),
     ("Benchmarks", "benchmark"),
     ("Runtime", "runtime"),
     ("Python", "python"),
     ("Settings", "settings"),
 ];
 const PROCESS_PAGE: usize = 1;
-const BENCHMARK_PAGE: usize = 3;
-const RUNTIME_PAGE: usize = 4;
-const SETTINGS_PAGE: usize = 6;
+const BENCHMARK_PAGE: usize = 4;
+const RUNTIME_PAGE: usize = 5;
+const SETTINGS_PAGE: usize = 7;
 const PROCESS_COLUMN_THRESHOLD: f32 = 880.0;
 const RUNTIME_METRICS_COLUMN_THRESHOLD: f32 = 760.0;
 const HOME_HERO_COLUMN_THRESHOLD: f32 = 840.0;
@@ -57,6 +58,34 @@ fn backend_is_installed(available: &Value, selected: &str) -> bool {
             .filter_map(Value::as_str)
             .any(|backend| backend.trim().eq_ignore_ascii_case(selected.trim()))
     })
+}
+
+fn encoded_query_value(value: &str) -> String {
+    value
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+                (byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{size:.0} {}", UNITS[unit])
+    } else {
+        format!("{size:.2} {}", UNITS[unit])
+    }
 }
 
 fn pending_post_after_event(pending: bool, is_post: bool) -> bool {
@@ -721,17 +750,27 @@ struct NativeApp {
     download: Value,
     install: Value,
     anime: Value,
+    library: Value,
+    library_loading: bool,
+    library_download_refresh_pending: bool,
+    footprint: Value,
+    footprint_loading: bool,
     python: Value,
     storage_status: Value,
     benchmarks: Value,
     update: Value,
+    update_token_input: String,
+    update_auth_message: String,
     update_install_started: bool,
     saved_settings: Value,
     encoding: Value,
     model_storage: String,
     first_setup: bool,
     backend: String,
+    render_engine: String,
+    anime_options: Value,
     model_search: String,
+    library_search: String,
     benchmark_search: String,
     benchmark_category: String,
     benchmark_resolutions: HashMap<String, bool>,
@@ -818,17 +857,27 @@ impl NativeApp {
             download: Value::Null,
             install: Value::Null,
             anime: Value::Null,
+            library: Value::Null,
+            library_loading: false,
+            library_download_refresh_pending: false,
+            footprint: Value::Null,
+            footprint_loading: false,
             python: Value::Null,
             storage_status: Value::Null,
             benchmarks: Value::Null,
             update: Value::Null,
+            update_token_input: String::new(),
+            update_auth_message: String::new(),
             update_install_started: false,
             saved_settings: json!({}),
             encoding: default_encoding(),
             model_storage,
             first_setup,
             backend: "pytorch".to_owned(),
+            render_engine: "rve".to_owned(),
+            anime_options: json!({"methods": {"upscale": "shufflecugan", "interpolate": "rife4.6", "restore": "anime1080fixer"}}),
             model_search: String::new(),
+            library_search: String::new(),
             benchmark_search: String::new(),
             benchmark_category: "all".to_owned(),
             benchmark_resolutions: ["720p", "1080p", "4K"]
@@ -880,6 +929,13 @@ impl NativeApp {
         } else {
             configured_backend.to_ascii_lowercase()
         };
+        self.render_engine = advanced["render_engine"]
+            .as_str()
+            .unwrap_or("rve")
+            .to_owned();
+        if let Some(options) = self.saved_settings["animescripter"].as_object() {
+            self.anime_options = Value::Object(options.clone());
+        }
         for (key, default) in [
             ("interpolate", false),
             ("upscale", true),
@@ -935,10 +991,12 @@ impl NativeApp {
             self.saved_settings["advanced"] = json!({});
         }
         self.saved_settings["backend"] = json!(self.backend);
+        self.saved_settings["animescripter"] = self.anime_options.clone();
         self.saved_settings["toggles"] = json!(self.toggles);
         self.saved_settings["encoding"] = self.encoding.clone();
         let advanced = &mut self.saved_settings["advanced"];
         advanced["output_folder_location"] = json!(self.output_folder);
+        advanced["render_engine"] = json!(self.render_engine);
         advanced["output_to_mpv"] = json!(self.output_to_mpv);
         advanced["precision"] = json!(self.precision);
         advanced["tile_size"] = json!(self.tile_size);
@@ -1199,7 +1257,29 @@ impl NativeApp {
                         self.models = value
                     }
                     "/api/render/status" => self.render = value,
-                    "/api/models/download_status" => self.download = value,
+                    "/api/models/download_status" => {
+                        self.download = value.clone();
+                        if self.library_download_refresh_pending
+                            && value["active"].as_bool() != Some(true)
+                        {
+                            if value["status"].as_str() == Some("completed") {
+                                self.get(&format!("/api/models?backend={}", self.backend));
+                            }
+                            self.library_download_refresh_pending = false;
+                        }
+                    }
+                    "/api/library/download" => {
+                        self.library_download_refresh_pending = true;
+                        self.download = value;
+                    }
+                    path if path.starts_with("/api/library/models") => {
+                        self.library_loading = false;
+                        self.library = value;
+                    }
+                    "/api/storage/footprint" => {
+                        self.footprint_loading = false;
+                        self.footprint = value;
+                    }
                     "/api/startup/install_status" => {
                         let status = value["status"].as_str().unwrap_or_default().to_owned();
                         let previous = self.install["status"]
@@ -1259,6 +1339,15 @@ impl NativeApp {
                     "/api/app/update/status"
                     | "/api/app/update/check"
                     | "/api/app/update/download" => self.update = value,
+                    "/api/app/update/auth" => {
+                        self.update_auth_message = value["detail"]
+                            .as_str()
+                            .or_else(|| value["error"].as_str())
+                            .unwrap_or("GitHub updater access could not be saved.")
+                            .to_owned();
+                        self.update["has_github_token"] =
+                            json!(value["configured"].as_bool().unwrap_or(false));
+                    }
                     "/api/dialog/select_input" => {
                         self.input_path = value["path"].as_str().unwrap_or_default().to_owned();
                         self.input_info = value["video_info"].clone();
@@ -1465,7 +1554,7 @@ impl NativeApp {
         render_settings["interpolate_factor"] = json!(self.interpolate_factor);
         render_settings["override_upscale_scale"] = json!(self.upscale_scale);
         let payload = json!({
-            "engine": "rve",
+            "engine": self.render_engine,
             "backend": self.backend,
             "input_path": self.input_path,
             "output_folder": self.output_folder,
@@ -1474,7 +1563,8 @@ impl NativeApp {
             "models": Value::Object(selected),
             "toggles": toggles,
             "settings": render_settings,
-            "encoding": self.encoding.clone()
+            "encoding": self.encoding.clone(),
+            "animescripter": self.anime_options.clone()
         });
         self.post("/api/render/start", payload);
     }
@@ -1488,10 +1578,11 @@ impl NativeApp {
             0 => "Your workspace for cleaner, sharper video.",
             1 => "Choose a source, tune enhancements, and render.",
             2 => "Find and install the models you need.",
-            3 => "Compare installed models on your hardware, at real input resolutions.",
-            4 => "Set up the inference backends for your hardware.",
-            5 => "Inspect the Python engine and its environment.",
-            6 => "Personalize appearance, storage, and app updates.",
+            3 => "Search the wider model community and check compatibility.",
+            4 => "Compare installed models on your hardware, at real input resolutions.",
+            5 => "Set up the inference engines and AnimeScripter.",
+            6 => "Inspect the Python engine and its environment.",
+            7 => "Personalize appearance, storage, and app updates.",
             _ => "Your workspace for cleaner, sharper video.",
         }
     }
@@ -2390,7 +2481,7 @@ impl NativeApp {
                             });
                         });
                         let options = self.model_choices(key);
-                        if !options.is_empty() {
+                        if self.render_engine == "rve" && !options.is_empty() {
                             ui.add_space(theme::space::XS);
                             selection_changed |= self.model_picker(ui, key);
                             let selected = self
@@ -2412,6 +2503,9 @@ impl NativeApp {
                         }
                     });
                 ui.add_space(theme::space::XS);
+            }
+            if self.render_engine == "animescripter" {
+                ui.label(RichText::new("AnimeScripter supplies and downloads its own AI models when you run a method for the first time.").size(11.0).color(palette.muted));
             }
             ui.horizontal(|ui| {
                 ui.add(icons::styled("slomo", palette.secondary, 18.0));
@@ -2435,10 +2529,11 @@ impl NativeApp {
     }
 
     fn render_blockers(&self) -> Vec<String> {
-        let backend_ready = backend_is_installed(
-            &self.bootstrap["system"]["available_backends"],
-            &self.backend,
-        );
+        let backend_ready = self.render_engine == "animescripter"
+            || backend_is_installed(
+                &self.bootstrap["system"]["available_backends"],
+                &self.backend,
+            );
         let active = matches!(
             self.render["status"].as_str(),
             Some("preparing" | "running" | "paused" | "stopping")
@@ -2462,7 +2557,11 @@ impl NativeApp {
         if !self.output_to_mpv && self.output_folder.trim().is_empty() {
             blockers.push("Choose an output folder.".to_owned());
         }
-        if !backend_ready {
+        if self.render_engine == "animescripter" && self.anime["ready"].as_bool() != Some(true) {
+            blockers.push(
+                "Install and verify AnimeScripter from the Processing engine card.".to_owned(),
+            );
+        } else if !backend_ready {
             blockers
                 .push("Install or select an available processing backend in Runtime.".to_owned());
         }
@@ -2473,11 +2572,12 @@ impl NativeApp {
         if enabled.is_empty() {
             blockers.push("Enable at least one enhancement.".to_owned());
         }
-        let missing_model = enabled.iter().any(|key| {
-            self.selected_models
-                .get(*key)
-                .is_none_or(|model| model.is_empty())
-        });
+        let missing_model = self.render_engine == "rve"
+            && enabled.iter().any(|key| {
+                self.selected_models
+                    .get(*key)
+                    .is_none_or(|model| model.is_empty())
+            });
         if missing_model {
             blockers.push("Choose a model for each enabled enhancement.".to_owned());
         }
@@ -2716,6 +2816,8 @@ impl NativeApp {
                 });
             ui.add_space(theme::space::MD);
         }
+        self.processing_engine_card(ui);
+        ui.add_space(theme::space::MD);
         self.workflow_steps(ui);
         ui.add_space(theme::space::MD);
 
@@ -2752,6 +2854,158 @@ impl NativeApp {
                             }
                         });
                 });
+        }
+    }
+
+    fn processing_engine_card(&mut self, ui: &mut egui::Ui) {
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        let mut engine_changed = false;
+        Self::card(ui, "Processing engine", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                egui::ComboBox::from_label("Engine")
+                    .selected_text(if self.render_engine == "animescripter" {
+                        "AnimeScripter"
+                    } else {
+                        "REAL Video Enhancer"
+                    })
+                    .show_ui(ui, |ui| {
+                        engine_changed |= ui
+                            .selectable_value(
+                                &mut self.render_engine,
+                                "rve".to_owned(),
+                                "REAL Video Enhancer",
+                            )
+                            .changed();
+                        engine_changed |= ui
+                            .selectable_value(
+                                &mut self.render_engine,
+                                "animescripter".to_owned(),
+                                "AnimeScripter",
+                            )
+                            .changed();
+                    });
+                if self.render_engine == "animescripter" {
+                    let ready = self.anime["ready"].as_bool() == Some(true);
+                    components::status_dot(
+                        ui,
+                        if ready {
+                            palette.success
+                        } else {
+                            palette.warning
+                        },
+                        if ready {
+                            "Ready · models download on first use"
+                        } else {
+                            "AnimeScripter setup required"
+                        },
+                    );
+                    let installing = self.install["status"].as_str() == Some("running");
+                    if ui
+                        .add_enabled(
+                            self.connected && !installing && self.active_task().is_none(),
+                            egui::Button::new(if ready {
+                                "Repair AnimeScripter"
+                            } else {
+                                "Install AnimeScripter"
+                            }),
+                        )
+                        .clicked()
+                    {
+                        self.post("/api/animescripter/install", json!({}));
+                    }
+                } else {
+                    components::status_dot(ui, palette.success, "REAL Video Enhancer engine");
+                }
+            });
+            ui.label(RichText::new(if self.render_engine == "animescripter" {
+                "Anime-focused processing with its own RIFE, upscaling and restoration methods. First use may download selected AI weights."
+            } else {
+                "Use the built-in RVE pipeline and the models installed from Downloads."
+            }).size(12.0).color(palette.secondary));
+            if self.render_engine == "animescripter"
+                && !self.anime["detail"].as_str().unwrap_or_default().is_empty()
+            {
+                ui.label(
+                    RichText::new(self.anime["detail"].as_str().unwrap_or_default())
+                        .size(11.0)
+                        .color(palette.muted),
+                );
+            }
+        });
+        if engine_changed {
+            self.save_render_defaults();
+        }
+        if self.render_engine == "animescripter" {
+            ui.add_space(theme::space::MD);
+            Self::card(ui, "AnimeScripter pipeline", |ui| {
+                ui.label(RichText::new("Choose AnimeScripter's native methods. These selections are saved on this PC.").size(12.0).color(palette.secondary));
+                let methods = self.anime_options["methods"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                let mut upscale = methods
+                    .get("upscale")
+                    .and_then(Value::as_str)
+                    .unwrap_or("shufflecugan")
+                    .to_owned();
+                let mut interpolate = methods
+                    .get("interpolate")
+                    .and_then(Value::as_str)
+                    .unwrap_or("rife4.6")
+                    .to_owned();
+                let mut restore = methods
+                    .get("restore")
+                    .and_then(Value::as_str)
+                    .unwrap_or("anime1080fixer")
+                    .to_owned();
+                let mut changed = false;
+                egui::ComboBox::from_label("Upscale method")
+                    .selected_text(&upscale)
+                    .show_ui(ui, |ui| {
+                        for value in [
+                            "shufflecugan",
+                            "span",
+                            "adore",
+                            "fallinsoft",
+                            "openproteus",
+                            "aniscale2",
+                        ] {
+                            changed |= ui
+                                .selectable_value(&mut upscale, value.to_owned(), value)
+                                .changed();
+                        }
+                    });
+                egui::ComboBox::from_label("Interpolation method")
+                    .selected_text(&interpolate)
+                    .show_ui(ui, |ui| {
+                        for value in ["rife4.6", "rife4.26", "rife4.25", "distildrba"] {
+                            changed |= ui
+                                .selectable_value(&mut interpolate, value.to_owned(), value)
+                                .changed();
+                        }
+                    });
+                egui::ComboBox::from_label("Restoration method")
+                    .selected_text(&restore)
+                    .show_ui(ui, |ui| {
+                        for value in [
+                            "anime1080fixer",
+                            "scunet",
+                            "nafnet",
+                            "deh264_real",
+                            "dejpeg",
+                        ] {
+                            changed |= ui
+                                .selectable_value(&mut restore, value.to_owned(), value)
+                                .changed();
+                        }
+                    });
+                if changed {
+                    self.anime_options["methods"] =
+                        json!({"upscale": upscale, "interpolate": interpolate, "restore": restore});
+                    self.save_render_defaults();
+                }
+                ui.label(RichText::new("Weights download from the upstream AnimeScripter model sources as each method is first used.").size(11.0).color(palette.muted));
+            });
         }
     }
 
@@ -3131,6 +3385,161 @@ impl NativeApp {
                 "Weights are installed on this Windows PC alongside the app’s local data."
             }).size(12.0).color(palette.secondary));
         });
+    }
+
+    fn model_library_page(&mut self, ui: &mut egui::Ui) {
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        if self.library.is_null() && !self.library_loading {
+            self.library_loading = true;
+            self.get("/api/library/models");
+        }
+        Self::card(ui, "Discover video models", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new("Search 600+ community upscaling models in OpenModelDB.")
+                        .strong(),
+                );
+                ui.hyperlink_to("Open OpenModelDB ↗", "https://openmodeldb.info");
+                ui.hyperlink_to(
+                    "Hugging Face models ↗",
+                    "https://huggingface.co/models?pipeline_tag=image-to-image&sort=downloads",
+                );
+                ui.hyperlink_to(
+                    "OpenModelDB model hub ↗",
+                    "https://github.com/OpenModelDB/model-hub",
+                );
+            });
+            ui.add_space(theme::space::SM);
+            ui.label(RichText::new("Search the full catalogue by name, author, architecture, tag, scale, or license. Model weights have individual licenses; review each model before downloading or sharing it.").size(12.0).color(palette.secondary));
+            ui.horizontal_wrapped(|ui| {
+                ui.add(icons::styled("search", palette.muted, 17.0));
+                let response = ui.add_sized(
+                    Vec2::new(ui.available_width().min(420.0), 38.0),
+                    egui::TextEdit::singleline(&mut self.library_search)
+                        .hint_text("Search model library…"),
+                );
+                let submit =
+                    response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if ui
+                    .add_enabled(!self.library_loading, egui::Button::new("Search library"))
+                    .clicked()
+                    || submit
+                {
+                    self.library_loading = true;
+                    self.get(&format!(
+                        "/api/library/models?q={}",
+                        encoded_query_value(&self.library_search)
+                    ));
+                }
+                if ui
+                    .add_enabled(!self.library_loading, egui::Button::new("Refresh catalog"))
+                    .clicked()
+                {
+                    self.library_loading = true;
+                    self.get(&format!(
+                        "/api/library/models?q={}&refresh=1",
+                        encoded_query_value(&self.library_search)
+                    ));
+                }
+                if self.library_loading {
+                    ui.spinner();
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{} models in source catalog",
+                        self.library["count"].as_u64().unwrap_or(0)
+                    ))
+                    .color(palette.secondary),
+                );
+                ui.label(
+                    RichText::new(format!(
+                        "Showing {} matches",
+                        self.library["results"]
+                            .as_array()
+                            .map(Vec::len)
+                            .unwrap_or(0)
+                    ))
+                    .color(palette.secondary),
+                );
+                if !self.library["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty()
+                {
+                    ui.colored_label(
+                        palette.warning,
+                        self.library["error"].as_str().unwrap_or_default(),
+                    );
+                }
+            });
+        });
+        ui.add_space(theme::space::MD);
+        Self::card(ui, "Community model results", |ui| {
+            egui::ScrollArea::vertical().max_height(640.0).show(ui, |ui| {
+                let Some(results) = self.library["results"].as_array().cloned() else {
+                    ui.label(if self.library_loading { "Loading OpenModelDB…" } else { "The catalogue will appear when the local engine connects." });
+                    return;
+                };
+                if results.is_empty() {
+                    ui.label("No models match that search. Try another name, architecture, or tag.");
+                }
+                for model in results {
+                    let name = model["name"].as_str().unwrap_or("Unnamed model");
+                    let url = model["url"].as_str().unwrap_or("https://openmodeldb.info");
+                    let install_resource = model["resources"].as_array().and_then(|items|
+                        items.iter().find(|resource| resource["installable"].as_bool() == Some(true)));
+                    egui::Frame::new().fill(palette.surface).stroke(Stroke::new(1.0, palette.border))
+                        .corner_radius(10.0).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(name).strong().size(15.0));
+                                    ui.label(RichText::new(format!("{} · {} · {}× · {}", model["author"].as_str().unwrap_or("Community"), model["architecture"].as_str().unwrap_or("Unknown"), model["scale"].as_i64().unwrap_or(0), model["license"].as_str().unwrap_or("License not listed"))).size(11.0).color(palette.secondary));
+                                });
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if let Some(resource) = install_resource {
+                                        if ui.add_enabled(!self.download["active"].as_bool().unwrap_or(false), egui::Button::new("Install compatible .pth")).clicked() {
+                                            self.post("/api/library/download", json!({"id": model["id"]}));
+                                        }
+                                        if let Some(bytes) = resource["size"].as_u64() {
+                                            ui.label(RichText::new(format_bytes(bytes)).size(11.0).color(palette.muted));
+                                        }
+                                    }
+                                    ui.hyperlink_to("Details ↗", url);
+                                });
+                            });
+                            if let Some(description) = model["description"].as_str().filter(|text| !text.is_empty()) {
+                                ui.add_space(theme::space::XS);
+                                ui.label(RichText::new(description).size(12.0).color(palette.secondary));
+                            }
+                            if let Some(tags) = model["tags"].as_array() {
+                                ui.horizontal_wrapped(|ui| for tag in tags.iter().take(7).filter_map(Value::as_str) {
+                                    ui.label(RichText::new(tag).size(10.0).color(palette.muted));
+                                });
+                            }
+                            if install_resource.is_none() {
+                                ui.label(RichText::new("Browse at source · this format or architecture is not eligible for automatic install.").size(11.0).color(palette.muted));
+                            }
+                        });
+                    ui.add_space(theme::space::XS);
+                }
+            });
+        });
+        if self.download["active"].as_bool() == Some(true) {
+            ui.add_space(theme::space::SM);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    self.download["detail"]
+                        .as_str()
+                        .unwrap_or("Downloading community model…"),
+                );
+                if ui.button("Cancel download").clicked() {
+                    self.post("/api/actions/cancel", json!({}));
+                }
+            });
+        }
     }
 
     fn benchmarks_page(&mut self, ui: &mut egui::Ui) {
@@ -3721,8 +4130,73 @@ impl NativeApp {
         });
 
         ui.add_space(theme::space::MD);
-        Self::card(ui, "AnimeScripter · unfinished", |ui| {
-            ui.label("AnimeScripter integration code is preserved in the project, but setup and the native workflow are not finished. It is not ready for normal processing yet; we can complete it later.");
+        Self::card(ui, "AnimeScripter engine", |ui| {
+            let ready = self.anime["ready"].as_bool() == Some(true);
+            ui.horizontal_wrapped(|ui| {
+                components::status_dot(
+                    ui,
+                    if ready {
+                        palette.success
+                    } else if self.install["status"] == "error" {
+                        palette.error
+                    } else {
+                        palette.warning
+                    },
+                    if ready {
+                        "Installed and verified"
+                    } else {
+                        "Optional · not installed"
+                    },
+                );
+                let installing = self.install["status"].as_str() == Some("running");
+                if ui
+                    .add_enabled(
+                        self.connected && !installing && self.active_task().is_none(),
+                        egui::Button::new(if ready {
+                            "Repair AnimeScripter"
+                        } else {
+                            "Install AnimeScripter CLI"
+                        }),
+                    )
+                    .clicked()
+                {
+                    self.post("/api/animescripter/install", json!({}));
+                }
+                if installing && ui.button("Cancel setup").clicked() {
+                    self.post("/api/actions/cancel", json!({}));
+                }
+                if ui
+                    .hyperlink_to(
+                        "Official AnimeScripter project ↗",
+                        "https://github.com/NevermindNilas/TheAnimeScripter",
+                    )
+                    .clicked()
+                {}
+            });
+            ui.label("Select AnimeScripter in the Process page to use its anime-focused upscale, RIFE interpolation, and restoration pipeline. Its optional model weights download on first use.");
+            if let Some(detail) = self.anime["detail"]
+                .as_str()
+                .filter(|detail| !detail.is_empty())
+            {
+                ui.label(RichText::new(detail).size(11.0).color(palette.secondary));
+            }
+            if let Some(path) = self.anime["executable"].as_str() {
+                components::copyable_path(ui, path, "AnimeScripter CLI path");
+            }
+            if self.install["status"] == "error" {
+                if let Some(error) = self.install["error"].as_str() {
+                    ui.colored_label(palette.error, error);
+                }
+            }
+            if let Some(lines) = self.install["output"].as_array() {
+                egui::CollapsingHeader::new("Setup log")
+                    .id_salt("animescripter-setup-log")
+                    .show(ui, |ui| {
+                        for line in lines.iter().rev().take(12).filter_map(Value::as_str) {
+                            ui.label(RichText::new(line).monospace().size(10.0));
+                        }
+                    });
+            }
         });
     }
 
@@ -4125,6 +4599,45 @@ impl NativeApp {
                 "Release channel · B1progame/REAL-Video-Enhancer",
                 "https://github.com/B1progame/REAL-Video-Enhancer/releases",
             );
+            ui.add_space(theme::space::SM);
+            ui.label(RichText::new("Private repository access · optional").strong());
+            ui.label(RichText::new("A public release works without sign-in. For this private feed, save a read-only GitHub token here; GitHub CLI is not required. The token is encrypted for this Windows account.").size(11.0).color(secondary_text_color(!ui.visuals().dark_mode)));
+            ui.horizontal_wrapped(|ui| {
+                ui.add_sized(
+                    Vec2::new(ui.available_width().min(360.0), 36.0),
+                    egui::TextEdit::singleline(&mut self.update_token_input)
+                        .password(true)
+                        .hint_text("github_pat_… · read-only Contents access"),
+                );
+                if ui
+                    .add_enabled(
+                        !self.update_token_input.trim().is_empty(),
+                        egui::Button::new("Save token securely"),
+                    )
+                    .clicked()
+                {
+                    let token = std::mem::take(&mut self.update_token_input);
+                    self.post("/api/app/update/auth", json!({"token": token}));
+                }
+                if self.update["has_github_token"].as_bool() == Some(true)
+                    && ui.button("Remove token").clicked()
+                {
+                    self.post("/api/app/update/auth", json!({"token": ""}));
+                }
+                ui.hyperlink_to(
+                    "Create read-only token ↗",
+                    "https://github.com/settings/personal-access-tokens/new",
+                );
+            });
+            if !self.update_auth_message.is_empty() {
+                ui.label(RichText::new(&self.update_auth_message).size(11.0).color(
+                    if self.update_auth_message.contains("could not") {
+                        theme::palette(!ui.visuals().dark_mode, self.accent).error
+                    } else {
+                        theme::palette(!ui.visuals().dark_mode, self.accent).success
+                    },
+                ));
+            }
             if self.update["status"] == "error" {
                 ui.colored_label(
                     theme::palette(!ui.visuals().dark_mode, self.accent).error,
@@ -4236,6 +4749,72 @@ impl NativeApp {
         });
     }
 
+    fn storage_footprint_settings(&mut self, ui: &mut egui::Ui) {
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        if self.footprint.is_null() && self.connected && !self.footprint_loading {
+            self.footprint_loading = true;
+            self.get("/api/storage/footprint");
+        }
+        Self::card(ui, "App storage footprint", |ui| {
+            ui.label(RichText::new("Measured from installed files, app-managed runtimes, package cache, and the selected model store.").size(12.0).color(palette.secondary));
+            ui.add_space(theme::space::SM);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "Installed total · {}",
+                        format_bytes(self.footprint["total_bytes"].as_u64().unwrap_or(0))
+                    ))
+                    .strong()
+                    .size(16.0),
+                );
+                if let Some(free) = self.footprint["free_bytes"].as_u64() {
+                    ui.label(
+                        RichText::new(format!("Windows disk free · {}", format_bytes(free)))
+                            .color(palette.secondary),
+                    );
+                }
+                if self.footprint_loading {
+                    ui.spinner();
+                }
+                if ui
+                    .add_enabled(!self.footprint_loading, egui::Button::new("Refresh sizes"))
+                    .clicked()
+                {
+                    self.footprint_loading = true;
+                    self.get("/api/storage/footprint");
+                }
+            });
+            ui.add_space(theme::space::XS);
+            if let Some(items) = self.footprint["components"].as_array() {
+                for component in items {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(component["label"].as_str().unwrap_or("Managed data"));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format_bytes(
+                                    component["bytes"].as_u64().unwrap_or(0),
+                                ))
+                                .strong()
+                                .color(palette.text),
+                            );
+                        });
+                    });
+                }
+            }
+            if !self.footprint["error"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty()
+            {
+                ui.colored_label(
+                    palette.warning,
+                    self.footprint["error"].as_str().unwrap_or_default(),
+                );
+            }
+            ui.label(RichText::new("AnimeScripter model files cached outside its install folder may not be included. WSL measurements require the selected Ubuntu distribution to start.").size(11.0).color(palette.muted));
+        });
+    }
+
     fn render_default_settings(&mut self, ui: &mut egui::Ui) -> bool {
         let mut render_defaults_changed = false;
         let mut preview_enabled = self.saved_settings["advanced"]["preview_enabled"]
@@ -4329,6 +4908,8 @@ impl NativeApp {
             render_defaults_changed = self.render_default_settings(ui);
             ui.add_space(theme::space::MD);
             self.data_management_settings(ui);
+            ui.add_space(theme::space::MD);
+            self.storage_footprint_settings(ui);
         } else {
             ui.columns(2, |columns| {
                 if self.first_setup {
@@ -4346,6 +4927,8 @@ impl NativeApp {
                 self.update_settings(&mut columns[1]);
                 columns[1].add_space(theme::space::MD);
                 self.data_management_settings(&mut columns[1]);
+                columns[1].add_space(theme::space::MD);
+                self.storage_footprint_settings(&mut columns[1]);
             });
         }
         if render_defaults_changed {
@@ -4738,10 +5321,11 @@ impl eframe::App for NativeApp {
                             0 => self.home_page(ui),
                             1 => self.process_page(ui),
                             2 => self.downloads_page(ui),
-                            3 => self.benchmarks_page(ui),
-                            4 => self.runtime_page(ui),
-                            5 => self.python_page(ui),
-                            6 => self.settings_page(ui),
+                            3 => self.model_library_page(ui),
+                            4 => self.benchmarks_page(ui),
+                            5 => self.runtime_page(ui),
+                            6 => self.python_page(ui),
+                            7 => self.settings_page(ui),
                             _ => self.home_page(ui),
                         });
                 });

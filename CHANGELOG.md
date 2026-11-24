@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.4.69 — 2026-11-24
+
+- Remove the GitHub CLI dependency from in-app update checks and installer downloads.
+- Use GitHub's API directly; public releases work anonymously, while private releases use the optional read-only token saved in Settings and protected with Windows DPAPI.
+- Give clearer guidance when GitHub denies access or cannot be reached.
+
 ## 2.4.68 — 2026-11-24
 
 - Add a native Benchmarks page listing each model by category, installation status, and measured performance at 480p, 720p, 1080p, 1440p, and 4K input sizes.

@@ -6,6 +6,9 @@ runtime/model operations as unavailable when this checkout cannot perform them.
 from __future__ import annotations
 
 import json
+import hashlib
+import ctypes
+import ctypes.wintypes
 import multiprocessing.shared_memory as shared_memory
 import os
 import platform
@@ -86,8 +89,15 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.68")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.69")
 update_lock = threading.RLock()
+github_token_lock = threading.RLock()
+github_token_value = None
+library_cache_lock = threading.RLock()
+library_cache = {"checked_at": 0.0, "models": None, "error": ""}
+animescripter_status_cache = {"checked_at": 0.0, "value": None}
+LIBRARY_CACHE_FILE = APP_DATA / "model-library-cache.json"
+OPENMODELDB_API = "https://openmodeldb.info/api/v1/models.json"
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
                 "current_version": APP_VERSION}
@@ -179,8 +189,6 @@ storage_process = None
 UV_VERSION = "0.13.7"
 UV_SHA256_X64 = "0cdc5b38fe5a8168ed6a25814f5ba43c21d313dd3187314fccb37b7cec46e021"
 update_cancel_event = threading.Event()
-update_process_lock = threading.RLock()
-update_process = None
 
 
 def hidden_subprocess_kwargs():
@@ -221,8 +229,67 @@ def version_tuple(value):
     return tuple(int(part) for part in match.group(0).split(".")) if match else ()
 
 
-def github_cli_path():
-    return shutil.which("gh.exe") or shutil.which("gh")
+def _dpapi_transform(data, protect):
+    if os.name != "nt":
+        raise RuntimeError("Secure GitHub token storage is available on Windows only.")
+    class DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+    raw = ctypes.create_string_buffer(data)
+    source = DataBlob(len(data), ctypes.cast(raw, ctypes.POINTER(ctypes.c_byte)))
+    target = DataBlob()
+    api = ctypes.windll.crypt32
+    kernel = ctypes.windll.kernel32
+    api.CryptProtectData.argtypes = [ctypes.POINTER(DataBlob), ctypes.wintypes.LPCWSTR,
+                                     ctypes.POINTER(DataBlob), ctypes.c_void_p, ctypes.c_void_p,
+                                     ctypes.wintypes.DWORD, ctypes.POINTER(DataBlob)]
+    api.CryptProtectData.restype = ctypes.wintypes.BOOL
+    api.CryptUnprotectData.argtypes = [ctypes.POINTER(DataBlob), ctypes.POINTER(ctypes.wintypes.LPWSTR),
+                                       ctypes.POINTER(DataBlob), ctypes.c_void_p, ctypes.c_void_p,
+                                       ctypes.wintypes.DWORD, ctypes.POINTER(DataBlob)]
+    api.CryptUnprotectData.restype = ctypes.wintypes.BOOL
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel.LocalFree.restype = ctypes.c_void_p
+    if protect:
+        ok = api.CryptProtectData(ctypes.byref(source), "REAL Video Enhancer GitHub updater", None, None, None, 1, ctypes.byref(target))
+    else:
+        ok = api.CryptUnprotectData(ctypes.byref(source), None, None, None, None, 1, ctypes.byref(target))
+    if not ok:
+        raise ctypes.WinError()
+    try:
+        return ctypes.string_at(target.pbData, target.cbData)
+    finally:
+        kernel.LocalFree(ctypes.cast(target.pbData, ctypes.c_void_p))
+
+
+def github_token_file():
+    return APP_DATA / "github-updater-token.dpapi"
+
+
+def get_github_token():
+    global github_token_value
+    with github_token_lock:
+        if github_token_value is None:
+            try:
+                github_token_value = _dpapi_transform(github_token_file().read_bytes(), False).decode("utf-8")
+            except (OSError, UnicodeDecodeError, RuntimeError):
+                github_token_value = ""
+        return github_token_value
+
+
+def save_github_token(token):
+    global github_token_value
+    token = str(token or "").strip()
+    if token and not token.startswith(("github_pat_", "ghp_", "gho_")):
+        raise ValueError("Enter a fine-grained (github_pat_), classic (ghp_), or OAuth (gho_) GitHub token.")
+    with github_token_lock:
+        if token:
+            APP_DATA.mkdir(parents=True, exist_ok=True)
+            github_token_file().write_bytes(_dpapi_transform(token.encode("utf-8"), True))
+        else:
+            github_token_file().unlink(missing_ok=True)
+        github_token_value = token
+    return {"ok": True, "configured": bool(token),
+            "detail": "GitHub updater access saved securely for this Windows account." if token else "Saved GitHub updater access removed."}
 
 
 def release_object_from_json(raw, source):
@@ -238,30 +305,35 @@ def release_object_from_json(raw, source):
 
 
 def fetch_latest_release():
-    request = urllib.request.Request(UPDATE_API, headers={"Accept": "application/vnd.github+json", "User-Agent": "REAL-Video-Enhancer-Native"})
+    headers = {"Accept": "application/vnd.github+json", "User-Agent": "REAL-Video-Enhancer-Native"}
+    token = get_github_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(UPDATE_API, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
-            return release_object_from_json(response.read(2 * 1024 * 1024), "GitHub API"), None
+            return release_object_from_json(response.read(2 * 1024 * 1024), "GitHub API"), "token" if token else None
     except urllib.error.HTTPError as exc:
         if exc.code not in (401, 403, 404):
             raise
-        gh = github_cli_path()
-        if not gh:
-            raise RuntimeError(
-                "This GitHub repository is private. Install GitHub CLI and sign in with an account "
-                "that can read B1progame/REAL-Video-Enhancer, then try again."
-            ) from exc
-        result = subprocess.run(
-            [gh, "api", f"repos/{UPDATE_REPOSITORY}/releases/latest"],
-            capture_output=True, text=True, timeout=20, **hidden_subprocess_kwargs(),
-        )
-        if result.returncode:
-            detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "GitHub CLI could not read the release."
-            raise RuntimeError(
-                "The private GitHub release could not be read. Sign in with `gh auth login -h github.com` "
-                f"using an account with repository access. {detail}"
-            ) from exc
-        return release_object_from_json(result.stdout, "GitHub CLI"), "gh"
+        message = ("The saved GitHub token could not read this release. Give it Contents: read access to the repository."
+                   if token else
+                   "This release repository is private. Add a read-only GitHub token in Settings → Updates to check and download releases. GitHub CLI is not required.")
+        raise RuntimeError(message) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Could not reach GitHub: {exc.reason}. Check your connection and try again.") from exc
+
+
+class GitHubTokenRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected and urllib.parse.urlsplit(newurl).hostname not in ("api.github.com", "github.com"):
+            redirected.remove_header("Authorization")
+        return redirected
+
+
+def github_urlopen(request, timeout):
+    return urllib.request.build_opener(GitHubTokenRedirect()).open(request, timeout=timeout)
 
 
 def check_github_update():
@@ -283,9 +355,11 @@ def check_github_update():
             "update_available": can_download, "release_url": release.get("html_url"),
             "installer_name": installer.get("name") if installer else None,
             "installer_url": installer.get("browser_download_url") if installer else None,
+            "installer_api_url": installer.get("url") if installer else None,
             "installer_size": installer.get("size") if installer else None,
             "installer_sha256": installer_sha256 if has_valid_digest else None,
             "access_method": access_method,
+            "has_github_token": bool(get_github_token()),
             "detail": (f"Version {tag} is ready to install." if can_download else
                        f"Version {tag} is newer, but GitHub did not provide a valid installer checksum." if newer and installer and not has_valid_digest else
                        f"Version {tag} is newer, but GitHub has no Windows installer asset." if newer else
@@ -296,7 +370,11 @@ def check_github_update():
 def download_update_installer(release):
     try:
         url = str(release.get("installer_url") or "")
-        if not url.startswith(UPDATE_DOWNLOAD_PREFIX):
+        if release.get("access_method") == "token":
+            url = str(release.get("installer_api_url") or "")
+            if not url.startswith(f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/assets/"):
+                raise ValueError("GitHub did not provide a trusted private installer asset.")
+        elif not url.startswith(UPDATE_DOWNLOAD_PREFIX):
             raise ValueError("GitHub did not provide a trusted Windows installer download.")
         name = Path(str(release.get("installer_name") or "")).name
         if not name.lower().endswith(".exe"):
@@ -312,85 +390,29 @@ def download_update_installer(release):
         import hashlib
         checksum = hashlib.sha256()
         received = 0
-        if release.get("access_method") == "gh":
-            gh = github_cli_path()
-            if not gh:
-                raise RuntimeError("GitHub CLI is required to download from this private repository.")
-            tag = str(release.get("release_tag") or "")
-            if not tag:
-                raise ValueError("GitHub release metadata did not include the original release tag.")
-            temporary_folder = folder / f".download-{uuid.uuid4().hex}"
-            temporary_folder.mkdir(parents=True, exist_ok=True)
-            try:
-                global update_process
-                log_path = temporary_folder / "gh-download.log"
-                with log_path.open("w", encoding="utf-8") as log_stream:
-                    proc = subprocess.Popen(
-                        [gh, "release", "download", tag, "--repo", UPDATE_REPOSITORY,
-                         "--pattern", name, "--dir", str(temporary_folder), "--clobber"],
-                        stdout=log_stream, stderr=subprocess.STDOUT, **hidden_subprocess_kwargs(),
-                    )
-                    with update_process_lock:
-                        update_process = proc
-                    started = time.monotonic()
-                    timed_out = False
-                    while proc.poll() is None:
-                        if update_cancel_event.is_set():
-                            proc.terminate()
-                        if time.monotonic() - started > 600:
-                            proc.terminate()
-                            timed_out = True
-                            break
-                        time.sleep(0.1)
-                    code = proc.wait()
-                    with update_process_lock:
-                        update_process = None
-                if timed_out:
-                    raise TimeoutError("GitHub CLI update download exceeded ten minutes.")
+        headers = {"User-Agent": "REAL-Video-Enhancer-Native"}
+        token = get_github_token()
+        if release.get("access_method") == "token" and token:
+            headers["Authorization"] = f"Bearer {token}"
+            headers["Accept"] = "application/octet-stream"
+        request = urllib.request.Request(url, headers=headers)
+        with github_urlopen(request, timeout=45) as response, partial.open("wb") as output:
+            total = int(response.headers.get("Content-Length", "0") or 0)
+            if total and total != expected_size:
+                raise IOError(f"GitHub reported {total} bytes, but the release metadata says {expected_size}.")
+            while True:
                 if update_cancel_event.is_set():
                     raise InterruptedError("Update download cancelled.")
-                if code:
-                    log = log_path.read_text(encoding="utf-8", errors="replace").strip().splitlines()
-                    detail = log[-1] if log else "GitHub CLI download failed."
-                    raise RuntimeError(f"Could not download the private release with GitHub CLI: {detail}")
-                downloaded = temporary_folder / name
-                if not downloaded.is_file():
-                    raise FileNotFoundError("GitHub CLI did not download the expected Windows installer.")
-                downloaded.replace(partial)
-            finally:
-                shutil.rmtree(temporary_folder, ignore_errors=True)
-            with partial.open("rb") as source:
-                while True:
-                    if update_cancel_event.is_set():
-                        raise InterruptedError("Update download cancelled.")
-                    block = source.read(1024 * 1024)
-                    if not block:
-                        break
-                    checksum.update(block)
-                    received += len(block)
-                    if received > expected_size:
-                        raise IOError("The installer download exceeded the published release size.")
-                    with update_lock:
-                        update_state["progress"] = min(100, round(received * 100 / expected_size))
-        else:
-            request = urllib.request.Request(url, headers={"User-Agent": "REAL-Video-Enhancer-Native"})
-            with urllib.request.urlopen(request, timeout=45) as response, partial.open("wb") as output:
-                total = int(response.headers.get("Content-Length", "0") or 0)
-                if total and total != expected_size:
-                    raise IOError(f"GitHub reported {total} bytes, but the release metadata says {expected_size}.")
-                while True:
-                    if update_cancel_event.is_set():
-                        raise InterruptedError("Update download cancelled.")
-                    block = response.read(1024 * 1024)
-                    if not block:
-                        break
-                    output.write(block)
-                    checksum.update(block)
-                    received += len(block)
-                    if received > expected_size:
-                        raise IOError("The installer download exceeded the published release size.")
-                    with update_lock:
-                        update_state["progress"] = min(100, round(received * 100 / expected_size))
+                block = response.read(1024 * 1024)
+                if not block:
+                    break
+                output.write(block)
+                checksum.update(block)
+                received += len(block)
+                if received > expected_size:
+                    raise IOError("The installer download exceeded the published release size.")
+                with update_lock:
+                    update_state["progress"] = min(100, round(received * 100 / expected_size))
         if received != expected_size:
             raise IOError(f"The installer download was incomplete ({received} of {expected_size} bytes).")
         if checksum.hexdigest() != expected_sha256:
@@ -461,6 +483,277 @@ def model_catalog(backend="pytorch"):
                 if item.is_dir():
                     selected.setdefault("upscale", {})[item.name] = [item.name, item.name, 4, "custom"]
     return backend, selected
+
+
+def openmodeldb_catalog(force=False):
+    """Read OpenModelDB's public static catalogue, with a local offline cache."""
+    with library_cache_lock:
+        if not force and library_cache["models"] is not None and time.time() - library_cache["checked_at"] < 3600:
+            return library_cache["models"]
+    models = None
+    error = ""
+    try:
+        request = urllib.request.Request(OPENMODELDB_API, headers={
+            "Accept": "application/json", "User-Agent": f"REAL-Video-Enhancer/{APP_VERSION}",
+        })
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read(24 * 1024 * 1024 + 1)
+        if len(raw) > 24 * 1024 * 1024:
+            raise RuntimeError("OpenModelDB returned a catalogue larger than 24 MB.")
+        parsed = json.loads(raw)
+        records = parsed.get("models", parsed) if isinstance(parsed, dict) else parsed
+        if isinstance(records, dict):
+            pairs = records.items()
+        elif isinstance(records, list):
+            pairs = ((str(record.get("id") or record.get("name") or index), record)
+                     for index, record in enumerate(records) if isinstance(record, dict))
+        else:
+            raise ValueError("OpenModelDB returned an unexpected catalogue format.")
+        models = []
+        for model_id, record in pairs:
+            if not isinstance(record, dict):
+                continue
+            name = str(record.get("name") or model_id)
+            resources = record.get("resources") if isinstance(record.get("resources"), list) else []
+            resources = [resource for resource in resources if isinstance(resource, dict)]
+            model_page = f"https://openmodeldb.info/models/{urllib.parse.quote(str(model_id), safe='-_.')}"
+            models.append({
+                "id": str(model_id), "name": name, "author": str(record.get("author") or "Community"),
+                "license": str(record.get("license") or "See source"),
+                "architecture": str(record.get("architecture") or "Unknown"),
+                "scale": record.get("scale"), "tags": record.get("tags") if isinstance(record.get("tags"), list) else [],
+                "description": str(record.get("description") or "")[:1200], "url": model_page,
+                "resources": [{"type": str(item.get("type") or item.get("platform") or ""),
+                               "size": item.get("size"), "sha256": item.get("sha256"),
+                               "urls": item.get("urls") if isinstance(item.get("urls"), list) else []}
+                              for item in resources],
+            })
+        models.sort(key=lambda item: item["name"].casefold())
+    except Exception as exc:
+        error = str(exc)
+        try:
+            cached = json.loads(LIBRARY_CACHE_FILE.read_text(encoding="utf-8"))
+            models = cached if isinstance(cached, list) else None
+        except (OSError, ValueError):
+            models = None
+    with library_cache_lock:
+        if models is not None:
+            library_cache.update(checked_at=time.time(), models=models, error="" if not error else f"Using saved catalogue · refresh failed: {error}")
+        elif library_cache["models"] is not None:
+            models = library_cache["models"]
+            library_cache["error"] = error
+        else:
+            library_cache.update(checked_at=time.time(), error=error)
+    if models is not None and not error:
+        try:
+            APP_DATA.mkdir(parents=True, exist_ok=True)
+            LIBRARY_CACHE_FILE.write_text(json.dumps(models, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+    if models is None:
+        raise RuntimeError(error or "OpenModelDB is unavailable and no saved catalogue exists.")
+    return models
+
+
+def search_openmodeldb(query="", category="all", force=False):
+    models = openmodeldb_catalog(force)
+    query = str(query or "").strip().casefold()
+    filtered = []
+    for model in models:
+        haystack = " ".join([model["name"], model["author"], model["architecture"], model["license"],
+                             str(model.get("scale") or ""), " ".join(map(str, model["tags"]))]).casefold()
+        if query and query not in haystack:
+            continue
+        if category != "all" and category.casefold() not in haystack:
+            continue
+        for resource in model["resources"]:
+            for url in resource["urls"]:
+                parsed = urllib.parse.urlsplit(str(url))
+                suffix = Path(urllib.parse.unquote(parsed.path)).suffix.lower()
+                resource["installable"] = (str(resource["type"]).lower() in ("pth", "pt", "safetensors")
+                                           and suffix in (".pth", ".pt", ".safetensors")
+                                           and model["architecture"].lower() in ("esrgan", "realesrgan")
+                                           and model.get("scale") == 4
+                                           and parsed.scheme == "https"
+                                           and parsed.hostname in ("huggingface.co", "github.com", "raw.githubusercontent.com"))
+        filtered.append(model)
+    return {"source": "OpenModelDB", "url": "https://openmodeldb.info", "count": len(models),
+            "results": filtered[:800], "error": library_cache.get("error", "")}
+
+
+def begin_openmodel_download(model_id):
+    model = next((entry for entry in openmodeldb_catalog()
+                  if entry["id"] == str(model_id)), None)
+    if not model:
+        raise ValueError("That model is no longer in the OpenModelDB catalogue. Refresh the library and try again.")
+    choices = []
+    for resource in model["resources"]:
+        if not resource.get("installable"):
+            continue
+        for url in resource.get("urls", []):
+            parsed = urllib.parse.urlsplit(str(url))
+            if (parsed.scheme == "https" and parsed.hostname in ("huggingface.co", "github.com", "raw.githubusercontent.com")
+                    and Path(urllib.parse.unquote(parsed.path)).suffix.lower() in (".pth", ".pt", ".safetensors")):
+                choices.append((resource, url))
+    if not choices:
+        raise ValueError("This model is listed for discovery, but has no direct, RVE-compatible 4× ESRGAN download. Open its source page to download or convert it manually.")
+    with download_lock:
+        if download_job.get("active"):
+            raise ValueError("A model download is already in progress.")
+        if (benchmark_job.get("status") == "running" or install_state.get("status") == "running"
+                or storage_job.get("status") in ("starting", "installing")):
+            raise ValueError("Wait for the active benchmark, runtime, or storage setup to finish.")
+        cancel_event.clear()
+        job_id = uuid.uuid4().hex
+        download_job.update(id=job_id, active=True, status="queued", progress=0, label=model["name"],
+                            detail="Preparing the selected OpenModelDB model…", error="", results=[],
+                            bytes_received=0, bytes_total=choices[0][0].get("size") or 0, stage="Downloading library model")
+    threading.Thread(target=download_openmodel_worker, args=(job_id, model, choices[0]),
+                      name="rve-openmodel-download", daemon=True).start()
+    return {key: value for key, value in download_job.items() if key != "results"}
+
+
+def download_openmodel_worker(job_id, model, choice):
+    global MODEL_DIR
+    resource, url = choice
+    destination = None
+    partial = None
+    digest = hashlib.sha256()
+    received = 0
+    try:
+        if os.name == "nt" and os.environ.get("RVE_MODEL_STORAGE", "wsl").lower() == "wsl":
+            distro = wsl_distribution_name()
+            linux_home = wsl_home_directory(distro)
+            MODEL_DIR = Path(rf"\\wsl.localhost\{distro}{linux_home.replace('/', chr(92))}\.local\share\REAL-Video-Enhancer\models")
+        target_dir = custom_models_dir()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(urllib.parse.unquote(urllib.parse.urlsplit(url).path)).suffix.lower()
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", model["name"]).strip("._-")[:120] or "openmodel"
+        destination = target_dir / f"{safe_name}{suffix}"
+        if destination.exists():
+            raise RuntimeError("A file with this model name already exists in your custom model library.")
+        partial = destination.with_name(destination.name + ".download")
+        request = urllib.request.Request(url, headers={"User-Agent": f"REAL-Video-Enhancer/{APP_VERSION}"})
+        with urllib.request.urlopen(request, timeout=45) as response, partial.open("wb") as output:
+            total = int(response.headers.get("Content-Length") or resource.get("size") or 0)
+            if total > 8 * 1024 ** 3:
+                raise RuntimeError("Model files larger than 8 GB are not supported by the in-app downloader.")
+            while True:
+                if cancel_event.is_set():
+                    raise InterruptedError("Model download cancelled.")
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                received += len(chunk)
+                if received > 8 * 1024 ** 3:
+                    raise RuntimeError("The model download exceeded the 8 GB safety limit.")
+                output.write(chunk)
+                digest.update(chunk)
+                with download_lock:
+                    if download_job.get("id") == job_id:
+                        download_job.update(bytes_received=received, bytes_total=total,
+                            progress=round(received * 100 / total, 1) if total else 0,
+                            detail=f"{received / 1024**2:.1f} MB downloaded" + (f" of {total / 1024**2:.1f} MB" if total else ""))
+        expected = str(resource.get("sha256") or "").lower()
+        if expected and digest.hexdigest() != expected:
+            raise RuntimeError("The downloaded file failed OpenModelDB’s SHA-256 check and was discarded.")
+        if not received:
+            raise RuntimeError("The model download was empty.")
+        partial.replace(destination)
+        models = model_catalog("pytorch")[1]
+        with download_lock:
+            download_job.update(active=False, status="completed", progress=100, stage="Library model ready",
+                detail=f"{model['name']} saved to your custom model library. Refresh Process to use it.",
+                results=[{"name": model["name"], "path": str(destination), "bytes": received}], error="")
+    except InterruptedError as exc:
+        if partial:
+            partial.unlink(missing_ok=True)
+        with download_lock:
+            download_job.update(active=False, status="cancelled", stage="Download cancelled", detail=str(exc))
+        cancel_event.clear()
+    except Exception as exc:
+        if partial:
+            partial.unlink(missing_ok=True)
+        with download_lock:
+            download_job.update(active=False, status="error", stage="Library download failed", error=str(exc), detail=str(exc))
+
+
+def _directory_size(path, exclude_top_level=()):
+    root = Path(path)
+    if not root.exists():
+        return 0
+    if root.is_file():
+        try:
+            return root.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    try:
+        for current, directories, files in os.walk(root, followlinks=False):
+            current_path = Path(current)
+            if current_path == root:
+                directories[:] = [name for name in directories if name not in exclude_top_level]
+            directories[:] = [name for name in directories if not (current_path / name).is_symlink()]
+            for name in files:
+                target = current_path / name
+                try:
+                    if not target.is_symlink():
+                        total += target.stat().st_size
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return total
+
+
+def storage_footprint():
+    if FROZEN:
+        executable_dir = Path(sys.executable).resolve().parent
+        app_root = executable_dir.parent if executable_dir.name.lower() == "rve-engine" else executable_dir
+    else:
+        app_root = ROOT
+    python_root = LOCAL_DATA / "python"
+    app_bin = APP_DATA / "bin"
+    anime_roots = [APP_DATA / "integrations", Path(os.environ.get("LOCALAPPDATA", "")) / "TheAnimeScripter"]
+    anime_total = sum(_directory_size(path) for path in anime_roots)
+    tools_total = sum(_directory_size(app_bin / name) for name in ("ffmpeg.exe", "uv.exe", "ffmpeg", "uv"))
+    uv_cache = Path(os.environ.get("UV_CACHE_DIR", LOCAL_DATA / "uv-cache"))
+    components = [
+        {"id": "application", "label": "Windows app and bundled engine", "bytes": _directory_size(app_root), "location": str(app_root)},
+        {"id": "python", "label": "Managed Python and inference packages", "bytes": _directory_size(python_root), "location": str(python_root)},
+        {"id": "tools", "label": "FFmpeg and app-managed uv", "bytes": tools_total, "location": str(app_bin)},
+        {"id": "anime", "label": "AnimeScripter and its local files", "bytes": anime_total, "location": str(anime_roots[0])},
+        {"id": "uv_cache", "label": "uv package cache", "bytes": _directory_size(uv_cache), "location": str(uv_cache)},
+    ]
+    model_bytes = _directory_size(MODEL_DIR)
+    if os.environ.get("RVE_MODEL_STORAGE", "wsl" if os.name == "nt" else "windows").lower() == "windows":
+        custom = custom_models_dir()
+        if custom != MODEL_DIR and custom not in MODEL_DIR.parents:
+            model_bytes += _directory_size(custom)
+    storage_error = ""
+    if os.name == "nt" and os.environ.get("RVE_MODEL_STORAGE", "wsl").lower() == "wsl":
+        try:
+            distro = wsl_distribution_name()
+            command = [shutil.which("wsl.exe") or "wsl.exe", "--distribution", distro, "--exec", "bash", "-lc",
+                       'du -sb -- "$HOME/.local/share/REAL-Video-Enhancer/models" 2>/dev/null | cut -f1']
+            result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                                    timeout=60, **hidden_subprocess_kwargs())
+            value = (result.stdout or "").strip().splitlines()
+            if result.returncode == 0 and value and value[0].isdigit():
+                model_bytes = int(value[0])
+            else:
+                storage_error = (result.stderr or "Could not measure the WSL model directory.").strip()
+        except Exception as exc:
+            storage_error = str(exc)
+    components.append({"id": "models", "label": "Model weights (selected Windows or WSL storage)",
+                       "bytes": model_bytes, "location": str(MODEL_DIR)})
+    try:
+        free_bytes = shutil.disk_usage(LOCAL_DATA).free
+    except OSError:
+        free_bytes = None
+    return {"components": components, "total_bytes": sum(item["bytes"] for item in components),
+            "free_bytes": free_bytes, "model_storage": os.environ.get("RVE_MODEL_STORAGE", "wsl" if os.name == "nt" else "windows"),
+            "error": storage_error, "measured_at": int(time.time())}
 
 
 def custom_model_roots():
@@ -1352,15 +1645,31 @@ def animescripter_invocation(executable, args):
 
 
 def animescripter_status():
+    with capability_cache_lock:
+        if animescripter_status_cache["value"] is not None and time.time() - animescripter_status_cache["checked_at"] < 30:
+            return dict(animescripter_status_cache["value"])
     exe = find_animescripter()
     if not exe:
-        return {"available": False, "executable": None, "detail": "AnimeScripter integration is unfinished. Its code is preserved for later work."}
+        result = {"available": False, "ready": False, "executable": None,
+                  "detail": "AnimeScripter CLI is not installed. Install it here to enable its rendering pipeline."}
+        with capability_cache_lock:
+            animescripter_status_cache.update(checked_at=time.time(), value=result)
+        return result
     try:
         command = animescripter_invocation(exe, ["--help"])
         probe = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False, **hidden_subprocess_kwargs())
-        return {"available": True, "executable": exe, "detail": "AnimeScripter integration is unfinished. CLI detected; native app integration is planned for later.", "help": (probe.stdout + probe.stderr)[:10000]}
+        help_text = (probe.stdout + probe.stderr)[:10000]
+        ready = probe.returncode == 0 and "--input" in help_text
+        result = {"available": ready, "ready": ready, "executable": exe,
+                  "detail": "AnimeScripter CLI is ready for native video processing." if ready else
+                            f"AnimeScripter was found, but its CLI check failed (exit {probe.returncode}). Reinstall it from Runtime.",
+                  "help": help_text}
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"available": True, "executable": exe, "detail": f"AnimeScripter integration is unfinished. Executable found; capability probe failed: {exc}"}
+        result = {"available": False, "ready": False, "executable": exe,
+                  "detail": f"AnimeScripter was found, but it did not respond to the CLI check: {exc}"}
+    with capability_cache_lock:
+        animescripter_status_cache.update(checked_at=time.time(), value=result)
+    return result
 
 
 def unavailable(message, status=501):
@@ -1704,14 +2013,19 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
             detail += "AnimeScripter CLI is already available." if tas_ready else "AnimeScripter remains optional and is not installed with the Windows runtime."
             set_install_state(status="completed", progress=100, stage="Runtime ready", detail=detail)
         elif action == "animescripter":
-            if find_animescripter():
+            with capability_cache_lock:
+                animescripter_status_cache.update(checked_at=0.0, value=None)
+            current_tas = animescripter_status()
+            if current_tas.get("ready"):
                 set_install_state(status="completed", progress=100, stage="AnimeScripter ready", detail="AnimeScripter CLI is already installed.")
             else:
                 install_animescripter_cli()
-                detected = find_animescripter()
-                if not detected:
-                    raise RuntimeError("The official installer completed, but its CLI entry point was not found.")
-                set_install_state(status="completed", progress=100, stage="AnimeScripter ready", detail=f"AnimeScripter CLI installed at {detected}.")
+                with capability_cache_lock:
+                    animescripter_status_cache.update(checked_at=0.0, value=None)
+                verified_tas = animescripter_status()
+                if not verified_tas.get("ready"):
+                    raise RuntimeError(verified_tas.get("detail") or "The official installer completed, but its CLI did not pass verification.")
+                set_install_state(status="completed", progress=100, stage="AnimeScripter ready", detail=f"AnimeScripter CLI installed and verified at {verified_tas['executable']}.")
         else:
             ensure_managed_python()
             packages = backend_packages(backend, payload)
@@ -2506,6 +2820,21 @@ class Handler(BaseHTTPRequestHandler):
             respond_json(self, state); return
         if path == "/api/storage/status":
             respond_json(self, storage_snapshot()); return
+        if path == "/api/storage/footprint":
+            try:
+                respond_json(self, storage_footprint())
+            except Exception as exc:
+                respond_json(self, {"error": str(exc), "components": [], "total_bytes": 0}, 503)
+            return
+        if path == "/api/library/models":
+            params = urllib.parse.parse_qs(url.query)
+            try:
+                respond_json(self, search_openmodeldb(params.get("q", [""])[0], params.get("category", ["all"])[0],
+                                                      params.get("refresh", [""])[0] == "1"))
+            except Exception as exc:
+                respond_json(self, {"source": "OpenModelDB", "url": "https://openmodeldb.info", "count": 0,
+                                    "results": [], "error": str(exc)}, 503)
+            return
         if path == "/api/app/update/check":
             try:
                 release = check_github_update()
@@ -2520,7 +2849,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/app/update/status":
             with update_lock:
-                respond_json(self, dict(update_state))
+                respond_json(self, {**update_state, "has_github_token": bool(get_github_token())})
             return
         if path == "/api/python/info":
             respond_json(self, python_info_payload()); return
@@ -2604,6 +2933,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/app/update/download":
                 respond_json(self, begin_update_download(), 202)
                 return
+            if path == "/api/app/update/auth":
+                try:
+                    respond_json(self, save_github_token(payload.get("token")))
+                except Exception as exc:
+                    respond_json(self, {"ok": False, "error": str(exc)}, 400)
+                return
             if path == "/api/models/status":
                 respond_json(self, {"model_status": model_status(payload.get("models") or {}, payload.get("backend", "pytorch"))}); return
             if path in ("/api/models/download", "/api/actions/download_models"):
@@ -2625,13 +2960,6 @@ class Handler(BaseHTTPRequestHandler):
                 update_cancel_event.set()
                 if benchmark_job.get("status") == "running":
                     cancel_model_benchmark()
-                with update_process_lock:
-                    update_proc = update_process
-                if update_proc and update_proc.poll() is None:
-                    try:
-                        update_proc.terminate()
-                    except OSError:
-                        pass
                 with runtime_process_lock:
                     proc = runtime_process
                 if proc and proc.poll() is None:
@@ -2659,6 +2987,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/animescripter/install":
                 result = begin_runtime_operation("animescripter", payload=payload)
                 respond_json(self, result, 202); return
+            if path == "/api/library/download":
+                respond_json(self, begin_openmodel_download(payload.get("id")), 202); return
             if path == "/api/python/pip":
                 if not PYTHON or not Path(PYTHON).is_file():
                     respond_json(self, {"ok": False, "error": "Managed Python is not installed. Run Recommended Runtime Setup first."}, 409); return
