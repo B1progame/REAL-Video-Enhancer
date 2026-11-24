@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.4.71 — 2026-11-24
+
+- Fix Start render silently dropping its request after saving render preferences.
+- Save preferences as part of the single render-start request, show preparation/errors immediately, and refresh status after acceptance.
+- Prevent render starts during active model downloads, runtime installation, storage setup, or benchmarks.
+- Wire the RVE output-scale override through to the renderer and hide unsupported Pause controls for AnimeScripter.
+- Cancel render preparation when the app exits.
+
 ## 2.4.70 — 2026-11-24
 
 - Redesign the native workspace with clearer page groups, consistent card surfaces, calmer color contrast, and a more legible responsive navigation sidebar.

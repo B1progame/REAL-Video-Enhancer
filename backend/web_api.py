@@ -89,7 +89,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.70")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.71")
 update_lock = threading.RLock()
 github_token_lock = threading.RLock()
 github_token_value = None
@@ -2649,6 +2649,9 @@ def build_rve_command(payload):
     for key, value in simple.items():
         if value is not None and value != "":
             cmd += ["--" + key, str(value)]
+    scale_override = settings.get("override_upscale_scale")
+    if scale_override not in (None, "", 0, "0"):
+        cmd += ["--override_upscale_scale", str(int(scale_override))]
     for enabled, flag in ((settings.get("overwrite"), "--overwrite"), (settings.get("auto_border_cropping"), "--border_detect"),
                           (settings.get("uhd_mode"), "--UHD_mode"), (settings.get("auto_hdr_mode"), "--hdr_mode"),
                           (settings.get("dynamic_scaled_optical_flow"), "--dynamic_scaled_optical_flow"), (settings.get("ensemble"), "--ensemble"),
@@ -3078,6 +3081,21 @@ class Handler(BaseHTTPRequestHandler):
                 engine = str(payload.get("engine") or "rve").lower()
                 if benchmark_job.get("status") == "running":
                     respond_json(self, {"ok": False, "error": "Cancel the active benchmark before starting a render."}, 409); return
+                if install_state.get("status") in ("running", "installing", "downloading"):
+                    respond_json(self, {"ok": False, "error": "Wait for runtime setup to finish before starting a render."}, 409); return
+                if storage_job.get("status") in ("starting", "installing"):
+                    respond_json(self, {"ok": False, "error": "Wait for model storage setup to finish before starting a render."}, 409); return
+                if download_job.get("active"):
+                    respond_json(self, {"ok": False, "error": "Wait for the current model download to finish before starting a render."}, 409); return
+                saved_settings = payload.get("saved_settings")
+                if saved_settings is not None:
+                    if not isinstance(saved_settings, dict):
+                        raise ValueError("Render settings must be a JSON object.")
+                    try:
+                        save_settings(saved_settings)
+                    except OSError as exc:
+                        respond_json(self, {"ok": False, "error": f"Could not save render settings: {exc}"}, 500)
+                        return
                 output_file = requested_output_file(payload)
                 if output_file and output_file.exists() and not (payload.get("settings") or {}).get("overwrite"):
                     raise OutputFileExistsError(output_file)
@@ -3126,6 +3144,9 @@ class Handler(BaseHTTPRequestHandler):
                 result = begin_runtime_operation(action, backend, payload)
                 respond_json(self, {"ok": True, "state": result}, 202); return
             if path == "/api/app/quit":
+                if render.get("status") == "preparing":
+                    render_cancel_event.set()
+                    cancel_event.set()
                 if benchmark_job.get("status") == "running":
                     cancel_model_benchmark()
                 # Stop active rendering as part of app exit so the renderer

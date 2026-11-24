@@ -983,7 +983,7 @@ impl NativeApp {
         self.encoding = encoding;
     }
 
-    fn save_render_defaults(&mut self) {
+    fn render_defaults_snapshot(&mut self) -> Value {
         if !self.saved_settings.is_object() {
             self.saved_settings = json!({});
         }
@@ -1010,10 +1010,12 @@ impl NativeApp {
         advanced["auto_border_cropping"] = json!(self.auto_crop);
         advanced["overwrite"] = json!(self.overwrite);
         self.saved_settings["models"] = json!(self.selected_models);
-        self.post(
-            "/api/settings",
-            json!({"settings": self.saved_settings.clone()}),
-        );
+        self.saved_settings.clone()
+    }
+
+    fn save_render_defaults(&mut self) {
+        let settings = self.render_defaults_snapshot();
+        self.post("/api/settings", json!({"settings": settings}));
     }
 
     fn get(&self, endpoint: &str) {
@@ -1257,6 +1259,11 @@ impl NativeApp {
                         self.models = value
                     }
                     "/api/render/status" => self.render = value,
+                    "/api/render/start" => {
+                        self.render["status"] = json!("preparing");
+                        self.render["error"] = Value::Null;
+                        self.get("/api/render/status");
+                    }
                     "/api/models/download_status" => {
                         self.download = value.clone();
                         if self.library_download_refresh_pending
@@ -1369,6 +1376,10 @@ impl NativeApp {
                     }
                 },
                 Err(error) => {
+                    if event.endpoint == "/api/render/start" {
+                        self.render["status"] = json!("error");
+                        self.render["error"] = json!(error);
+                    }
                     if event.endpoint == "/api/data/delete" {
                         self.managed_data_message = Some(format!("Delete failed: {error}"));
                         self.managed_data_failed = true;
@@ -1506,7 +1517,7 @@ impl NativeApp {
     }
 
     fn start_render(&mut self) {
-        self.save_render_defaults();
+        let saved_settings = self.render_defaults_snapshot();
         self.render_preview = None;
         let mut selected = serde_json::Map::new();
         for key in ["upscale", "interpolate", "decompress", "denoise", "deblur"] {
@@ -1555,6 +1566,7 @@ impl NativeApp {
         render_settings["override_upscale_scale"] = json!(self.upscale_scale);
         let payload = json!({
             "engine": self.render_engine,
+            "saved_settings": saved_settings,
             "backend": self.backend,
             "input_path": self.input_path,
             "output_folder": self.output_folder,
@@ -2557,6 +2569,18 @@ impl NativeApp {
                 |error| format!("The local engine is unavailable: {error}"),
             ));
         }
+        if matches!(
+            self.install["status"].as_str(),
+            Some("running" | "installing" | "downloading")
+        ) {
+            blockers.push("Wait for runtime setup to finish before rendering.".to_owned());
+        }
+        if matches!(
+            self.storage_status["status"].as_str(),
+            Some("starting" | "installing")
+        ) {
+            blockers.push("Wait for model storage setup to finish before rendering.".to_owned());
+        }
         if self.input_path.trim().is_empty() {
             blockers.push("Choose an input video.".to_owned());
         } else if !Path::new(self.input_path.trim()).is_file() {
@@ -2601,6 +2625,10 @@ impl NativeApp {
         }
         if self.busy {
             blockers.push("Waiting for the engine to finish its current action.".to_owned());
+        }
+        if self.download["active"].as_bool() == Some(true) {
+            blockers
+                .push("Wait for the active model download to finish before rendering.".to_owned());
         }
         blockers
     }
@@ -2662,7 +2690,10 @@ impl NativeApp {
     ) {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if active {
-                if !preparing && status != "stopping" {
+                if !preparing
+                    && status != "stopping"
+                    && self.render["engine"].as_str() != Some("animescripter")
+                {
                     if ui.button(if paused { "Resume" } else { "Pause" }).clicked() {
                         self.post("/api/render/pause", json!({"paused": !paused}));
                     }
@@ -2699,8 +2730,15 @@ impl NativeApp {
         } else if blocker.contains("processing backend")
             || blocker.contains("AnimeScripter")
             || blocker.contains("backend in Runtime")
+            || blocker.contains("runtime setup")
         {
             Some(("Open runtime setup", 2))
+        } else if blocker.contains("storage setup") {
+            Some(("Open storage settings", 5))
+        } else if blocker.contains("download") {
+            Some(("View downloads", 3))
+        } else if blocker.contains("benchmark") {
+            Some(("Open benchmarks", 4))
         } else if blocker.contains("model") || blocker.contains("enhancement") {
             Some(("Choose models", 3))
         } else {
@@ -2714,6 +2752,8 @@ impl NativeApp {
                 0 => self.get("/api/dialog/select_input"),
                 1 => self.get("/api/dialog/select_output"),
                 2 => self.page = RUNTIME_PAGE,
+                4 => self.page = BENCHMARK_PAGE,
+                5 => self.page = SETTINGS_PAGE,
                 _ => self.page = 2,
             }
         }
