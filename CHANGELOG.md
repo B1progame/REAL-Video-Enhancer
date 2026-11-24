@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.4.77 — 2026-11-24
+
+- Apply the compatible TensorRT package versions to the legacy dependency installer and bundled backend requirements as well as the native Runtime installer.
+
 ## 2.4.76 — 2026-11-24
 
 - Fix TensorRT dependency resolution by installing the matched PyTorch 2.8.0 + CUDA 12.8, Torch-TensorRT 2.8.0, and TensorRT 10.12 stack.

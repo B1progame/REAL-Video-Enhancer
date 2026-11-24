@@ -355,6 +355,9 @@ class DownloadDependencies:
     
     def downloadPythonDeps(self, backend, torch_version: Optional[str] = "2.7.0", torchvision_version: Optional[str] = "0.22.0", torch_backend: Optional[str] = "cu126", install: bool = True):
         deps = []
+        if backend == "tensorrt":
+            # Torch-TensorRT 2.8 is the release line matching TRT 10.12/CUDA 12.8.
+            torch_version, torchvision_version, torch_backend = "2.8.0", "0.23.0", "cu128"
         log("Downloading Python Deps for " + backend)
         log("Torch Version: " + torch_version)
         log("Torch Backend: " + torch_backend)
@@ -405,9 +408,7 @@ class DownloadDependencies:
                         
                     ]
                     if install:
-                        
-                        torch_version = torch_version[:-1] + "0" # remove the last character (2.7.1 -> 2.7.0), torch tensorrt doesnt release a new version for every new pytorch minor release
-                        deps += ["--no-deps","dllist",f"torch-tensorrt=={torch_version}{torch_backend}"]
+                        deps += ["--no-deps", "dllist", f"torch-tensorrt=={torch_version}"]
 
                     return_code = self.pip(deps, install)
                     return_codes.append(return_code)
