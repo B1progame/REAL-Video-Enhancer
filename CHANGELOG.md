@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.4.68 — 2026-11-24
+
+- Add a native Benchmarks page listing each model by category, installation status, and measured performance at 480p, 720p, 1080p, 1440p, and 4K input sizes.
+- Run the real renderer against repeatable synthetic clips without writing enhanced output files; report end-to-end FPS, duration, frame count, backend, precision, GPU, and tile size.
+- Add cancellable batch runs, 1/2/4-second clip profiles, and persistent results on this PC. Catalog entries without installed weights remain visible without invented scores.
+- Prevent benchmarks from overlapping renders, downloads, runtime setup, model storage changes, or managed-data deletion.
+
 ## 2.4.67 — 2026-11-24
 
 - Rework the Process page into a responsive two-column video workspace with source and model selection above output and advanced render settings.

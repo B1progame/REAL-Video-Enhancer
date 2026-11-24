@@ -13,6 +13,7 @@ pub fn named(name: &str) -> Lucide {
         "output" => Lucide::FolderOutput,
         "search" => Lucide::Search,
         "check" => Lucide::Check,
+        "benchmark" => Lucide::Gauge,
         _ => page(name),
     }
 }
@@ -22,6 +23,7 @@ pub fn page(name: &str) -> Lucide {
         "home" => Lucide::House,
         "process" => Lucide::WandSparkles,
         "download" => Lucide::Download,
+        "benchmark" => Lucide::Gauge,
         "runtime" => Lucide::Cpu,
         "python" => Lucide::CodeXml,
         _ => Lucide::Settings2,

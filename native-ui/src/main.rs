@@ -28,16 +28,19 @@ const APP_VERSION: &str = match option_env!("RVE_APP_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),
 };
-const PAGES: [(&str, &str); 6] = [
+const PAGES: [(&str, &str); 7] = [
     ("Home", "home"),
     ("Process", "process"),
     ("Downloads", "download"),
+    ("Benchmarks", "benchmark"),
     ("Runtime", "runtime"),
     ("Python", "python"),
     ("Settings", "settings"),
 ];
 const PROCESS_PAGE: usize = 1;
-const RUNTIME_PAGE: usize = 3;
+const BENCHMARK_PAGE: usize = 3;
+const RUNTIME_PAGE: usize = 4;
+const SETTINGS_PAGE: usize = 6;
 const PROCESS_COLUMN_THRESHOLD: f32 = 880.0;
 const RUNTIME_METRICS_COLUMN_THRESHOLD: f32 = 760.0;
 const HOME_HERO_COLUMN_THRESHOLD: f32 = 840.0;
@@ -357,6 +360,7 @@ fn start_api_worker(ctx: egui::Context) -> ApiBridge {
                             "/api/startup/install_status",
                             "/api/animescripter/status",
                             "/api/storage/status",
+                            "/api/benchmarks/status",
                             "/api/app/update/status",
                         ]
                     } else {
@@ -719,6 +723,7 @@ struct NativeApp {
     anime: Value,
     python: Value,
     storage_status: Value,
+    benchmarks: Value,
     update: Value,
     update_install_started: bool,
     saved_settings: Value,
@@ -727,6 +732,10 @@ struct NativeApp {
     first_setup: bool,
     backend: String,
     model_search: String,
+    benchmark_search: String,
+    benchmark_category: String,
+    benchmark_resolutions: HashMap<String, bool>,
+    benchmark_frames: usize,
     model_picker_search: HashMap<String, String>,
     input_path: String,
     output_folder: String,
@@ -811,6 +820,7 @@ impl NativeApp {
             anime: Value::Null,
             python: Value::Null,
             storage_status: Value::Null,
+            benchmarks: Value::Null,
             update: Value::Null,
             update_install_started: false,
             saved_settings: json!({}),
@@ -819,6 +829,18 @@ impl NativeApp {
             first_setup,
             backend: "pytorch".to_owned(),
             model_search: String::new(),
+            benchmark_search: String::new(),
+            benchmark_category: "all".to_owned(),
+            benchmark_resolutions: ["720p", "1080p", "4K"]
+                .into_iter()
+                .map(|resolution| (resolution.to_owned(), resolution == "720p"))
+                .chain(
+                    ["480p", "1440p"]
+                        .into_iter()
+                        .map(|resolution| (resolution.to_owned(), false)),
+                )
+                .collect(),
+            benchmark_frames: 48,
             model_picker_search: HashMap::new(),
             input_path: String::new(),
             output_folder: String::new(),
@@ -994,6 +1016,9 @@ impl NativeApp {
     }
 
     fn active_task(&self) -> Option<&'static str> {
+        if self.benchmarks["status"].as_str() == Some("running") {
+            return Some("A model benchmark");
+        }
         if !self.connected && self.engine_error.is_none() {
             return Some("Local engine startup");
         }
@@ -1011,7 +1036,8 @@ impl NativeApp {
     }
 
     fn other_task_active(&self) -> bool {
-        (!self.connected && self.engine_error.is_none())
+        self.benchmarks["status"].as_str() == Some("running")
+            || (!self.connected && self.engine_error.is_none())
             || self.busy
             || active_task_from(
                 self.render["status"].as_str().unwrap_or_default(),
@@ -1208,6 +1234,11 @@ impl NativeApp {
                         self.logs.push(format!("$ {command}\n{output}"));
                     }
                     "/api/storage/status" => self.storage_status = value,
+                    "/api/benchmarks/status"
+                    | "/api/benchmarks/start"
+                    | "/api/benchmarks/cancel" => {
+                        self.benchmarks = value;
+                    }
                     "/api/data/delete" => {
                         let detail = value["detail"]
                             .as_str()
@@ -1457,9 +1488,10 @@ impl NativeApp {
             0 => "Your workspace for cleaner, sharper video.",
             1 => "Choose a source, tune enhancements, and render.",
             2 => "Find and install the models you need.",
-            3 => "Set up the inference backends for your hardware.",
-            4 => "Inspect the Python engine and its environment.",
-            5 => "Personalize appearance, storage, and app updates.",
+            3 => "Compare installed models on your hardware, at real input resolutions.",
+            4 => "Set up the inference backends for your hardware.",
+            5 => "Inspect the Python engine and its environment.",
+            6 => "Personalize appearance, storage, and app updates.",
             _ => "Your workspace for cleaner, sharper video.",
         }
     }
@@ -1902,13 +1934,16 @@ impl NativeApp {
                     .clicked()
                 {
                     self.start_recommended_runtime_setup();
-                    self.page = 3;
+                    self.page = RUNTIME_PAGE;
                 }
                 if ui.button("Manage models").clicked() {
                     self.page = 2;
                 }
+                if ui.button("Compare models").clicked() {
+                    self.page = BENCHMARK_PAGE;
+                }
                 if ui.button("Settings").clicked() {
-                    self.page = 5;
+                    self.page = SETTINGS_PAGE;
                 }
                 if let Some(gb) = disk_space {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2449,6 +2484,9 @@ impl NativeApp {
         if active {
             blockers.push("A render is already active.".to_owned());
         }
+        if self.benchmarks["status"].as_str() == Some("running") {
+            blockers.push("Cancel the active model benchmark before rendering.".to_owned());
+        }
         if self.busy {
             blockers.push("Waiting for the engine to finish its current action.".to_owned());
         }
@@ -2672,7 +2710,7 @@ impl NativeApp {
                             .color(palette.secondary),
                         );
                         if ui.button("Set up now").clicked() {
-                            self.page = 5;
+                            self.page = SETTINGS_PAGE;
                         }
                     });
                 });
@@ -2805,7 +2843,7 @@ impl NativeApp {
     fn downloads_page(&mut self, ui: &mut egui::Ui) {
         let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
         let active = self.download["active"].as_bool().unwrap_or(false);
-        let busy = self.busy;
+        let busy = self.busy || self.benchmarks["status"].as_str() == Some("running");
         let connected = self.connected;
         let catalog = self.models.as_object().map_or_else(Vec::new, |categories| {
             categories
@@ -3095,6 +3133,399 @@ impl NativeApp {
         });
     }
 
+    fn benchmarks_page(&mut self, ui: &mut egui::Ui) {
+        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        let categories = [
+            ("upscale", "Upscale"),
+            ("interpolate", "Interpolate"),
+            ("decompress", "Decompress"),
+            ("denoise", "Denoise"),
+            ("deblur", "Deblur"),
+        ];
+        let resolutions = ["480p", "720p", "1080p", "1440p", "4K"];
+        let running = self.benchmarks["status"].as_str() == Some("running");
+        let mut start_payload = None;
+        let available_backends = self.bootstrap["system"]["available_backends"].clone();
+        let installed_count = categories
+            .iter()
+            .map(|(category, _)| {
+                self.models["model_status"][*category]
+                    .as_object()
+                    .map_or(0, |models| {
+                        models
+                            .values()
+                            .filter(|installed| installed.as_bool() == Some(true))
+                            .count()
+                    })
+            })
+            .sum::<usize>();
+        let result_count = self.benchmarks["results"].as_array().map_or(0, |items| {
+            items
+                .iter()
+                .filter(|item| item["status"] == "complete")
+                .count()
+        });
+
+        Self::card(ui, "Run a local benchmark", |ui| {
+            ui.label(RichText::new(
+                "REAL Video Enhancer runs its actual inference pipeline against a repeatable synthetic 24 fps clip. No processed video is saved.",
+            ).color(palette.secondary));
+            ui.add_space(theme::space::MD);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Backend").strong());
+                egui::ComboBox::from_id_salt("benchmark-backend")
+                    .selected_text(self.backend.to_uppercase())
+                    .show_ui(ui, |ui| {
+                        for backend in ["pytorch", "ncnn", "tensorrt"] {
+                            let ready = backend_is_installed(&available_backends, backend);
+                            let label = if ready {
+                                backend.to_uppercase()
+                            } else {
+                                format!("{} · unavailable", backend.to_uppercase())
+                            };
+                            if ui
+                                .add_enabled(
+                                    ready && !running,
+                                    egui::Button::selectable(self.backend == backend, label),
+                                )
+                                .clicked()
+                            {
+                                self.backend = backend.to_owned();
+                                self.save_render_defaults();
+                                self.get(&format!("/api/models?backend={backend}"));
+                            }
+                        }
+                    });
+                ui.label(RichText::new("Category").strong());
+                egui::ComboBox::from_id_salt("benchmark-category")
+                    .selected_text(if self.benchmark_category == "all" {
+                        "All categories"
+                    } else {
+                        categories
+                            .iter()
+                            .find(|(key, _)| *key == self.benchmark_category)
+                            .map_or("All categories", |(_, label)| *label)
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.benchmark_category,
+                            "all".to_owned(),
+                            "All categories",
+                        );
+                        for (key, label) in categories {
+                            ui.selectable_value(
+                                &mut self.benchmark_category,
+                                key.to_owned(),
+                                label,
+                            );
+                        }
+                    });
+                ui.label(RichText::new("Clip length").strong());
+                egui::ComboBox::from_id_salt("benchmark-frames")
+                    .selected_text(format!(
+                        "{} frames · {:.0} sec",
+                        self.benchmark_frames,
+                        self.benchmark_frames as f32 / 24.0
+                    ))
+                    .show_ui(ui, |ui| {
+                        for frames in [24_usize, 48, 96] {
+                            ui.selectable_value(
+                                &mut self.benchmark_frames,
+                                frames,
+                                format!("{} frames · {:.0} sec", frames, frames as f32 / 24.0),
+                            );
+                        }
+                    });
+            });
+
+            ui.add_space(theme::space::MD);
+            ui.label(RichText::new("Input resolution").strong());
+            ui.horizontal_wrapped(|ui| {
+                for resolution in resolutions {
+                    let selected = self
+                        .benchmark_resolutions
+                        .entry(resolution.to_owned())
+                        .or_insert(false);
+                    let response = ui.add_sized(
+                        Vec2::new(82.0, 36.0),
+                        egui::Button::new(resolution)
+                            .fill(if *selected {
+                                palette.accent.gamma_multiply(0.18)
+                            } else {
+                                palette.elevated
+                            })
+                            .stroke(Stroke::new(
+                                if *selected { 1.5 } else { 1.0 },
+                                if *selected {
+                                    palette.accent
+                                } else {
+                                    palette.border
+                                },
+                            )),
+                    );
+                    if response.clicked() && !running {
+                        *selected = !*selected;
+                    }
+                }
+            });
+            ui.add_space(theme::space::SM);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{installed_count} installed models · {result_count} saved measurements"
+                    ))
+                    .color(palette.secondary),
+                );
+                ui.label(
+                    RichText::new("4K upscale tests use 256 px tiles to limit memory use.")
+                        .size(11.0)
+                        .color(palette.muted),
+                );
+                let gpu_id = if self.backend == "ncnn" {
+                    self.ncnn_gpu_id
+                } else {
+                    self.pytorch_gpu_id
+                };
+                ui.label(
+                    RichText::new(format!(
+                        "Profile · {} · GPU {gpu_id} · 256 px tiles",
+                        self.precision
+                    ))
+                    .size(11.0)
+                    .color(palette.muted),
+                );
+            });
+            ui.add_space(theme::space::MD);
+            ui.horizontal_wrapped(|ui| {
+                let selected_resolutions = resolutions
+                    .iter()
+                    .filter(|resolution| {
+                        self.benchmark_resolutions
+                            .get(**resolution)
+                            .copied()
+                            .unwrap_or(false)
+                    })
+                    .map(|resolution| (*resolution).to_owned())
+                    .collect::<Vec<_>>();
+                let selected_categories = categories
+                    .iter()
+                    .filter(|(key, _)| {
+                        self.benchmark_category == "all" || self.benchmark_category == *key
+                    })
+                    .map(|(key, _)| (*key).to_owned())
+                    .collect::<Vec<_>>();
+                let can_start = !running
+                    && !self.busy
+                    && self.connected
+                    && backend_is_installed(&available_backends, &self.backend)
+                    && !selected_resolutions.is_empty()
+                    && installed_count > 0;
+                if ui
+                    .add_enabled(
+                        can_start,
+                        egui::Button::new("Run selected benchmarks")
+                            .fill(palette.accent)
+                            .stroke(Stroke::NONE),
+                    )
+                    .clicked()
+                {
+                    start_payload = Some(json!({
+                        "backend": self.backend,
+                        "categories": selected_categories,
+                        "resolutions": selected_resolutions,
+                        "frames": self.benchmark_frames,
+                        "precision": self.precision,
+                        "pytorch_gpu_id": self.pytorch_gpu_id,
+                        "ncnn_gpu_id": self.ncnn_gpu_id,
+                    }));
+                }
+                if running && ui.button("Cancel benchmark").clicked() {
+                    self.post("/api/benchmarks/cancel", json!({}));
+                }
+                if !self.connected {
+                    ui.label(RichText::new("Waiting for the local engine.").color(palette.warning));
+                } else if installed_count == 0 {
+                    ui.label(
+                        RichText::new("Install models from Downloads before benchmarking.")
+                            .color(palette.warning),
+                    );
+                } else if selected_resolutions.is_empty() {
+                    ui.label(
+                        RichText::new("Select at least one input resolution.")
+                            .color(palette.warning),
+                    );
+                }
+            });
+
+            if running
+                || self.benchmarks["status"]
+                    .as_str()
+                    .is_some_and(|status| matches!(status, "completed" | "cancelled" | "error"))
+            {
+                ui.add_space(theme::space::MD);
+                let stage = self.benchmarks["stage"]
+                    .as_str()
+                    .unwrap_or("Benchmark status");
+                ui.horizontal(|ui| {
+                    components::status_dot(
+                        ui,
+                        if self.benchmarks["status"] == "error" {
+                            palette.error
+                        } else if running {
+                            palette.accent
+                        } else {
+                            palette.success
+                        },
+                        stage,
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if self.benchmarks["total"].as_u64().unwrap_or(0) > 0 {
+                            ui.label(format!(
+                                "{} / {}",
+                                self.benchmarks["completed"].as_u64().unwrap_or(0),
+                                self.benchmarks["total"].as_u64().unwrap_or(0)
+                            ));
+                        }
+                    });
+                });
+                if running {
+                    ui.add(
+                        egui::ProgressBar::new(
+                            self.benchmarks["progress"].as_f64().unwrap_or(0.0) as f32 / 100.0,
+                        )
+                        .show_percentage(),
+                    );
+                }
+                ui.label(
+                    RichText::new(self.benchmarks["detail"].as_str().unwrap_or_default())
+                        .size(12.0)
+                        .color(palette.secondary),
+                );
+                if let Some(current) = self.benchmarks["current"].as_object() {
+                    let model = current
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Model");
+                    let resolution = current
+                        .get("resolution")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if let Some(fps) = current.get("engine_reported_fps").and_then(Value::as_f64) {
+                        ui.label(
+                            RichText::new(format!("{model} · {resolution} · {fps:.1} live fps"))
+                                .strong()
+                                .color(palette.accent),
+                        );
+                    }
+                }
+                if let Some(error) = self.benchmarks["error"]
+                    .as_str()
+                    .filter(|error| !error.is_empty())
+                {
+                    ui.colored_label(palette.error, error);
+                }
+            }
+        });
+        if let Some(payload) = start_payload {
+            self.post("/api/benchmarks/start", payload);
+        }
+
+        ui.add_space(theme::space::MD);
+        Self::card(ui, "Model performance by category", |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Every catalog model is listed. Results are local measurements, saved on this PC.").color(palette.secondary));
+                ui.add_space(theme::space::MD);
+                ui.add(icons::styled("search", palette.muted, 16.0));
+                ui.add_sized(Vec2::new(ui.available_width().min(280.0), 36.0),
+                    egui::TextEdit::singleline(&mut self.benchmark_search).hint_text("Filter model names…"));
+            });
+            ui.add_space(theme::space::SM);
+            egui::ScrollArea::vertical().max_height(650.0).show(ui, |ui| {
+                for (category, title) in categories {
+                    if self.benchmark_category != "all" && self.benchmark_category != category { continue; }
+                    let Some(names) = self.models[category].as_array() else { continue; };
+                    let matching = names.iter().filter_map(Value::as_str)
+                        .filter(|name| self.benchmark_search.trim().is_empty() || name.to_lowercase().contains(&self.benchmark_search.trim().to_lowercase()))
+                        .collect::<Vec<_>>();
+                    if matching.is_empty() { continue; }
+                    let ready_count = matching.iter().filter(|name| self.models["model_status"][category][**name].as_bool() == Some(true)).count();
+                    egui::CollapsingHeader::new(format!("{title} · {ready_count}/{} installed", matching.len()))
+                        .id_salt(("benchmark-category", category)).default_open(self.benchmark_category != "all")
+                        .show(ui, |ui| {
+                            egui::ScrollArea::horizontal().id_salt(("benchmark-table", category)).show(ui, |ui| {
+                                ui.set_min_width(790.0_f32.max(ui.available_width()));
+                                egui::Grid::new(("benchmark-grid", category)).num_columns(7).striped(true)
+                                    .min_col_width(76.0).show(ui, |ui| {
+                                        ui.add_sized(Vec2::new(260.0, 28.0), egui::Label::new(RichText::new("Model").strong()));
+                                        ui.label(RichText::new("Status").strong());
+                                        for resolution in resolutions { ui.label(RichText::new(resolution).strong()); }
+                                        ui.end_row();
+                                        for name in &matching {
+                                            let name = *name;
+                                            let installed = self.models["model_status"][category][name].as_bool() == Some(true);
+                                            ui.add_sized(Vec2::new(260.0, 32.0), egui::Label::new(RichText::new(name).size(12.0)).truncate()).on_hover_text(name);
+                                            components::status_dot(ui, if installed { palette.success } else { palette.muted }, if installed { "Installed" } else { "Not installed" });
+                                            for resolution in resolutions {
+                                                let result = self.benchmarks["results"].as_array().and_then(|items| items.iter().rev().find(|item| {
+                                                    item["backend"].as_str() == Some(self.backend.as_str())
+                                                        && item["category"].as_str() == Some(category)
+                                                        && item["model"].as_str() == Some(name)
+                                                        && item["resolution"].as_str() == Some(resolution)
+                                                }));
+                                                if let Some(result) = result.filter(|_| installed) {
+                                                    if result["status"] == "complete" {
+                                                        let fps = result["measured_fps"].as_f64().unwrap_or(0.0);
+                                                        let seconds = result["seconds"].as_f64().unwrap_or(0.0);
+                                                        ui.label(RichText::new(format!("{fps:.1} fps")).color(palette.success)).on_hover_text(format!("{seconds:.2} sec for {} frames · {} precision · GPU {} · {} px tiles · end-to-end", result["frames"].as_u64().unwrap_or(0), result["precision"].as_str().unwrap_or("auto"), result["gpu_id"].as_u64().unwrap_or(0), result["tile_size"].as_u64().unwrap_or(256)));
+                                                    } else if result["status"] == "error" {
+                                                        ui.colored_label(palette.error, "Failed").on_hover_text(result["error"].as_str().unwrap_or("Benchmark failed."));
+                                                    } else {
+                                                        ui.label(RichText::new("—").color(palette.muted));
+                                                    }
+                                                } else if installed {
+                                                    ui.label(RichText::new("—").color(palette.muted)).on_hover_text("Not measured on this PC yet.");
+                                                } else {
+                                                    ui.label(RichText::new("—").color(palette.muted));
+                                                }
+                                            }
+                                            ui.end_row();
+                                        }
+                                    });
+                            });
+                        });
+                    ui.add_space(theme::space::XS);
+                }
+                ui.label(RichText::new("Scene-change detectors are evaluated automatically during interpolation and are not standalone render models.").size(11.0).color(palette.muted));
+            });
+        });
+
+        ui.add_space(theme::space::SM);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "Hardware · {}",
+                    self.bootstrap["system"]["gpu_name"]
+                        .as_str()
+                        .unwrap_or("GPU not detected")
+                ))
+                .strong(),
+            );
+            ui.label(
+                RichText::new(format!(
+                    "{} · {} RAM",
+                    self.bootstrap["system"]["cpu"]
+                        .as_str()
+                        .unwrap_or("CPU unavailable"),
+                    self.bootstrap["system"]["ram"]
+                        .as_str()
+                        .unwrap_or("RAM unavailable")
+                ))
+                .size(11.0)
+                .color(palette.secondary),
+            );
+        });
+    }
+
     fn runtime_page(&mut self, ui: &mut egui::Ui) {
         let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
         let status = self.install["status"]
@@ -3213,6 +3644,7 @@ impl NativeApp {
             ui.add_space(theme::space::MD);
             ui.horizontal_wrapped(|ui| {
                 let enabled = !installing && !self.busy;
+                let enabled = enabled && self.benchmarks["status"].as_str() != Some("running");
                 if ui
                     .add_enabled(enabled, egui::Button::new("Install recommended runtime"))
                     .clicked()
@@ -3301,6 +3733,7 @@ impl NativeApp {
         let interpreter_available = self.python["python_available"].as_bool().unwrap_or(false);
         let interpreter_present = self.python["python_present"].as_bool().unwrap_or(false);
         let available = self.python["python_managed"].as_bool() == Some(true);
+        let benchmark_running = self.benchmarks["status"].as_str() == Some("running");
         let install_failed = self.install["status"].as_str() == Some("error");
         let python_path = self.python["python_path"].as_str().unwrap_or("").to_owned();
         Self::card(ui, "Managed Python", |ui| {
@@ -3402,7 +3835,10 @@ impl NativeApp {
                     ("freeze", "Full package list"),
                 ] {
                     if ui
-                        .add_enabled(available && !self.busy, egui::Button::new(label))
+                        .add_enabled(
+                            available && !self.busy && !benchmark_running,
+                            egui::Button::new(label),
+                        )
                         .clicked()
                     {
                         self.post("/api/python/pip", json!({"command": command}));
@@ -3588,7 +4024,10 @@ impl NativeApp {
                     );
                 });
             if ui
-                .button("Apply and install or verify all models")
+                .add_enabled(
+                    self.benchmarks["status"].as_str() != Some("running"),
+                    egui::Button::new("Apply and install or verify all models"),
+                )
                 .clicked()
             {
                 update_ui_setting("model_storage", json!(self.model_storage));
@@ -4299,9 +4738,10 @@ impl eframe::App for NativeApp {
                             0 => self.home_page(ui),
                             1 => self.process_page(ui),
                             2 => self.downloads_page(ui),
-                            3 => self.runtime_page(ui),
-                            4 => self.python_page(ui),
-                            5 => self.settings_page(ui),
+                            3 => self.benchmarks_page(ui),
+                            4 => self.runtime_page(ui),
+                            5 => self.python_page(ui),
+                            6 => self.settings_page(ui),
                             _ => self.home_page(ui),
                         });
                 });

@@ -9,6 +9,7 @@ import json
 import multiprocessing.shared_memory as shared_memory
 import os
 import platform
+import re
 import shutil
 import shlex
 import struct
@@ -69,13 +70,23 @@ capability_cache_lock = threading.RLock()
 capability_cache = {"checked_at": 0.0, "value": None}
 render = {"status": "idle", "paused": False, "process": None, "pause_memory": None, "preview_memory": None, "preview_jpeg": None, "preview_size": 0, "preview_enabled": False, "engine": "rve", "log_lines": [], "started": 0.0, "output_file": None, "current_frame": 0, "gen_fps": None, "eta": "--"}
 render_cancel_event = threading.Event()
+benchmark_lock = threading.RLock()
+benchmark_process_lock = threading.RLock()
+benchmark_cancel_event = threading.Event()
+benchmark_process = None
+benchmark_job = {
+    "status": "idle", "progress": 0, "completed": 0, "total": 0,
+    "stage": "Benchmarks", "detail": "Run a local benchmark to measure installed models.",
+    "current": None, "error": "",
+}
+benchmark_results_file = APP_DATA / "benchmark-results.json"
 install_state = {"status": "not_started", "progress": 0, "stage": "Runtime check", "detail": "Runtime setup has not been started."}
 install_lock = threading.RLock()
 PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.67")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.68")
 update_lock = threading.RLock()
 update_state = {"status": "idle", "progress": 0,
                 "detail": "Check B1progame on GitHub for the latest Windows release.",
@@ -487,6 +498,270 @@ def catalog_model_status(catalog):
     return result
 
 
+BENCHMARK_RESOLUTIONS = {
+    "480p": (854, 480),
+    "720p": (1280, 720),
+    "1080p": (1920, 1080),
+    "1440p": (2560, 1440),
+    "4K": (3840, 2160),
+}
+BENCHMARK_CATEGORIES = ("upscale", "interpolate", "decompress", "denoise", "deblur")
+
+
+def load_benchmark_results():
+    try:
+        payload = json.loads(benchmark_results_file.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+benchmark_job["results"] = load_benchmark_results()
+
+
+def save_benchmark_results(results):
+    benchmark_results_file.parent.mkdir(parents=True, exist_ok=True)
+    temporary = benchmark_results_file.with_suffix(".tmp")
+    temporary.write_text(json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
+    temporary.replace(benchmark_results_file)
+
+
+def benchmark_snapshot():
+    with benchmark_lock:
+        return {**benchmark_job, "results": list(benchmark_job.get("results") or [])}
+
+
+def _set_benchmark_state(**updates):
+    with benchmark_lock:
+        benchmark_job.update(updates)
+
+
+def _benchmark_clip(ffmpeg, destination, width, height, frame_count):
+    command = [
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+        "-i", f"testsrc2=size={width}x{height}:rate=24", "-frames:v", str(frame_count),
+        "-an", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "32",
+        "-pix_fmt", "yuv420p", str(destination),
+    ]
+    process = start_hidden_process(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, encoding="utf-8", errors="replace")
+    with benchmark_process_lock:
+        global benchmark_process
+        benchmark_process = process
+    try:
+        output, _ = process.communicate(timeout=180)
+    except subprocess.TimeoutExpired as exc:
+        process.terminate()
+        process.communicate()
+        raise RuntimeError("Generating the short benchmark clip timed out.") from exc
+    finally:
+        with benchmark_process_lock:
+            benchmark_process = None
+    if benchmark_cancel_event.is_set():
+        raise InterruptedError("Benchmark cancelled.")
+    if process.returncode or not destination.is_file():
+        raise RuntimeError((output or "Could not generate a benchmark video with FFmpeg.").strip()[-1000:])
+
+
+def run_model_benchmarks(backend, categories, resolutions, frame_count, precision, pytorch_gpu_id, ncnn_gpu_id):
+    global benchmark_process
+    results = list(benchmark_job.get("results") or [])
+    try:
+        ffmpeg = find_ffmpeg_path()
+        if not ffmpeg:
+            raise RuntimeError("FFmpeg is required to generate repeatable benchmark clips. Install the app runtime first.")
+        capabilities = python_capabilities()
+        if not selected_backend_is_available(capabilities, backend):
+            raise RuntimeError(f"The {backend.upper()} backend is not installed or available on this PC.")
+        _, catalog = model_catalog(backend)
+        entries = []
+        for category in categories:
+            for label, spec in catalog.get(category, {}).items():
+                path = find_model_file(spec[0])
+                if path:
+                    entries.append((category, label, str(path.resolve())))
+        total = len(entries) * len(resolutions)
+        if total == 0:
+            raise RuntimeError("No installed models match the selected categories. Install models from Downloads first.")
+        APP_DATA.mkdir(parents=True, exist_ok=True)
+        _set_benchmark_state(status="running", progress=0, completed=0, total=total,
+                             stage="Preparing benchmark", detail=f"Measuring {len(entries)} installed models across {len(resolutions)} resolutions.", current=None, error="")
+        with tempfile.TemporaryDirectory(prefix="rve-benchmark-", dir=str(APP_DATA)) as temporary_root:
+            temp_root = Path(temporary_root)
+            clips = {}
+            for resolution in resolutions:
+                if benchmark_cancel_event.is_set():
+                    raise InterruptedError("Benchmark cancelled.")
+                width, height = BENCHMARK_RESOLUTIONS[resolution]
+                clip = temp_root / f"sample-{resolution}.mp4"
+                _set_benchmark_state(stage=f"Preparing {resolution} test clip", detail=f"Generating {frame_count} synthetic frames at {width} × {height}.")
+                _benchmark_clip(ffmpeg, clip, width, height, frame_count)
+                clips[resolution] = clip
+
+            completed = 0
+            for category, label, model_path in entries:
+                for resolution in resolutions:
+                    if benchmark_cancel_event.is_set():
+                        raise InterruptedError("Benchmark cancelled.")
+                    width, height = BENCHMARK_RESOLUTIONS[resolution]
+                    item = {"backend": backend, "category": category, "model": label,
+                            "resolution": resolution, "width": width, "height": height,
+                            "precision": precision, "tile_size": 256,
+                            "gpu_id": pytorch_gpu_id if backend in ("pytorch", "tensorrt") else ncnn_gpu_id,
+                            "status": "running", "measured_fps": None, "seconds": None,
+                            "frames": 0, "recorded_at": int(time.time()),
+                            "note": "Short synthetic 24 fps clip; includes engine startup."}
+                    _set_benchmark_state(stage=f"{label} · {resolution}", current=item,
+                                         detail=f"Benchmarking {completed + 1} of {total}.")
+                    payload = {
+                        "engine": "rve", "backend": backend,
+                        "input_path": str(clips[resolution]), "output_folder": str(temp_root / "output"),
+                        "models": {category: model_path},
+                        "toggles": {category: True, "slomo": False},
+                        "interpolate_factor": 2.0,
+                        "settings": {"precision": precision, "device": "auto", "tile_size": 256,
+                                     "overlap": 16, "pytorch_gpu_id": pytorch_gpu_id, "ncnn_gpu_id": ncnn_gpu_id,
+                                     "overwrite": True, "benchmark_mode": True,
+                                     "output_to_mpv": False, "merge_subtitles": False,
+                                     "auto_border_cropping": False, "uhd_mode": False,
+                                     "auto_hdr_mode": False, "preview_enabled": False},
+                        "encoding": {"crf": "32", "video_encoder_preset": "libx264",
+                                     "audio_encoder_preset": "copy_audio",
+                                     "subtitle_encoder_preset": "copy_subtitle",
+                                     "audio_bitrate": "128k", "video_pixel_format": "yuv420p"},
+                    }
+                    start = time.perf_counter()
+                    log_tail = []
+                    fps_samples = []
+                    max_frame = 0
+                    process = None
+                    try:
+                        command = build_rve_command(payload)
+                        process = start_hidden_process(command, cwd=APP_DATA, stdout=subprocess.PIPE,
+                                                      stderr=subprocess.STDOUT, text=True,
+                                                      encoding="utf-8", errors="replace", bufsize=1)
+                        with benchmark_process_lock:
+                            benchmark_process = process
+                        for line in process.stdout:
+                            line = line.strip()
+                            if line:
+                                log_tail.append(line)
+                                log_tail = log_tail[-18:]
+                                match = re.search(r"FPS:\s*([0-9.]+).*Current Frame:\s*(\d+)", line)
+                                if match:
+                                    fps_samples.append(float(match.group(1)))
+                                    max_frame = max(max_frame, int(match.group(2)))
+                                    current = dict(item)
+                                    current["frames_processed"] = max_frame
+                                    current["engine_reported_fps"] = fps_samples[-1]
+                                    fraction = min(0.95, max_frame / max(frame_count * (2 if category == "interpolate" else 1), 1))
+                                    _set_benchmark_state(
+                                        current=current,
+                                        progress=round((completed + fraction) * 100 / total),
+                                        detail=f"Benchmarking {completed + 1} of {total} · {max_frame} frames processed.",
+                                    )
+                            if benchmark_cancel_event.is_set() and process.poll() is None:
+                                process.terminate()
+                        return_code = process.wait()
+                        elapsed = max(time.perf_counter() - start, 0.001)
+                        if benchmark_cancel_event.is_set():
+                            raise InterruptedError("Benchmark cancelled.")
+                        if return_code:
+                            raise RuntimeError("\n".join(log_tail) or f"Renderer exited with code {return_code}.")
+                        frames = max_frame or frame_count * (2 if category == "interpolate" else 1)
+                        item.update(status="complete", measured_fps=round(frames / elapsed, 2),
+                                    seconds=round(elapsed, 2), frames=frames,
+                                    engine_reported_fps=round(fps_samples[-1], 2) if fps_samples else None)
+                    except InterruptedError:
+                        raise
+                    except Exception as exc:
+                        item.update(status="error", error=str(exc)[-1200:], seconds=round(time.perf_counter() - start, 2))
+                    finally:
+                        with benchmark_process_lock:
+                            benchmark_process = None
+                    results = [result for result in results if not (
+                        result.get("backend") == backend and result.get("category") == category
+                        and result.get("model") == label and result.get("resolution") == resolution
+                        and result.get("precision") == precision
+                        and result.get("gpu_id") == item.get("gpu_id")
+                    )]
+                    results.append(item)
+                    with benchmark_lock:
+                        benchmark_job["results"] = list(results)
+                    save_benchmark_results(results)
+                    completed += 1
+                    _set_benchmark_state(completed=completed, progress=round(completed * 100 / total), current=item)
+        final_status = "cancelled" if benchmark_cancel_event.is_set() else "completed"
+        _set_benchmark_state(status=final_status, progress=100 if final_status == "completed" else benchmark_job.get("progress", 0),
+                             stage="Benchmark complete" if final_status == "completed" else "Benchmark cancelled",
+                             detail=f"Measured {completed} model and resolution combinations." if final_status == "completed" else f"Stopped after {completed} combinations.",
+                             current=None, error="")
+    except InterruptedError:
+        _set_benchmark_state(status="cancelled", stage="Benchmark cancelled",
+                             detail="The benchmark was cancelled. Completed measurements have been saved.", current=None)
+    except Exception as exc:
+        _set_benchmark_state(status="error", stage="Benchmark needs attention", detail=str(exc), error=str(exc), current=None)
+    finally:
+        with benchmark_process_lock:
+            benchmark_process = None
+        benchmark_cancel_event.clear()
+
+
+def begin_model_benchmark(payload):
+    backend = str(payload.get("backend") or "pytorch").lower()
+    if backend not in ("pytorch", "ncnn", "tensorrt"):
+        raise ValueError("Choose PyTorch, NCNN, or TensorRT for benchmarking.")
+    requested_categories = payload.get("categories") or list(BENCHMARK_CATEGORIES)
+    categories = list(dict.fromkeys(category for category in requested_categories if category in BENCHMARK_CATEGORIES))
+    requested_resolutions = payload.get("resolutions") or ["720p"]
+    resolutions = list(dict.fromkeys(resolution for resolution in requested_resolutions if resolution in BENCHMARK_RESOLUTIONS))
+    if not categories or not resolutions:
+        raise ValueError("Select at least one benchmark category and input resolution.")
+    try:
+        frame_count = int(payload.get("frames", 48))
+    except (TypeError, ValueError):
+        frame_count = 48
+    frame_count = min(96, max(24, frame_count))
+    precision = str(payload.get("precision") or "auto").lower()
+    if precision not in ("auto", "float16", "float32"):
+        precision = "auto"
+    try:
+        pytorch_gpu_id = min(64, max(0, int(payload.get("pytorch_gpu_id", 0))))
+        ncnn_gpu_id = min(64, max(0, int(payload.get("ncnn_gpu_id", 0))))
+    except (TypeError, ValueError):
+        pytorch_gpu_id = ncnn_gpu_id = 0
+    with benchmark_lock:
+        if benchmark_job.get("status") == "running":
+            raise ValueError("A benchmark is already running.")
+        with state_lock:
+            if render.get("status") in ("preparing", "running", "paused", "stopping"):
+                raise ValueError("Stop the active render before starting a benchmark.")
+        if download_job.get("active") or install_state.get("status") in ("starting", "running", "installing", "downloading") or storage_job.get("status") in ("starting", "installing"):
+            raise ValueError("Wait for downloads, runtime setup, or model storage setup to finish before benchmarking.")
+        benchmark_cancel_event.clear()
+        benchmark_job.update(status="running", progress=0, completed=0, total=0,
+                             stage="Queued", detail="Preparing your local benchmark.", current=None, error="")
+    threading.Thread(target=run_model_benchmarks,
+                     args=(backend, categories, resolutions, frame_count, precision, pytorch_gpu_id, ncnn_gpu_id),
+                     name="rve-model-benchmark", daemon=True).start()
+    return benchmark_snapshot()
+
+
+def cancel_model_benchmark():
+    if benchmark_job.get("status") != "running":
+        return benchmark_snapshot()
+    benchmark_cancel_event.set()
+    with benchmark_process_lock:
+        process = benchmark_process
+    if process is not None and process.poll() is None:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+    _set_benchmark_state(stage="Cancelling benchmark", detail="Stopping the active model test…")
+    return benchmark_snapshot()
+
+
 def safe_extract_model_archive(archive_path, destination):
     destination_resolved = destination.resolve()
     with tarfile.open(archive_path, "r:gz") as archive:
@@ -619,6 +894,8 @@ def start_model_download(backend, selections=None, categories=None):
     with download_lock:
         if download_job.get("active"):
             raise ValueError("A model download is already in progress.")
+        if benchmark_job.get("status") == "running":
+            raise ValueError("Cancel the active benchmark before downloading models.")
         if install_state.get("status") == "running" or (storage_job.get("status") in ("starting", "installing") and threading.current_thread().name != "rve-model-storage"):
             raise ValueError("Wait for runtime or storage setup to finish before downloading models.")
         cancel_event.clear()
@@ -714,6 +991,7 @@ def delete_managed_data(kind):
         raise ValueError("Choose Python or models for removal.")
     if (render.get("status") in ("preparing", "running", "paused", "stopping")
             or download_job.get("active")
+            or benchmark_job.get("status") == "running"
             or install_state.get("status") in ("starting", "running", "installing", "downloading")
             or storage_job.get("status") in ("starting", "installing")):
         raise ValueError("Wait for active work to stop before removing managed files.")
@@ -864,6 +1142,8 @@ def begin_model_storage_setup(mode):
     if mode not in ("wsl", "windows"):
         raise ValueError("Model storage must be either 'wsl' or 'windows'.")
     with storage_lock:
+        if benchmark_job.get("status") == "running":
+            raise ValueError("Cancel the active benchmark before changing model storage.")
         if storage_job.get("status") in ("starting", "installing"):
             return storage_snapshot()
         cancel_event.clear()
@@ -1536,7 +1816,7 @@ def begin_runtime_operation(action="recommended", backend="pytorch", payload=Non
     with install_lock:
         if install_state.get("status") == "running":
             raise ValueError("A runtime installation is already in progress.")
-        if download_job.get("active") or storage_job.get("status") in ("starting", "installing"):
+        if download_job.get("active") or benchmark_job.get("status") == "running" or storage_job.get("status") in ("starting", "installing"):
             raise ValueError("Wait for model or storage setup to finish before changing the runtime.")
         cancel_event.clear()
         install_state.update(status="running", progress=0, stage="Queued", detail="Runtime operation queued.", output=[])
@@ -2249,6 +2529,8 @@ class Handler(BaseHTTPRequestHandler):
             models = {category: list(entries) for category, entries in catalog.items()}
             models.update({"backend": backend, "model_status": catalog_model_status(catalog)})
             respond_json(self, models); return
+        if path == "/api/benchmarks/status":
+            respond_json(self, benchmark_snapshot()); return
         if path == "/api/models/download_status":
             with download_lock:
                 snapshot = dict(download_job)
@@ -2306,6 +2588,10 @@ class Handler(BaseHTTPRequestHandler):
                 current = load_settings(); current.update(payload.get("settings") or {}); save_settings(current); respond_json(self, {"ok": True, "settings": current}); return
             if path == "/api/settings/reset":
                 save_settings({}); respond_json(self, {"ok": True, "settings": {}}); return
+            if path == "/api/benchmarks/start":
+                respond_json(self, begin_model_benchmark(payload), 202); return
+            if path == "/api/benchmarks/cancel":
+                respond_json(self, cancel_model_benchmark()); return
             if path == "/api/storage/configure":
                 mode = str(payload.get("storage") or "").lower()
                 if mode not in ("wsl", "windows"):
@@ -2337,6 +2623,8 @@ class Handler(BaseHTTPRequestHandler):
                 cancel_event.set()
                 render_cancel_event.set()
                 update_cancel_event.set()
+                if benchmark_job.get("status") == "running":
+                    cancel_model_benchmark()
                 with update_process_lock:
                     update_proc = update_process
                 if update_proc and update_proc.poll() is None:
@@ -2458,6 +2746,8 @@ class Handler(BaseHTTPRequestHandler):
                 respond_json(self, custom_models_payload()); return
             if path == "/api/render/start":
                 engine = str(payload.get("engine") or "rve").lower()
+                if benchmark_job.get("status") == "running":
+                    respond_json(self, {"ok": False, "error": "Cancel the active benchmark before starting a render."}, 409); return
                 output_file = requested_output_file(payload)
                 if output_file and output_file.exists() and not (payload.get("settings") or {}).get("overwrite"):
                     raise OutputFileExistsError(output_file)
@@ -2506,6 +2796,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = begin_runtime_operation(action, backend, payload)
                 respond_json(self, {"ok": True, "state": result}, 202); return
             if path == "/api/app/quit":
+                if benchmark_job.get("status") == "running":
+                    cancel_model_benchmark()
                 # Stop active rendering as part of app exit so the renderer
                 # cannot keep the launcher alive or continue writing output.
                 proc = render.get("process")
