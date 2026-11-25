@@ -188,6 +188,7 @@ fn task_started_title(task: &str) -> &'static str {
         "A model benchmark" => "Benchmark started",
         "A model download" => "Model download started",
         "Runtime setup" => "Runtime setup started",
+        "Package cache cleanup" => "Cache cleanup started",
         "Model storage setup" => "Model storage setup started",
         "An app update" => "Update started",
         "AnimeScripter setup" => "AnimeScripter setup started",
@@ -201,6 +202,9 @@ fn task_started_detail(task: &str) -> &'static str {
         "A model benchmark" => "Measuring the selected models on this PC.",
         "A model download" => "Downloading model files to your selected storage.",
         "Runtime setup" => "Preparing the app-managed Python and inference runtime.",
+        "Package cache cleanup" => {
+            "Removing unused package downloads while keeping the installed runtime."
+        }
         "Model storage setup" => "Preparing the selected model storage location.",
         "An app update" => "Downloading or installing the latest Windows release.",
         "AnimeScripter setup" => "Installing and checking the optional AnimeScripter engine.",
@@ -1123,6 +1127,11 @@ impl NativeApp {
                 "Runtime setup started",
                 "Preparing the app-managed Python and inference runtime.",
             )),
+            "/api/storage/prune-cache" => Some((
+                "Package cache cleanup",
+                "Cache cleanup started",
+                "Removing unused package downloads. Installed Python packages stay in place.",
+            )),
             "/api/animescripter/install" => Some((
                 "AnimeScripter setup",
                 "AnimeScripter setup started",
@@ -1237,6 +1246,11 @@ impl NativeApp {
                     .as_str()
                     .or_else(|| self.anime["error"].as_str()),
             ),
+            "Package cache cleanup" => (
+                self.install["status"].as_str().unwrap_or_default(),
+                self.install["detail"].as_str(),
+                self.install["error"].as_str(),
+            ),
             "An app update" => (
                 self.update["status"].as_str().unwrap_or_default(),
                 self.update["detail"].as_str(),
@@ -1346,6 +1360,11 @@ impl NativeApp {
         }
         if self.busy {
             return Some("An engine operation");
+        }
+        if self.install["status"].as_str() == Some("running")
+            && self.install["stage"].as_str() == Some("Pruning unused package cache")
+        {
+            return Some("Package cache cleanup");
         }
         active_task_from(
             self.render["status"].as_str().unwrap_or_default(),
@@ -1599,6 +1618,7 @@ impl NativeApp {
                         {
                             self.get("/api/python/info");
                             self.get("/api/bootstrap");
+                            self.get("/api/storage/footprint");
                         }
                     }
                     "/api/animescripter/status" => self.anime = value,
@@ -5484,6 +5504,11 @@ impl NativeApp {
 
     fn data_management_settings(&mut self, ui: &mut egui::Ui) {
         let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        let cache_bytes = self.footprint["components"]
+            .as_array()
+            .and_then(|components| components.iter().find(|item| item["id"] == "uv_cache"))
+            .and_then(|item| item["bytes"].as_u64())
+            .unwrap_or(0);
         Self::card(ui, "Managed downloads", |ui| {
             ui.label("Remove app-managed Python packages or model weights to reclaim disk space. Your videos and the app itself stay in place.");
             ui.add_space(theme::space::SM);
@@ -5508,7 +5533,29 @@ impl NativeApp {
                     self.managed_data_message = None;
                     self.destructive_confirmation = Some("models".to_owned());
                 }
+                if ui
+                    .add_enabled(
+                        cache_bytes > 0
+                            && self.active_task().is_none()
+                            && !self.managed_data_pending,
+                        egui::Button::new("Prune unused package cache"),
+                    )
+                    .on_hover_text(
+                        "Keep the installed runtime and remove cache entries uv considers unused.",
+                    )
+                    .clicked()
+                {
+                    self.destructive_confirmation = Some("uv_cache".to_owned());
+                }
             });
+            ui.label(
+                RichText::new(format!(
+                    "uv download cache · {} · pruned packages may need downloading again later",
+                    format_bytes(cache_bytes)
+                ))
+                .size(11.0)
+                .color(palette.secondary),
+            );
             if let Some(message) = self.managed_data_message.as_deref() {
                 ui.add_space(theme::space::XS);
                 ui.horizontal(|ui| {
@@ -6235,11 +6282,15 @@ impl eframe::App for NativeApp {
         if let Some(kind) = self.destructive_confirmation.clone() {
             let title = if kind == "python" {
                 "Delete managed Python?"
+            } else if kind == "uv_cache" {
+                "Prune unused package cache?"
             } else {
                 "Delete all managed models?"
             };
             let detail = if kind == "python" {
                 "This removes the app-managed Python runtime and its installed packages. Runtime setup can install them again."
+            } else if kind == "uv_cache" {
+                "uv will prune package cache entries it considers unused. Your installed Python runtime and packages stay in place. Packages removed from the cache may need to be downloaded again during a future setup."
             } else {
                 "This removes downloaded model weights, including custom models, from the selected Windows or WSL storage location. You can download them again later."
             };
@@ -6258,22 +6309,37 @@ impl eframe::App for NativeApp {
                         if ui
                             .add_enabled(
                                 self.active_task().is_none() && !self.managed_data_pending,
-                                egui::Button::new("Delete files"),
+                                egui::Button::new(if kind == "uv_cache" {
+                                    "Prune cache"
+                                } else {
+                                    "Delete files"
+                                }),
                             )
                             .clicked()
                         {
-                            self.managed_data_kind = Some(kind.clone());
-                            self.managed_data_message = Some(if kind == "python" {
-                                "Removing the managed Python environment, downloaded Python runtimes, and package cache…".to_owned()
-                            } else if self.model_storage == "wsl" {
-                                "Removing the managed model library from WSL Ubuntu…".to_owned()
-                            } else {
-                                "Removing the managed model library from this PC…".to_owned()
-                            });
-                            self.managed_data_failed = false;
-                            self.managed_data_pending = true;
                             self.destructive_confirmation = None;
-                            self.post("/api/data/delete", json!({"kind": kind.clone()}));
+                            if kind == "uv_cache" {
+                                self.install = json!({
+                                    "status": "running",
+                                    "progress": 1,
+                                    "stage": "Pruning unused package cache",
+                                    "detail": "Removing package downloads uv marks unused.",
+                                    "output": []
+                                });
+                                self.post("/api/storage/prune-cache", json!({}));
+                            } else {
+                                self.managed_data_kind = Some(kind.clone());
+                                self.managed_data_message = Some(if kind == "python" {
+                                    "Removing the managed Python environment, downloaded Python runtimes, and package cache…".to_owned()
+                                } else if self.model_storage == "wsl" {
+                                    "Removing the managed model library from WSL Ubuntu…".to_owned()
+                                } else {
+                                    "Removing the managed model library from this PC…".to_owned()
+                                });
+                                self.managed_data_failed = false;
+                                self.managed_data_pending = true;
+                                self.post("/api/data/delete", json!({"kind": kind.clone()}));
+                            }
                         }
                     });
                 });

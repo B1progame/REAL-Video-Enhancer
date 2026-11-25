@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.4.80 — 2026-11-25
+
+- Add a confirmed “Prune unused package cache” action to Settings, using uv’s safe cache pruning so installed Python packages remain available while unused cached downloads can be reclaimed.
+- Show the current uv cache size, explain that pruned packages may need to be downloaded again, and refresh storage measurements when pruning completes.
+
 ## 2.4.79 — 2026-11-24
 
 - Keep the recommended and one-click PyTorch installs on PyTorch 2.8/CUDA 12.8 with torchvision 0.23 so they stay compatible with Torch-TensorRT 2.8 and TensorRT 10.12.

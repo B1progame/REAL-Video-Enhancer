@@ -89,7 +89,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.79")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.80")
 update_lock = threading.RLock()
 github_token_lock = threading.RLock()
 github_token_value = None
@@ -2281,7 +2281,15 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
         APP_DATA.mkdir(parents=True, exist_ok=True)
         (APP_DATA / "bin").mkdir(parents=True, exist_ok=True)
         (APP_DATA / "temp").mkdir(parents=True, exist_ok=True)
-        if action == "recommended":
+        if action == "prune-cache":
+            uv = ensure_uv()
+            set_install_state(status="running", progress=12, stage="Pruning unused package cache",
+                              detail="Keeping the installed runtime and removing only cache entries uv marks unused.", output=[])
+            run_runtime_command([uv, "cache", "prune"], "Pruning unused uv cache entries", 35,
+                                env=managed_uv_environment())
+            set_install_state(status="completed", progress=100, stage="Cache cleanup complete",
+                              detail="Unused uv cache entries were pruned. The installed Python runtime and packages remain in place.")
+        elif action == "recommended":
             ensure_managed_python()
             uv = ensure_uv()
             uv_env = managed_uv_environment()
@@ -3279,6 +3287,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/startup/install":
                 result = begin_runtime_operation("recommended", "pytorch", payload)
                 respond_json(self, result, 202); return
+            if path == "/api/storage/prune-cache":
+                result = begin_runtime_operation("prune-cache", "uv", payload)
+                respond_json(self, {"ok": True, "state": result}, 202); return
             if path == "/api/actions/cancel":
                 cancel_event.set()
                 render_cancel_event.set()
