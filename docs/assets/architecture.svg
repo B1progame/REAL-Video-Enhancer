@@ -27,8 +27,8 @@
     <rect x="56" y="165" width="5" height="196" rx="2.5" fill="url(#aqua)"/>
     <text x="82" y="205" class="tag">WINDOWS DESKTOP</text>
     <text x="82" y="246" class="label">Rust interface</text>
-    <text x="82" y="278" class="body">Sidebar · processing · downloads</text>
-    <text x="82" y="303" class="body">Runtime · Python · settings</text>
+    <text x="82" y="278" class="body">Studio · models · render queue</text>
+    <text x="82" y="303" class="body">Benchmarks · runtime · settings</text>
     <text x="82" y="338" class="small">egui native window</text>
 
     <rect x="474" y="165" width="356" height="196" rx="20" fill="#202f37" stroke="#36505a"/>
@@ -49,7 +49,7 @@
   </g>
 
   <path d="M386 263h74" fill="none" stroke="#4b7883" stroke-width="3" marker-end="url(#arrow)"/>
-  <text x="393" y="246" class="small">HTTP · local only</text>
+  <text x="430" y="246" class="small" text-anchor="middle">local API</text>
   <path d="M830 263h74" fill="none" stroke="#4b7883" stroke-width="3" marker-end="url(#arrow)"/>
   <text x="842" y="246" class="small">model files</text>
 

@@ -1,90 +1,145 @@
 <div align="center">
-  <img src="docs/assets/rve-logo.png" alt="REAL Video Enhancer logo" width="176" />
-  <h1>REAL Video Enhancer</h1>
-  <p><strong>Restore and enhance video from a native Windows desktop app.</strong></p>
-  <p>
-    <a href="https://github.com/B1progame/REAL-Video-Enhancer/releases/latest">Download the Windows installer</a>
-    ·
-    <a href="https://github.com/B1progame/REAL-Video-Enhancer/releases">Release notes</a>
-    ·
-    <a href="https://github.com/TNTwise/REAL-Video-Enhancer">Original upstream project</a>
-  </p>
+
+<img src="docs/assets/banner.svg" alt="REAL Video Enhancer: upscale, interpolate, denoise and deblur video locally" width="100%" />
+
+<br />
+
+[![Latest release](https://img.shields.io/badge/release-2.5.0-00bebe?style=for-the-badge)](https://github.com/B1progame/REAL-Video-Enhancer/releases/latest)
+![Windows 11](https://img.shields.io/badge/Windows-11-5c78f6?style=for-the-badge)
+![Rust and egui](https://img.shields.io/badge/UI-Rust%20%2B%20egui-966cf4?style=for-the-badge)
+![Python engine](https://img.shields.io/badge/engine-Python-2cbe86?style=for-the-badge)
+[![AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-8a94a8?style=for-the-badge)](LICENSE)
+
+**[Download the installer](https://github.com/B1progame/REAL-Video-Enhancer/releases/latest)** ·
+[What's new](CHANGELOG.md) ·
+[Roadmap](ROADMAP.md) ·
+[Upstream project](https://github.com/TNTwise/REAL-Video-Enhancer)
+
+<br />
+
+<img src="docs/assets/ui/home.png" alt="Home screen with a drop target and system status" width="100%" />
+
 </div>
 
-REAL Video Enhancer is a Windows desktop application with a **native Rust interface** and the project's **Python video-processing engine**. It can keep model weights in WSL Ubuntu or on Windows, and it checks this fork's GitHub releases for app updates.
+Upscale, smooth motion and restore detail on your own PC. The interface is a **native Rust app** on real Windows acrylic; the video processing stays in the project's **Python engine**. Your footage never leaves the machine.
 
-<p align="center">
-  <img src="docs/assets/architecture.svg" alt="REAL Video Enhancer application architecture" width="100%" />
-</p>
+## A look around
 
-## What you can do
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/ui/studio.png" alt="Studio with source stage and enhancement switches" /></td>
+    <td width="50%"><img src="docs/assets/ui/models.png" alt="Model downloader with category filters and multi-select" /></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Studio</b><br />Drop a video, switch on enhancements, render</td>
+    <td align="center"><b>Models</b><br />Tick several and download them together</td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/ui/appearance.png" alt="Appearance settings with a live preview" /></td>
+    <td><img src="docs/assets/ui/runtime.png" alt="Runtime page with backend cards and hardware tiles" /></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Appearance</b><br />Make it yours, with a live preview</td>
+    <td align="center"><b>Runtime</b><br />One click installs the inference engine</td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/ui/palette.png" alt="Command palette" /></td>
+    <td><img src="docs/assets/ui/light.png" alt="Light theme" /></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Ctrl + K</b><br />Every page and action from the keyboard</td>
+    <td align="center"><b>Light theme</b><br />Same glass, daytime colours</td>
+  </tr>
+</table>
 
-- Open a video and choose interpolation, upscaling, restoration, denoising, and output options in the desktop app.
-- Manage model downloads and runtime setup from the app's sidebar pages.
-- Choose **WSL Ubuntu** or **Windows** for model storage. In WSL mode, the Windows app starts the selected distribution when needed.
-- Choose a light or dark appearance, select an accent color, and adjust render defaults in Settings.
-- Check for a newer release, download its Windows installer, and launch the installer from **Settings → Updates**.
-- Cancel active renders, model downloads, runtime installs, WSL model setup, or update downloads. When closing during work, keep it in the tray or cancel the work and quit.
-- Remove the managed Python runtime and model library from Settings when you want to reclaim disk space; reinstall them from the app later.
-- Install the Python runtime and its packages with app-managed `uv`; `uv` does not need to be installed globally.
-- Start directly in the Process workspace; first-run setup remains available from its setup prompt and Settings.
+## Highlights
 
-The app does not bundle model weights. It downloads them during setup into the storage location you choose.
+| | |
+| --- | --- |
+| 🎞️ **Enhancements** | Upscale, interpolate, decompress, denoise, deblur and slow motion |
+| 📚 **Render queue** | Add files or a whole folder; they render one after another |
+| ⏱️ **Honest progress** | Elapsed time, ETA or download speed and a Cancel button on every page |
+| 📦 **Model manager** | Filters, installed sizes, per-model delete and your own custom weights |
+| 🌐 **Community models** | Browse OpenModelDB with example previews |
+| 📊 **Benchmarks** | Measure your models on your GPU and see the fastest ones charted |
+| 🎨 **Your look** | Acrylic, Mica or solid, ten accent gradients or any colour, roundness, size, motion |
+| 💾 **Storage** | Usage chart, cache pruning, and **Slim runtime** to drop files only compilers need |
 
 ## Install
 
-1. Download the latest `REAL-Video-Enhancer-*-Windows-Installer.exe` from [GitHub Releases](https://github.com/B1progame/REAL-Video-Enhancer/releases/latest).
-2. Run the installer. It installs the Windows desktop app and its local Python engine.
-3. Start the app and choose WSL Ubuntu or Windows for model storage.
-4. Use **Settings → Model storage → Apply and install or verify all models** to prepare the selected location.
+1. Download `REAL-Video-Enhancer-*-Windows-Installer.exe` from [Releases](https://github.com/B1progame/REAL-Video-Enhancer/releases/latest) (about 13 MB).
+2. Run it. It installs the app and its local engine.
+3. Open **Settings → Storage**, choose **WSL Ubuntu** or **This PC · Windows**, and apply.
+4. Open **Runtime** and press **Install recommended runtime**.
+5. Pick models on the **Models** page, or let a render download what it needs.
 
-For WSL setup details and manual model installation, see [WSL-UBUNTU.md](WSL-UBUNTU.md).
+Model weights are not bundled. The PyTorch runtime is large (several GB). On an NVIDIA CUDA install, **Settings → Storage → Slim runtime** freed about 2.7 GB on a test PC by removing C++ headers and static libraries; reinstalling PyTorch brings them back.
 
-## Updating from Settings
+For WSL details and manual model installation, see [WSL-UBUNTU.md](WSL-UBUNTU.md).
 
-Open **Settings → Updates** and use **Check for updates**. If a newer Windows installer is available, select **Download update**, then **Install downloaded update**. The app downloads the installer from this repository's published GitHub release and starts it for you; after setup finishes, the updated app launches again.
+## Shortcuts
 
-**Existing 2.4.29 installs need one manual update first.** That build checks the original upstream release feed, so it cannot discover releases published by this fork. Install the current version once from [GitHub Releases](https://github.com/B1progame/REAL-Video-Enhancer/releases/latest); later versions can update through Settings. Because this fork is private, install GitHub CLI and sign in to B1progame with `gh auth login -h github.com`; the app uses `gh` for release access and never stores your GitHub token.
+| Keys | Does |
+| --- | --- |
+| <kbd>Ctrl</kbd> + <kbd>K</kbd> | Command palette |
+| <kbd>Ctrl</kbd> + <kbd>1</kbd>…<kbd>8</kbd> | Switch page |
+| Drag and drop | Open a video; extra files join the queue |
 
-The installer updates the application files. It does not remove your model library or settings. When you uninstall, the uninstaller asks whether to also remove the managed runtime, downloaded models, and app data from Windows and WSL.
+## Updating
+
+Open **Settings → Updates** and press **Check for updates**, then **Download and install**. The installer is verified against the checksum GitHub publishes, runs quietly, and reopens the app. Settings and models are kept.
+
+This repository is private, so the app needs access to read releases: either sign in once with GitHub CLI (`gh auth login`), or paste a read-only token under **Private repository access**. Saved tokens are encrypted for your Windows account.
+
+Uninstalling asks whether to also remove the managed runtime, models and app data.
 
 <p align="center">
   <img src="docs/assets/update-flow.svg" alt="In-app update flow from Settings through GitHub to the Windows installer" width="100%" />
 </p>
 
-## App pages
+## How it fits together
 
-| Page | Purpose |
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="REAL Video Enhancer application architecture" width="100%" />
+</p>
+
+A loopback-only Python service connects the Rust window to the render engine. The app does not open a browser for its interface.
+
+| Folder | Contents |
 | --- | --- |
-| **Home** | Runtime readiness, current render, and quick actions |
-| **Process** | Select input and output paths and configure a render |
-| **Downloads** | Browse the model catalog and manage downloads |
-| **Runtime** | Install or repair the inference runtime |
-| **Python** | Inspect the managed Python environment and its packages |
-| **Settings** | Appearance, model storage, updates, and render defaults |
-
-The Rust application is a Windows desktop program; it does not open a browser window for its interface. A loopback-only Python service connects the UI to the existing render engine.
-
-## AnimeScripter status
-
-The AnimeScripter integration code is preserved in the project, but it is **unfinished**. Its operations are not ready to rely on as part of the normal enhancement workflow.
-
-## Project roadmap and license
-
-See [ROADMAP.md](ROADMAP.md) for the current direction and unfinished work. This fork retains the upstream project licensing under the [GNU Affero General Public License v3.0](LICENSE); third-party models and bundled components may have their own terms.
-
-See [CHANGELOG.md](CHANGELOG.md) for this fork’s release history.
+| `native-ui/` | Rust desktop app (egui) |
+| `backend/` | Local engine service and render pipeline |
+| `src/` | Shared engine helpers and version |
+| `docs/assets/` | Logo, banner, diagrams and screenshots |
 
 ## Build from source
 
-On Windows, install Rust, Python 3.11 with the project's dependencies, Visual Studio C++ build tools with a Windows SDK, and Inno Setup 7. Then run from the repository directory:
+You need Rust, Python 3.11 with the project's dependencies, the Visual Studio C++ build tools with a Windows SDK, and Inno Setup 7.
 
 ```powershell
 .\build-inno-installer.bat
 ```
 
-The script builds the headless Python engine, compiles the optimized Rust desktop app, and creates the installer under `release-stage\installer\`.
+The installer lands in `release-stage-<version>\installer\`.
 
-## Project relationship
+Tests:
 
-This is a customized fork of [TNTwise/REAL-Video-Enhancer](https://github.com/TNTwise/REAL-Video-Enhancer). The Rust desktop interface, Windows installer, WSL model setup, and updater are maintained in this repository; the video-processing engine remains Python.
+```powershell
+cargo test --manifest-path native-ui\Cargo.toml
+```
+
+```powershell
+python -m pytest backend\tests\unit_tests\test_storage_and_models.py backend\tests\unit_tests\test_probe_cache.py
+```
+
+The other tests under `backend\tests` need a Python environment with PyTorch installed.
+
+## Known limits
+
+- Windows acrylic and Mica need Windows 11 22H2 or newer; older systems get a solid window. Windows also turns the effect off in battery saver or when Transparency effects is disabled.
+- AnimeScripter support is optional and still unfinished.
+- Runtime installs show the current step and elapsed time, without an ETA.
+
+## Credits and license
+
+A customised fork of [TNTwise/REAL-Video-Enhancer](https://github.com/TNTwise/REAL-Video-Enhancer). The Rust interface, Windows installer, WSL model setup and updater are maintained here. Licensed under the [GNU AGPL v3.0](LICENSE); third-party models and bundled components may have their own terms.

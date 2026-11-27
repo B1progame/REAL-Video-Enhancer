@@ -239,6 +239,11 @@ class PyInstaller(BuildManager):
         os.makedirs(work_path, exist_ok=True)
         os.makedirs(spec_path, exist_ok=True)
         separator = ";" if PLATFORM == "win32" else ":"
+        # Ship only what the engine reads at run time: no tests, no bytecode.
+        backend_stage = os.path.abspath(os.path.join("build", "backend-stage"))
+        shutil.rmtree(backend_stage, ignore_errors=True)
+        shutil.copytree(os.path.join(PROJECT_ROOT, "backend"), backend_stage,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "tests", ".pytest_cache"))
         command = [
             "-m", "PyInstaller", os.path.join(PROJECT_ROOT, "backend", "rve-service.py"), "--noconfirm", "--clean",
             "--onedir", "--windowed", "--name", "RVE-Engine",
@@ -246,9 +251,12 @@ class PyInstaller(BuildManager):
             "--distpath", os.path.join(OUTPUT_FOLDER, "REAL-Video-Enhancer"),
             "--workpath", work_path,
             "--specpath", spec_path,
-            "--add-data", f"{os.path.join(PROJECT_ROOT, 'backend')}{separator}backend",
+            "--add-data", f"{backend_stage}{separator}backend",
             "--add-data", f"{os.path.join(PROJECT_ROOT, 'install-all-models-wsl.sh')}{separator}.",
         ]
+        if PLATFORM == "win32":
+            # Windows uses its native file picker; Tcl/Tk would add about 9 MB.
+            command += ["--exclude-module", "tkinter", "--exclude-module", "_tkinter"]
         PythonManager.run_venv_python(command)
 
     def patch_for_xcbcursor(self):

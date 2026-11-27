@@ -9,7 +9,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicU16, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, Sender},
+        mpsc::{self, Receiver},
     },
     thread,
     time::{Duration, Instant},
@@ -19,9 +19,15 @@ use tray_icon::{
     Icon as TrayIconImage, TrayIcon, TrayIconBuilder, TrayIconEvent,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
+mod prefs;
 mod ui;
-use ui::theme::{accent_for_theme, border_color, secondary_text_color};
+mod views;
+mod worker;
+use prefs::{HistoryEntry, Prefs, RenderQueue};
+use ui::progress::{EtaTracker, Timing};
 use ui::{components, icons, theme};
+use views::{CommandPalette, ModelBrowser, Rate};
+use worker::{ApiBridge, ApiCommand};
 
 static API_PORT: AtomicU16 = AtomicU16::new(51837);
 const APP_VERSION: &str = match option_env!("RVE_APP_VERSION") {
@@ -30,9 +36,9 @@ const APP_VERSION: &str = match option_env!("RVE_APP_VERSION") {
 };
 const PAGES: [(&str, &str); 8] = [
     ("Home", "home"),
-    ("Process", "process"),
-    ("Downloads", "download"),
-    ("Model library", "library"),
+    ("Studio", "process"),
+    ("Models", "models"),
+    ("Community", "library"),
     ("Benchmarks", "benchmark"),
     ("Runtime", "runtime"),
     ("Python", "python"),
@@ -42,10 +48,10 @@ const PROCESS_PAGE: usize = 1;
 const BENCHMARK_PAGE: usize = 4;
 const RUNTIME_PAGE: usize = 5;
 const SETTINGS_PAGE: usize = 7;
-const PROCESS_COLUMN_THRESHOLD: f32 = 1040.0;
+const PROCESS_COLUMN_THRESHOLD: f32 = 880.0;
 const RUNTIME_METRICS_COLUMN_THRESHOLD: f32 = 760.0;
 const HOME_HERO_COLUMN_THRESHOLD: f32 = 780.0;
-const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 940.0;
+const HOME_STATUS_THREE_COLUMN_THRESHOLD: f32 = 900.0;
 
 fn can_start_model_download(connected: bool, active: bool, busy: bool) -> bool {
     connected && !active && !busy
@@ -117,24 +123,6 @@ fn render_preview_is_available(status: &Value) -> bool {
         status["status"].as_str(),
         Some("preparing" | "running" | "paused")
     ) && status["preview"]["available"].as_bool() == Some(true)
-}
-
-#[derive(Clone)]
-enum ApiCommand {
-    Get(String),
-    Post(String, Value),
-}
-
-struct ApiEvent {
-    endpoint: String,
-    value: Result<Value, String>,
-    image: Option<Result<Vec<u8>, String>>,
-    is_post: bool,
-}
-
-struct ApiBridge {
-    send: Sender<ApiCommand>,
-    receive: Receiver<ApiEvent>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -311,13 +299,6 @@ fn create_tray(_: &egui::Context) -> (Receiver<TrayCommand>, Option<String>) {
     )
 }
 
-fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(25)))
-        .build()
-        .into()
-}
-
 fn api_get(client: &ureq::Agent, endpoint: &str) -> Result<Value, String> {
     client
         .get(format!(
@@ -367,137 +348,6 @@ fn api_post(client: &ureq::Agent, endpoint: &str, payload: &Value) -> Result<Val
         .body_mut()
         .read_json::<Value>()
         .map_err(|error| error.to_string())
-}
-
-fn start_api_worker(ctx: egui::Context) -> ApiBridge {
-    let (command_send, command_receive) = mpsc::channel::<ApiCommand>();
-    let (event_send, event_receive) = mpsc::channel::<ApiEvent>();
-    thread::Builder::new()
-        .name("rve-api".to_owned())
-        .spawn(move || {
-            let client = agent();
-            let mut next_refresh = Instant::now();
-            let mut render_active = false;
-            let mut connected = false;
-            loop {
-                match command_receive.recv_timeout(Duration::from_millis(120)) {
-                    Ok(ApiCommand::Get(endpoint)) => {
-                        let image = if endpoint.starts_with("/api/video/first_frame?")
-                            || endpoint == "/api/render/preview_frame"
-                            || endpoint.starts_with("/api/library/thumbnail?id=")
-                        {
-                            Some(api_get_image(&client, &endpoint))
-                        } else {
-                            None
-                        };
-                        let value = if image.is_some() {
-                            image
-                                .as_ref()
-                                .and_then(|result| match result {
-                                    Ok(_) => None,
-                                    Err(error) => Some(Err(error.clone())),
-                                })
-                                .unwrap_or(Ok(Value::Null))
-                        } else {
-                            api_get(&client, &endpoint)
-                        };
-                        if endpoint == "/api/bootstrap" && value.is_ok() {
-                            connected = true;
-                        }
-                        let _ = event_send.send(ApiEvent {
-                            endpoint,
-                            value,
-                            image,
-                            is_post: false,
-                        });
-                        ctx.request_repaint();
-                    }
-                    Ok(ApiCommand::Post(endpoint, payload)) => {
-                        let value = api_post(&client, &endpoint, &payload);
-                        let _ = event_send.send(ApiEvent {
-                            endpoint,
-                            value,
-                            image: None,
-                            is_post: true,
-                        });
-                        ctx.request_repaint();
-                    }
-                    Err(RecvTimeoutError::Disconnected) => break,
-                    Err(RecvTimeoutError::Timeout) => {}
-                }
-
-                if Instant::now() >= next_refresh {
-                    let endpoints: &[&str] = if connected {
-                        &[
-                            "/api/render/status",
-                            "/api/models/download_status",
-                            "/api/startup/install_status",
-                            "/api/animescripter/status",
-                            "/api/storage/status",
-                            "/api/benchmarks/status",
-                            "/api/app/update/status",
-                        ]
-                    } else {
-                        &["/api/bootstrap"]
-                    };
-                    for endpoint in endpoints {
-                        let value = api_get(&client, endpoint);
-                        let should_fetch_render_preview = if *endpoint == "/api/render/status" {
-                            render_active = value.as_ref().is_ok_and(|status| {
-                                matches!(
-                                    status["status"].as_str(),
-                                    Some("preparing" | "running" | "paused")
-                                )
-                            });
-                            value.as_ref().is_ok_and(render_preview_is_available)
-                        } else {
-                            false
-                        };
-                        if *endpoint == "/api/bootstrap" && value.is_ok() {
-                            connected = true;
-                        } else if *endpoint != "/api/bootstrap"
-                            && let Err(error) = &value
-                        {
-                            let _ = event_send.send(ApiEvent {
-                                endpoint: "/api/connection".to_owned(),
-                                value: Err(error.clone()),
-                                image: None,
-                                is_post: false,
-                            });
-                            connected = false;
-                            ctx.request_repaint();
-                            break;
-                        }
-                        let _ = event_send.send(ApiEvent {
-                            endpoint: (*endpoint).to_owned(),
-                            value,
-                            image: None,
-                            is_post: false,
-                        });
-                        ctx.request_repaint();
-                        if should_fetch_render_preview
-                            && let Ok(bytes) = api_get_image(&client, "/api/render/preview_frame")
-                            && !bytes.is_empty()
-                        {
-                            let _ = event_send.send(ApiEvent {
-                                endpoint: "/api/render/preview_frame".to_owned(),
-                                value: Ok(Value::Null),
-                                image: Some(Ok(bytes)),
-                                is_post: false,
-                            });
-                            ctx.request_repaint();
-                        }
-                    }
-                    next_refresh = Instant::now()
-                        + Duration::from_millis(if render_active { 800 } else { 1500 });
-                }
-            }
-        })
-        .ok();
-    ApiBridge {
-        send: command_send,
-        receive: event_receive,
-    }
 }
 
 fn app_directory() -> PathBuf {
@@ -619,10 +469,6 @@ fn apply_theme(ctx: &egui::Context, accent: Color32, appearance: &str, reduce_mo
     theme::apply(ctx, accent, appearance, reduce_motion);
 }
 
-fn color_from_array(rgb: [u8; 3]) -> Color32 {
-    Color32::from_rgb(rgb[0], rgb[1], rgb[2])
-}
-
 fn settings_path() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -653,50 +499,6 @@ fn remember_api_port(port: u16) {
         return;
     }
     let _ = std::fs::write(path, port.to_string());
-}
-
-fn saved_accent() -> Color32 {
-    let Ok(contents) = std::fs::read_to_string(settings_path()) else {
-        return color_from_array(theme::ACCENTS[0].1);
-    };
-    let Ok(config) = serde_json::from_str::<Value>(&contents) else {
-        return color_from_array(theme::ACCENTS[0].1);
-    };
-    let Some(array) = config.get("accent").and_then(Value::as_array) else {
-        return color_from_array(theme::ACCENTS[0].1);
-    };
-    let rgb: Vec<_> = array
-        .iter()
-        .filter_map(Value::as_u64)
-        .map(|v| v as u8)
-        .collect();
-    if let [red, green, blue] = rgb.as_slice() {
-        Color32::from_rgb(*red, *green, *blue)
-    } else {
-        color_from_array(theme::ACCENTS[0].1)
-    }
-}
-
-fn saved_appearance() -> String {
-    std::fs::read_to_string(settings_path())
-        .ok()
-        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
-        .and_then(|config| {
-            config
-                .get("appearance")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .filter(|mode| mode == "light" || mode == "dark")
-        .unwrap_or_else(|| "dark".to_owned())
-}
-
-fn saved_reduce_motion() -> bool {
-    std::fs::read_to_string(settings_path())
-        .ok()
-        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
-        .and_then(|config| config.get("reduce_motion").and_then(Value::as_bool))
-        .unwrap_or(false)
 }
 
 fn saved_model_storage() -> String {
@@ -744,11 +546,6 @@ fn update_ui_setting(key: &str, value: Value) {
     }
 }
 
-fn save_accent(accent: Color32) {
-    let [red, green, blue, _] = accent.to_array();
-    update_ui_setting("accent", json!([red, green, blue]));
-}
-
 fn default_encoding() -> Value {
     json!({
         "video_encoder_preset": "libx264",
@@ -765,7 +562,6 @@ fn default_encoding() -> Value {
 
 struct NativeApp {
     api: ApiBridge,
-    _engine: Option<Child>,
     #[cfg(windows)]
     _tray_icon: Option<TrayIcon>,
     tray_events: Receiver<TrayCommand>,
@@ -778,9 +574,23 @@ struct NativeApp {
     managed_data_pending: bool,
     quit_when_idle: bool,
     page: usize,
-    accent: Color32,
-    appearance: String,
-    reduce_motion: bool,
+    prefs: Prefs,
+    queue: RenderQueue,
+    eta: EtaTracker,
+    timings: HashMap<&'static str, Timing>,
+    download_rate: Rate,
+    /// Frames the running render is expected to write.
+    render_total: Option<f64>,
+    settings_tab: usize,
+    model_browser: ModelBrowser,
+    command: CommandPalette,
+    window_handle: Option<isize>,
+    material_active: bool,
+    logo: Option<egui::TextureHandle>,
+    shown_page: usize,
+    page_changed: Instant,
+    render_input: String,
+    failed_update: Option<String>,
     connected: bool,
     engine_error: Option<String>,
     input_info: Value,
@@ -819,7 +629,6 @@ struct NativeApp {
     backend: String,
     render_engine: String,
     anime_options: Value,
-    model_search: String,
     library_search: String,
     library_category: String,
     benchmark_search: String,
@@ -847,7 +656,6 @@ struct NativeApp {
     busy: bool,
     toast: Option<AppToast>,
     last_active_task: Option<&'static str>,
-    launch_time: Instant,
 }
 
 impl NativeApp {
@@ -856,17 +664,11 @@ impl NativeApp {
         let (tray_icon, tray_events, tray_error) = create_tray(&ctx.egui_ctx);
         #[cfg(not(windows))]
         let (tray_events, tray_error) = create_tray(&ctx.egui_ctx);
-        let accent = saved_accent();
-        let appearance = saved_appearance();
-        let reduce_motion = saved_reduce_motion();
+        let prefs = Prefs::load();
         let model_storage = saved_model_storage();
         let first_setup = !model_storage_configured();
-        let (engine, engine_error) = match start_engine(&model_storage) {
-            Ok(engine) => (engine, None),
-            Err(error) => (None, Some(error)),
-        };
         egui_extras::install_image_loaders(&ctx.egui_ctx);
-        apply_theme(&ctx.egui_ctx, accent, &appearance, reduce_motion);
+        theme::install_fonts(&ctx.egui_ctx);
         let mut toggles = HashMap::new();
         for key in [
             "interpolate",
@@ -878,9 +680,8 @@ impl NativeApp {
         ] {
             toggles.insert(key.to_owned(), key == "upscale");
         }
-        Self {
-            api: start_api_worker(ctx.egui_ctx.clone()),
-            _engine: engine,
+        let mut app = Self {
+            api: worker::start(ctx.egui_ctx.clone(), model_storage.clone()),
             #[cfg(windows)]
             _tray_icon: tray_icon,
             tray_events,
@@ -893,11 +694,24 @@ impl NativeApp {
             managed_data_pending: false,
             quit_when_idle: false,
             page: PROCESS_PAGE,
-            accent,
-            appearance,
-            reduce_motion,
+            prefs,
+            queue: RenderQueue::default(),
+            eta: EtaTracker::default(),
+            timings: HashMap::new(),
+            download_rate: Rate::default(),
+            render_total: None,
+            settings_tab: if first_setup { 2 } else { 0 },
+            model_browser: ModelBrowser::default(),
+            command: CommandPalette::default(),
+            window_handle: window_handle(ctx),
+            material_active: false,
+            logo: None,
+            shown_page: PROCESS_PAGE,
+            page_changed: Instant::now(),
+            render_input: String::new(),
+            failed_update: None,
             connected: false,
-            engine_error,
+            engine_error: None,
             input_info: Value::Null,
             source_preview: None,
             render_preview: None,
@@ -934,7 +748,6 @@ impl NativeApp {
             backend: "pytorch".to_owned(),
             render_engine: "rve".to_owned(),
             anime_options: json!({"methods": {"upscale": "shufflecugan", "interpolate": "rife4.6", "restore": "anime1080fixer"}}),
-            model_search: String::new(),
             library_search: String::new(),
             library_category: "all".to_owned(),
             benchmark_search: String::new(),
@@ -970,8 +783,16 @@ impl NativeApp {
             busy: false,
             toast: None,
             last_active_task: None,
-            launch_time: Instant::now(),
+        };
+        app.apply_look(&ctx.egui_ctx);
+        if let Some(page) = std::env::var("RVE_START_PAGE")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|page| *page < PAGES.len())
+        {
+            app.page = page;
         }
+        app
     }
 
     fn restore_backend_settings(&mut self, settings: &Value) {
@@ -1012,7 +833,9 @@ impl NativeApp {
                     .unwrap_or(default),
             );
         }
-        if let Some(output_folder) = advanced["output_folder_location"].as_str() {
+        if self.input_path.is_empty()
+            && let Some(output_folder) = advanced["output_folder_location"].as_str()
+        {
             self.output_folder = output_folder.to_owned();
         }
         self.output_to_mpv = advanced["output_to_mpv"].as_bool().unwrap_or(false);
@@ -1102,8 +925,29 @@ impl NativeApp {
         ));
     }
 
+    /// A POST that neither waits for nor blocks other actions.
+    fn query(&self, endpoint: &str, payload: Value) {
+        let _ = self
+            .api
+            .send
+            .send(ApiCommand::Query(endpoint.to_owned(), payload));
+    }
+
     fn post(&mut self, endpoint: &str, payload: Value) {
+        // Stopping and pausing must work even while another request is pending.
+        if matches!(
+            endpoint,
+            "/api/actions/cancel" | "/api/render/stop" | "/api/render/pause"
+        ) {
+            self.query(endpoint, payload);
+            return;
+        }
         if self.busy {
+            self.show_toast(
+                "One moment",
+                "The engine is still finishing the previous action.",
+                ToastKind::Info,
+            );
             return;
         }
         let task = match endpoint {
@@ -1126,6 +970,11 @@ impl NativeApp {
                 "Runtime setup",
                 "Runtime setup started",
                 "Preparing the app-managed Python and inference runtime.",
+            )),
+            "/api/storage/slim" => Some((
+                "Runtime cleanup",
+                "Slimming the runtime",
+                "Removing build-only PyTorch files.",
             )),
             "/api/storage/prune-cache" => Some((
                 "Package cache cleanup",
@@ -1281,57 +1130,6 @@ impl NativeApp {
         }
     }
 
-    fn draw_toast(&mut self, ctx: &egui::Context) {
-        let Some(toast) = self.toast.as_ref() else {
-            return;
-        };
-        if Instant::now() >= toast.expires_at {
-            self.toast = None;
-            return;
-        }
-        let palette = theme::palette(self.appearance == "light", self.accent);
-        let accent = match toast.kind {
-            ToastKind::Info => palette.accent,
-            ToastKind::Success => palette.success,
-            ToastKind::Error => palette.error,
-        };
-        egui::Area::new(egui::Id::unique("rve-operation-toast"))
-            .order(egui::Order::Foreground)
-            .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-22.0, 54.0))
-            .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(palette.elevated)
-                    .stroke(Stroke::new(1.0, palette.border))
-                    .corner_radius(12.0)
-                    .inner_margin(egui::Margin::symmetric(15, 12))
-                    .shadow(egui::Shadow {
-                        offset: [0, 5],
-                        blur: 18,
-                        spread: 0,
-                        color: Color32::from_black_alpha(90),
-                    })
-                    .show(ui, |ui| {
-                        ui.set_max_width(390.0);
-                        ui.horizontal_top(|ui| {
-                            ui.add_space(2.0);
-                            let (dot_rect, _) =
-                                ui.allocate_exact_size(Vec2::splat(10.0), egui::Sense::hover());
-                            ui.painter().circle_filled(dot_rect.center(), 4.0, accent);
-                            ui.add_space(4.0);
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(&toast.title).strong().color(palette.text));
-                                ui.label(
-                                    RichText::new(&toast.detail)
-                                        .size(12.0)
-                                        .color(palette.secondary),
-                                );
-                            });
-                        });
-                    });
-            });
-        ctx.request_repaint_after(Duration::from_millis(150));
-    }
-
     fn start_recommended_runtime_setup(&mut self) {
         if self.busy {
             return;
@@ -1418,9 +1216,13 @@ impl NativeApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Err(error) => {
-                self.update["status"] = json!("error");
-                self.update["detail"] =
-                    json!(format!("Could not start the downloaded update: {error}"));
+                // The engine keeps reporting "downloaded"; do not retry forever.
+                self.failed_update = Some(path);
+                self.show_toast(
+                    "Update could not start",
+                    error.to_string(),
+                    ToastKind::Error,
+                );
             }
         }
     }
@@ -1436,7 +1238,11 @@ impl NativeApp {
         }
     }
 
-    fn hide_to_tray(&self, ctx: &egui::Context) {
+    fn hide_to_tray(&mut self, ctx: &egui::Context) {
+        // Nothing is visible, so give the picture memory back.
+        self.render_preview = None;
+        self.library_images.clear();
+        self.library_image_order.clear();
         #[cfg(windows)]
         if let Some(icon) = self._tray_icon.as_ref() {
             let activity = self.active_task().unwrap_or("Work");
@@ -1444,6 +1250,7 @@ impl NativeApp {
                 "REAL Video Enhancer · {activity} in background"
             )));
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            self.api.hidden.store(true, Ordering::Relaxed);
         }
         #[cfg(not(windows))]
         let _ = ctx;
@@ -1453,6 +1260,7 @@ impl NativeApp {
         while let Ok(command) = self.tray_events.try_recv() {
             match command {
                 TrayCommand::Open => {
+                    self.api.hidden.store(false, Ordering::Relaxed);
                     self.close_confirmation = false;
                     #[cfg(windows)]
                     if let Some(icon) = self._tray_icon.as_ref() {
@@ -1480,89 +1288,14 @@ impl NativeApp {
     fn consume_events(&mut self, ctx: &egui::Context) {
         while let Ok(event) = self.api.receive.try_recv() {
             if let Some(image) = event.image {
-                if let Some(model_id) = event.endpoint.strip_prefix("/api/library/thumbnail?id=") {
-                    let model_id = model_id.to_owned();
-                    self.library_image_loading.remove(&model_id);
-                    match image {
-                        Ok(bytes) => match image::load_from_memory(&bytes) {
-                            Ok(decoded) => {
-                                let thumbnail = decoded.thumbnail(384, 256);
-                                let rgba = thumbnail.to_rgba8();
-                                let size = [rgba.width() as usize, rgba.height() as usize];
-                                let color_image =
-                                    egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                                if self.library_images.len() >= 48
-                                    && let Some(expired) = self.library_image_order.pop_front()
-                                {
-                                    self.library_images.remove(&expired);
-                                    self.library_image_failed.insert(expired);
-                                }
-                                self.library_images.insert(
-                                    model_id.clone(),
-                                    ctx.load_texture(
-                                        format!("rve-model-preview-{model_id}"),
-                                        color_image,
-                                        egui::TextureOptions::LINEAR,
-                                    ),
-                                );
-                                self.library_image_order.push_back(model_id.clone());
-                            }
-                            Err(_) => {
-                                self.library_image_failed.insert(model_id);
-                            }
-                        },
-                        Err(_) => {
-                            self.library_image_failed.insert(model_id);
-                        }
-                    }
-                    ctx.request_repaint();
-                    continue;
-                }
-                if event.endpoint == "/api/render/preview_frame" {
-                    if let Ok(bytes) = image
-                        && let Ok(decoded) = image::load_from_memory(&bytes)
-                    {
-                        let rgba = decoded.to_rgba8();
-                        let size = [rgba.width() as usize, rgba.height() as usize];
-                        let color_image =
-                            egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                        self.render_preview = Some(ctx.load_texture(
-                            "rve-live-render-preview",
-                            color_image,
-                            egui::TextureOptions::LINEAR,
-                        ));
-                    }
-                    ctx.request_repaint();
-                    continue;
-                }
-                if self.source_preview_path == self.input_path.trim() {
-                    self.source_preview_loading = false;
-                    match image {
-                        Ok(bytes) => match image::load_from_memory(&bytes) {
-                            Ok(decoded) => {
-                                let rgba = decoded.to_rgba8();
-                                let size = [rgba.width() as usize, rgba.height() as usize];
-                                let color_image =
-                                    egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                                self.source_preview = Some(ctx.load_texture(
-                                    "rve-source-preview",
-                                    color_image,
-                                    egui::TextureOptions::LINEAR,
-                                ));
-                                self.source_preview_error = None;
-                            }
-                            Err(error) => {
-                                self.source_preview_error =
-                                    Some(format!("Could not decode the video preview: {error}"));
-                            }
-                        },
-                        Err(error) => self.source_preview_error = Some(error),
-                    }
-                }
-                ctx.request_repaint();
+                self.receive_image(ctx, &event.endpoint, image);
                 continue;
             }
             self.busy = pending_post_after_event(self.busy, event.is_post);
+            if event.endpoint.starts_with("/api/models/inventory") {
+                self.model_browser.received(event.value);
+                continue;
+            }
             match event.value {
                 Ok(value) => match event.endpoint.as_str() {
                     "/api/bootstrap" => {
@@ -1575,16 +1308,26 @@ impl NativeApp {
                         self.get("/api/python/info");
                     }
                     path if path.starts_with("/api/models?backend=") || path == "/api/models" => {
-                        self.models = value
+                        self.models = value;
+                        self.drop_unknown_models();
                     }
-                    "/api/render/status" => self.render = value,
+                    "/api/render/status" => self.receive_render_status(ctx, value),
                     "/api/render/start" => {
                         self.render["status"] = json!("preparing");
                         self.render["error"] = Value::Null;
                         self.get("/api/render/status");
                     }
                     "/api/models/download_status" => {
+                        let was_active = self.download["active"].as_bool() == Some(true);
                         self.download = value.clone();
+                        self.download_rate.sample(
+                            value["bytes_received"].as_u64().unwrap_or(0),
+                            Instant::now(),
+                        );
+                        if was_active && value["active"].as_bool() != Some(true) {
+                            self.model_browser.invalidate();
+                            self.get(&format!("/api/models?backend={}", self.backend));
+                        }
                         if self.library_download_refresh_pending
                             && value["active"].as_bool() != Some(true)
                         {
@@ -1592,6 +1335,36 @@ impl NativeApp {
                                 self.get(&format!("/api/models?backend={}", self.backend));
                             }
                             self.library_download_refresh_pending = false;
+                        }
+                    }
+                    "/api/models/delete" => {
+                        let detail = value["detail"].as_str().unwrap_or("Model removed.");
+                        self.show_toast("Model removed", detail.to_owned(), ToastKind::Success);
+                        self.model_browser.invalidate();
+                        self.get(&format!("/api/models?backend={}", self.backend));
+                    }
+                    "/api/actions/import_custom_models" => {
+                        self.model_browser.invalidate();
+                        self.get(&format!("/api/models?backend={}", self.backend));
+                    }
+                    "/api/dialog/select_inputs" => {
+                        let added = value["paths"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .filter(|path| self.queue.add(path))
+                            .count();
+                        if added > 0 {
+                            self.show_toast(
+                                "Added to queue",
+                                format!("{added} video(s) are waiting in the Studio."),
+                                ToastKind::Success,
+                            );
+                        } else if let Some(detail) = value["detail"].as_str()
+                            && value["path"].as_str().is_some_and(|path| !path.is_empty())
+                        {
+                            self.show_toast("Nothing added", detail.to_owned(), ToastKind::Info);
                         }
                     }
                     "/api/library/download" => {
@@ -1624,8 +1397,15 @@ impl NativeApp {
                     "/api/animescripter/status" => self.anime = value,
                     "/api/python/info" => self.python = value,
                     "/api/video/inspect" => {
+                        // A newer choice supersedes an answer still in flight.
+                        if let Some(path) = value["path"].as_str()
+                            && !same_file(path, &self.input_path)
+                        {
+                            continue;
+                        }
                         self.input_info = value;
                         if self.input_info["error"].is_null() {
+                            self.prefs.remember_recent(self.input_path.trim());
                             self.request_source_preview();
                         } else {
                             self.source_preview = None;
@@ -1699,6 +1479,7 @@ impl NativeApp {
                         if !selected.is_empty() {
                             self.input_path = selected.to_owned();
                             self.input_info = value["video_info"].clone();
+                            self.prefs.remember_recent(&self.input_path);
                             self.request_source_preview();
                             if let Some(parent) = Path::new(&self.input_path).parent() {
                                 self.output_folder = parent.to_string_lossy().into_owned();
@@ -1718,7 +1499,10 @@ impl NativeApp {
                     }
                 },
                 Err(error) => {
-                    if event.is_post || event.endpoint == "/api/dialog/select_input" {
+                    if event.is_post
+                        || event.endpoint.starts_with("/api/dialog/")
+                        || event.endpoint.starts_with("/api/actions/")
+                    {
                         self.show_toast(
                             "Could not complete that action",
                             error.clone(),
@@ -1771,6 +1555,86 @@ impl NativeApp {
         }
     }
 
+    fn receive_image(
+        &mut self,
+        ctx: &egui::Context,
+        endpoint: &str,
+        image: Result<egui::ColorImage, String>,
+    ) {
+        const THUMBNAIL_LIMIT: usize = 24;
+        let options = egui::TextureOptions::LINEAR;
+        if let Some(model_id) = endpoint.strip_prefix("/api/library/thumbnail?id=") {
+            let model_id = model_id.to_owned();
+            self.library_image_loading.remove(&model_id);
+            match image {
+                Ok(image) => {
+                    // Evicted thumbnails are simply requested again when seen.
+                    while self.library_images.len() >= THUMBNAIL_LIMIT
+                        && let Some(oldest) = self.library_image_order.pop_front()
+                    {
+                        self.library_images.remove(&oldest);
+                    }
+                    let texture = ctx.load_texture("rve-thumbnail", image, options);
+                    self.library_images.insert(model_id.clone(), texture);
+                    self.library_image_order.push_back(model_id);
+                }
+                Err(_) => {
+                    self.library_image_failed.insert(model_id);
+                }
+            }
+        } else if endpoint == "/api/render/preview_frame" {
+            if let Ok(image) = image {
+                // Update in place instead of allocating a texture per frame.
+                match &mut self.render_preview {
+                    Some(texture) => texture.set(image, options),
+                    None => {
+                        self.render_preview =
+                            Some(ctx.load_texture("rve-live-preview", image, options));
+                    }
+                }
+            }
+        } else if self.source_preview_path == self.input_path.trim() {
+            self.source_preview_loading = false;
+            match image {
+                Ok(image) => {
+                    self.source_preview =
+                        Some(ctx.load_texture("rve-source-preview", image, options));
+                    self.source_preview_error = None;
+                }
+                Err(error) => self.source_preview_error = Some(error),
+            }
+        }
+    }
+
+    fn receive_render_status(&mut self, ctx: &egui::Context, value: Value) {
+        let was_active = matches!(
+            self.render["status"].as_str(),
+            Some("preparing" | "running" | "paused")
+        );
+        self.render = value;
+        if was_active && self.render["status"] == "completed" {
+            if let Some(output) = self.render["output_file"].as_str() {
+                self.prefs.remember_render(HistoryEntry {
+                    input: self.render_input.clone(),
+                    output: output.to_owned(),
+                });
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                egui::UserAttentionType::Informational,
+            ));
+        }
+    }
+
+    /// A model picked for one backend may not exist in another.
+    fn drop_unknown_models(&mut self) {
+        let models = &self.models;
+        self.selected_models.retain(|category, label| {
+            models[category.as_str()]
+                .as_array()
+                .is_none_or(|choices| choices.iter().any(|choice| choice == label.as_str()))
+        });
+    }
+
     fn model_choices(&self, category: &str) -> Vec<String> {
         self.models[category]
             .as_array()
@@ -1799,78 +1663,17 @@ impl NativeApp {
         )
     }
 
-    fn source_drop_target(&mut self, ui: &mut egui::Ui, height: f32) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        let available = ui.available_width().max(1.0);
-        let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(available, height), egui::Sense::click());
-        let files_hovered = ui.input(|input| !input.raw.hovered_files.is_empty());
-        let highlighted = response.hovered() || files_hovered;
-        let fill = if highlighted {
-            palette
-                .accent
-                .gamma_multiply(if ui.visuals().dark_mode { 0.12 } else { 0.08 })
-        } else {
-            palette.surface
-        };
-        ui.painter().rect_filled(rect, 12.0, fill);
-        ui.painter().rect_stroke(
-            rect,
-            14.0,
-            Stroke::new(
-                if highlighted { 1.6 } else { 1.0 },
-                if highlighted {
-                    palette.accent
-                } else {
-                    palette.border
-                },
-            ),
-            egui::StrokeKind::Inside,
-        );
-        let title = if files_hovered {
-            "Release to add your video"
-        } else if self.input_path.is_empty() {
-            "Choose a video"
-        } else {
-            "Replace source video"
-        };
-        let icon_rect =
-            egui::Rect::from_center_size(rect.center() - Vec2::new(0.0, 45.0), Vec2::splat(36.0));
-        ui.place(icon_rect, icons::styled("video", palette.accent, 30.0));
-        ui.painter().text(
-            rect.center() + Vec2::new(0.0, 4.0),
-            egui::Align2::CENTER_CENTER,
-            title,
-            egui::FontId::proportional(15.0),
-            palette.text,
-        );
-        ui.painter().text(
-            rect.center() + Vec2::new(0.0, 28.0),
-            egui::Align2::CENTER_CENTER,
-            "Click to browse, or drag a video into this window",
-            egui::FontId::proportional(12.0),
-            palette.secondary,
-        );
-        let response = response
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("Click to open File Explorer and choose a video");
-        if response.clicked() {
-            self.get("/api/dialog/select_input");
-        }
-        if response.has_focus() {
-            ui.painter().rect_stroke(
-                rect,
-                14.0,
-                Stroke::new(1.5, palette.accent),
-                egui::StrokeKind::Inside,
-            );
-        }
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, title));
-    }
-
     fn start_render(&mut self) {
+        if self.busy {
+            return;
+        }
         let saved_settings = self.render_defaults_snapshot();
         self.render_preview = None;
+        self.render_input = self.input_path.clone();
+        self.render_total = views::expected_frames(
+            &self.input_info,
+            (self.toggles.get("interpolate") == Some(&true)).then_some(self.interpolate_factor),
+        );
         let mut selected = serde_json::Map::new();
         for key in ["upscale", "interpolate", "decompress", "denoise", "deblur"] {
             let value = self
@@ -1933,974 +1736,17 @@ impl NativeApp {
         self.post("/api/render/start", payload);
     }
 
-    fn page_title(&self) -> &'static str {
-        PAGES.get(self.page).map(|page| page.0).unwrap_or("Home")
-    }
-
     fn page_description(&self) -> &'static str {
         match self.page {
             0 => "Your workspace for cleaner, sharper video.",
             1 => "Choose a source, tune enhancements, and render.",
-            2 => "Find and install the models you need.",
+            2 => "Pick the models you want and download them together.",
             3 => "Search the wider model community and check compatibility.",
             4 => "Compare installed models on your hardware, at real input resolutions.",
             5 => "Set up the inference engines and AnimeScripter.",
             6 => "Inspect the Python engine and its environment.",
             7 => "Personalize appearance, storage, and app updates.",
             _ => "Your workspace for cleaner, sharper video.",
-        }
-    }
-
-    fn header(&self, ui: &mut egui::Ui) {
-        let light = !ui.visuals().dark_mode;
-        let palette = theme::palette(light, self.accent);
-        ui.horizontal_wrapped(|ui| {
-            let icon_frame = egui::Frame::new()
-                .fill(palette.elevated)
-                .stroke(Stroke::new(1.0, palette.border))
-                .corner_radius(14)
-                .inner_margin(egui::Margin::same(12));
-            icon_frame.show(ui, |ui| {
-                ui.add(icons::styled(
-                    PAGES.get(self.page).map(|page| page.1).unwrap_or("home"),
-                    palette.accent,
-                    26.0,
-                ));
-            });
-            ui.vertical(|ui| {
-                ui.label(
-                    RichText::new(self.page_title())
-                        .size(theme::type_scale::PAGE)
-                        .strong()
-                        .color(palette.text),
-                );
-                ui.label(
-                    RichText::new(self.page_description())
-                        .size(13.0)
-                        .color(palette.secondary),
-                );
-            });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let (status, color) = if self.connected {
-                    ("Engine connected", palette.success)
-                } else if self.engine_error.is_some() {
-                    ("Engine unavailable", palette.error)
-                } else {
-                    ("Starting engine", palette.warning)
-                };
-                components::status_badge(ui, status, color);
-            });
-        });
-        ui.add_space(theme::space::LG);
-    }
-
-    fn card<R>(ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui) -> R) -> R {
-        components::card(ui, title, content)
-    }
-
-    fn brand_mark(ui: &mut egui::Ui, size: f32) {
-        ui.add(
-            egui::Image::from_bytes(
-                "bytes://rve-brand-mark",
-                include_bytes!("../../docs/assets/rve-logo.png").as_slice(),
-            )
-            .fit_to_exact_size(Vec2::splat(size))
-            .corner_radius(9),
-        );
-    }
-
-    #[cfg(windows)]
-    fn titlebar_button(ui: &mut egui::Ui, glyph: &str, close: bool) -> egui::Response {
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(46.0, 42.0), egui::Sense::click());
-        let center = rect.center();
-        let stroke = Stroke::new(1.15, ui.visuals().text_color().gamma_multiply(0.78));
-        if response.hovered() {
-            let fill = if close {
-                Color32::from_rgb(196, 54, 66)
-            } else {
-                ui.visuals().widgets.hovered.bg_fill
-            };
-            ui.painter().rect_filled(rect, 0.0, fill);
-        }
-        match glyph {
-            "minimize" => {
-                ui.painter().line_segment(
-                    [center + Vec2::new(-5.0, 3.0), center + Vec2::new(5.0, 3.0)],
-                    stroke,
-                );
-            }
-            "maximize" => {
-                ui.painter().rect_stroke(
-                    egui::Rect::from_center_size(center, Vec2::splat(10.0)),
-                    0.0,
-                    stroke,
-                    egui::StrokeKind::Inside,
-                );
-            }
-            "restore" => {
-                let rear =
-                    egui::Rect::from_center_size(center + Vec2::new(1.5, -1.5), Vec2::splat(9.0));
-                let front =
-                    egui::Rect::from_center_size(center + Vec2::new(-1.5, 1.5), Vec2::splat(9.0));
-                ui.painter()
-                    .rect_filled(front, 0.0, ui.visuals().panel_fill);
-                ui.painter()
-                    .rect_stroke(rear, 0.0, stroke, egui::StrokeKind::Inside);
-                ui.painter()
-                    .rect_stroke(front, 0.0, stroke, egui::StrokeKind::Inside);
-            }
-            "close" => {
-                ui.painter().line_segment(
-                    [center + Vec2::new(-4.5, -4.5), center + Vec2::new(4.5, 4.5)],
-                    stroke,
-                );
-                ui.painter().line_segment(
-                    [center + Vec2::new(4.5, -4.5), center + Vec2::new(-4.5, 4.5)],
-                    stroke,
-                );
-            }
-            _ => {}
-        }
-        response
-    }
-
-    #[cfg(windows)]
-    fn custom_titlebar(&self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let light = self.appearance == "light";
-        let palette = theme::palette(light, self.accent);
-        egui::Panel::top("custom-window-titlebar")
-            .exact_size(42.0)
-            .show_separator_line(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(palette.canvas)
-                    .inner_margin(egui::Margin::ZERO),
-            )
-            .show(ui, |bar| {
-                bar.spacing_mut().item_spacing.x = 0.0;
-                bar.horizontal(|bar| {
-                    bar.add_space(12.0);
-                    egui::Frame::new()
-                        .fill(palette.elevated)
-                        .stroke(Stroke::new(1.0, palette.border))
-                        .corner_radius(8)
-                        .inner_margin(egui::Margin::same(2))
-                        .show(bar, |icon_ui| Self::brand_mark(icon_ui, 24.0));
-                    bar.add_space(9.0);
-                    bar.label(
-                        RichText::new("REAL Video Enhancer")
-                            .size(13.0)
-                            .strong()
-                            .color(palette.text),
-                    );
-
-                    let drag_width = (bar.available_width() - 138.0).max(0.0);
-                    let (_, drag) = bar.allocate_exact_size(
-                        Vec2::new(drag_width, 42.0),
-                        egui::Sense::click_and_drag(),
-                    );
-                    if drag.drag_started() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                    }
-                    if drag.double_clicked() {
-                        let maximized =
-                            ctx.input(|input| input.viewport().maximized.unwrap_or(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                    }
-                    let _ = drag.on_hover_cursor(egui::CursorIcon::Move);
-
-                    if Self::titlebar_button(bar, "minimize", false).clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                    }
-                    let maximized = ctx.input(|input| input.viewport().maximized.unwrap_or(false));
-                    if Self::titlebar_button(
-                        bar,
-                        if maximized { "restore" } else { "maximize" },
-                        false,
-                    )
-                    .clicked()
-                    {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                    }
-                    if Self::titlebar_button(bar, "close", true).clicked() {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                    }
-                });
-                let rect = bar.max_rect();
-                bar.painter().hline(
-                    rect.x_range(),
-                    rect.bottom() - 0.5,
-                    Stroke::new(1.0, palette.border),
-                );
-            });
-    }
-
-    fn home_hero_intro(&mut self, ui: &mut egui::Ui, palette: theme::Palette) {
-        ui.label(
-            RichText::new("REAL VIDEO ENHANCER")
-                .size(11.0)
-                .strong()
-                .color(palette.accent),
-        );
-        ui.add_space(theme::space::SM);
-        ui.label(
-            RichText::new("Make more of\nevery frame.")
-                .size(34.0)
-                .strong()
-                .color(palette.text),
-        );
-        ui.add_space(theme::space::SM);
-        ui.label(
-            RichText::new("Upscale, smooth motion, and restore detail in a clear, local workflow.")
-                .size(15.0)
-                .color(palette.secondary),
-        );
-        ui.add_space(theme::space::LG);
-        if components::primary_button(
-            ui,
-            if self.input_path.is_empty() {
-                "Choose a video"
-            } else {
-                "Continue editing"
-            },
-        )
-        .clicked()
-        {
-            self.page = PROCESS_PAGE;
-            if self.input_path.is_empty() {
-                self.get("/api/dialog/select_input");
-            }
-        }
-        ui.add_space(theme::space::SM);
-        ui.label(
-            RichText::new("Your footage stays on your device.")
-                .size(11.0)
-                .color(palette.muted),
-        );
-    }
-
-    fn home_video_preview(
-        &mut self,
-        ui: &mut egui::Ui,
-        palette: theme::Palette,
-        model_count: usize,
-    ) {
-        let width = ui.available_width().max(1.0);
-        let size = Vec2::new(width, (width * 9.0 / 16.0).clamp(190.0, 310.0));
-        let preview = self
-            .source_preview
-            .as_ref()
-            .filter(|_| self.source_preview_path == self.input_path.trim())
-            .cloned();
-        if self.input_path.is_empty() {
-            self.source_drop_target(ui, size.y);
-        } else {
-            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::click());
-            ui.painter().rect_filled(rect, 12.0, palette.elevated);
-            if let Some(texture) = preview {
-                ui.place(
-                    rect,
-                    egui::Image::new(&texture)
-                        .fit_to_exact_size(size)
-                        .maintain_aspect_ratio(true)
-                        .corner_radius(12.0),
-                );
-            } else {
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "Preparing your video preview…",
-                    egui::FontId::proportional(13.0),
-                    palette.secondary,
-                );
-            }
-        }
-        ui.add_space(theme::space::SM);
-        let file_name = Path::new(&self.input_path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("No source selected");
-        let count = if !self.connected {
-            "Catalog unavailable".to_owned()
-        } else if model_count == 1 {
-            "1 model option".to_owned()
-        } else {
-            format!("{model_count} model options")
-        };
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(file_name).strong().color(palette.text));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(count).size(11.0).color(palette.muted));
-            });
-        });
-    }
-
-    fn home_status_cards(
-        &self,
-        ui: &mut egui::Ui,
-        palette: theme::Palette,
-        backends: &[String],
-        selected_backend_ready: bool,
-        model_count: usize,
-    ) {
-        let engine = |ui: &mut egui::Ui| {
-            Self::card(ui, "Engine", |ui| {
-                components::status_dot(
-                    ui,
-                    if self.connected {
-                        palette.success
-                    } else if self.engine_error.is_some() {
-                        palette.error
-                    } else {
-                        palette.warning
-                    },
-                    if self.connected {
-                        "Connected"
-                    } else if self.engine_error.is_some() {
-                        "Unavailable"
-                    } else {
-                        "Starting"
-                    },
-                );
-                ui.add_space(theme::space::XS);
-                ui.label(
-                    RichText::new(
-                        self.engine_error
-                            .as_deref()
-                            .unwrap_or("The engine runs locally on this PC."),
-                    )
-                    .size(12.0)
-                    .color(if self.engine_error.is_some() {
-                        palette.error
-                    } else {
-                        palette.secondary
-                    }),
-                );
-            });
-        };
-        let backend = |ui: &mut egui::Ui| {
-            Self::card(ui, "Inference backend", |ui| {
-                components::status_dot(
-                    ui,
-                    if selected_backend_ready {
-                        palette.success
-                    } else {
-                        palette.warning
-                    },
-                    if selected_backend_ready {
-                        "Ready"
-                    } else {
-                        "Setup needed"
-                    },
-                );
-                ui.add_space(theme::space::XS);
-                ui.label(
-                    RichText::new(format!(
-                        "{} · {} available",
-                        self.backend.to_uppercase(),
-                        backends.len()
-                    ))
-                    .size(12.0)
-                    .color(palette.secondary),
-                );
-            });
-        };
-        let storage = |ui: &mut egui::Ui| {
-            Self::card(ui, "Model storage", |ui| {
-                let (label, color) = if self.model_storage == "wsl" {
-                    ("WSL · Ubuntu", palette.accent)
-                } else {
-                    ("Windows", palette.secondary)
-                };
-                components::status_dot(ui, color, label);
-                ui.add_space(theme::space::XS);
-                let models = if model_count == 1 {
-                    "1 catalog option"
-                } else {
-                    &format!("{model_count} catalog options")
-                };
-                ui.label(RichText::new(models).size(12.0).color(palette.secondary));
-            });
-        };
-
-        let width = ui.available_width();
-        if home_status_uses_three_columns(width) {
-            ui.columns(3, |columns| {
-                engine(&mut columns[0]);
-                backend(&mut columns[1]);
-                storage(&mut columns[2]);
-            });
-        } else if width >= 640.0 {
-            ui.columns(2, |columns| {
-                engine(&mut columns[0]);
-                backend(&mut columns[1]);
-            });
-            ui.add_space(theme::space::MD);
-            storage(ui);
-        } else {
-            engine(ui);
-            ui.add_space(theme::space::MD);
-            backend(ui);
-            ui.add_space(theme::space::MD);
-            storage(ui);
-        }
-    }
-
-    fn home_page(&mut self, ui: &mut egui::Ui) {
-        let light = !ui.visuals().dark_mode;
-        let palette = theme::palette(light, self.accent);
-        let backends = self.bootstrap["system"]["available_backends"]
-            .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let selected_backend_ready = backend_is_installed(
-            &self.bootstrap["system"]["available_backends"],
-            &self.backend,
-        );
-        let model_count = self.models.as_object().map_or(0, |categories| {
-            categories
-                .values()
-                .filter_map(Value::as_array)
-                .map(Vec::len)
-                .sum::<usize>()
-        });
-        let disk_space = self.bootstrap["system"]["available_disk_gb"].as_f64();
-
-        egui::Frame::new()
-            .fill(palette.surface)
-            .stroke(Stroke::new(1.0, palette.border))
-            .corner_radius(theme::radius::CARD)
-            .inner_margin(egui::Margin::same(24))
-            .show(ui, |ui| {
-                if home_hero_uses_two_columns(ui.available_width()) {
-                    ui.columns(2, |columns| {
-                        self.home_hero_intro(&mut columns[0], palette);
-                        self.home_video_preview(&mut columns[1], palette, model_count);
-                    });
-                } else {
-                    self.home_hero_intro(ui, palette);
-                    ui.add_space(theme::space::LG);
-                    self.home_video_preview(ui, palette, model_count);
-                }
-            });
-
-        ui.add_space(theme::space::LG);
-        self.home_status_cards(ui, palette, &backends, selected_backend_ready, model_count);
-
-        ui.add_space(theme::space::LG);
-        Self::card(ui, "Quick actions", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new("Install runtime"))
-                    .clicked()
-                {
-                    self.start_recommended_runtime_setup();
-                    self.page = RUNTIME_PAGE;
-                }
-                if ui.button("Manage models").clicked() {
-                    self.page = 2;
-                }
-                if ui.button("Compare models").clicked() {
-                    self.page = BENCHMARK_PAGE;
-                }
-                if ui.button("Settings").clicked() {
-                    self.page = SETTINGS_PAGE;
-                }
-                if let Some(gb) = disk_space {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!("{gb:.1} GB free"))
-                                .size(12.0)
-                                .color(palette.muted),
-                        );
-                    });
-                }
-            });
-        });
-
-        ui.add_space(theme::space::LG);
-        Self::card(ui, "Current render", |ui| self.render_summary(ui));
-    }
-
-    fn source_and_output_card(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        let compact_source =
-            ui.available_width() < 760.0 || ui.ctx().content_rect().height() < 700.0;
-        Self::card(ui, "Source video", |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("Original footage")
-                        .strong()
-                        .color(palette.text),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if !self.input_path.is_empty() && ui.button("Replace video").clicked() {
-                        self.get("/api/dialog/select_input");
-                    }
-                    if self.source_preview_loading {
-                        components::status_dot(ui, palette.accent, "Analyzing");
-                    } else if !self.input_path.is_empty() && self.input_info["error"].is_null() {
-                        components::status_dot(ui, palette.success, "Ready");
-                    }
-                });
-            });
-            ui.add_space(theme::space::SM);
-            if !compact_source {
-                self.manual_video_path(ui);
-            }
-            ui.add_space(theme::space::SM);
-            let preview_width = ui.available_width().max(1.0);
-            let preview_size = Vec2::new(
-                preview_width,
-                (preview_width * 9.0 / 16.0).clamp(190.0, 340.0),
-            );
-            if let Some(texture) = self
-                .source_preview
-                .as_ref()
-                .filter(|_| self.source_preview_path == self.input_path.trim())
-            {
-                let (rect, _) = ui.allocate_exact_size(preview_size, egui::Sense::hover());
-                ui.painter().rect_filled(rect, 12.0, Color32::BLACK);
-                ui.place(
-                    rect,
-                    egui::Image::new(texture)
-                        .fit_to_exact_size(preview_size)
-                        .maintain_aspect_ratio(true)
-                        .corner_radius(12.0),
-                );
-            } else if self.input_path.trim().is_empty() {
-                self.source_drop_target(ui, if compact_source { 152.0 } else { 218.0 });
-            } else {
-                let (rect, _) = ui.allocate_exact_size(preview_size, egui::Sense::hover());
-                ui.painter().rect_filled(rect, 12.0, palette.elevated);
-                let message = if self.source_preview_loading {
-                    "Preparing a frame from your video…"
-                } else if self.input_info["error"].is_string() {
-                    "This video could not be previewed"
-                } else {
-                    "Video preview unavailable"
-                };
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    message,
-                    egui::FontId::proportional(13.0),
-                    palette.secondary,
-                );
-            }
-            if !self.input_path.trim().is_empty() {
-                let file_name = Path::new(self.input_path.trim())
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(self.input_path.trim());
-                ui.add_space(theme::space::SM);
-                ui.add(
-                    egui::Label::new(
-                        RichText::new(file_name)
-                            .size(14.0)
-                            .strong()
-                            .color(palette.text),
-                    )
-                    .truncate(),
-                )
-                .on_hover_text(file_name);
-                components::copyable_path(ui, self.input_path.trim(), "Source path");
-            }
-            if compact_source {
-                ui.add_space(theme::space::SM);
-                self.manual_video_path(ui);
-            }
-            if let Some(error) = self.input_info["error"].as_str() {
-                ui.colored_label(
-                    theme::palette(!ui.visuals().dark_mode, self.accent).warning,
-                    format!("Video details could not be read: {error}"),
-                );
-            } else if let (Some(width), Some(height)) = (
-                self.input_info["width"].as_u64(),
-                self.input_info["height"].as_u64(),
-            ) {
-                let fps = self.input_info["fps"].as_f64().unwrap_or(0.0);
-                let duration = self.input_info["duration_seconds"].as_f64().unwrap_or(0.0);
-                let codec = self.input_info["codec"].as_str().unwrap_or("unknown codec");
-                let duration_label = if duration >= 3600.0 {
-                    format!(
-                        "{:02}:{:02}:{:02}",
-                        (duration / 3600.0) as u32,
-                        (duration / 60.0) as u32 % 60,
-                        duration as u32 % 60
-                    )
-                } else {
-                    format!(
-                        "{:02}:{:02}",
-                        (duration / 60.0) as u32,
-                        duration as u32 % 60
-                    )
-                };
-                ui.add_space(theme::space::SM);
-                ui.horizontal_wrapped(|ui| {
-                    components::metadata_chip(ui, &format!("{width} × {height}"), self.accent);
-                    components::metadata_chip(ui, &format!("{fps:.2} fps"), self.accent);
-                    components::metadata_chip(ui, &duration_label, self.accent);
-                    components::metadata_chip(ui, &codec.to_uppercase(), self.accent);
-                    if let Some(bytes) = self.input_info["size_bytes"].as_u64() {
-                        let size = if bytes >= 1_073_741_824 {
-                            format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
-                        } else {
-                            format!("{:.0} MB", bytes as f64 / 1_048_576.0)
-                        };
-                        components::metadata_chip(ui, &size, self.accent);
-                    }
-                });
-            }
-            if let Some(error) = self.source_preview_error.as_deref() {
-                ui.colored_label(palette.warning, format!("Preview: {error}"));
-            }
-        });
-    }
-
-    fn manual_video_path(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Enter a video path manually")
-            .id_salt("manual-video-path")
-            .show(ui, |ui| {
-                let compact = ui.available_width() < 360.0;
-                let path_response = if compact {
-                    ui.add_sized(
-                        Vec2::new(ui.available_width().max(1.0), 38.0),
-                        egui::TextEdit::singleline(&mut self.input_path)
-                            .hint_text("Paste a video file path"),
-                    )
-                } else {
-                    ui.horizontal(|ui| {
-                        let field_width = (ui.available_width() - 78.0).max(1.0);
-                        let response = ui.add_sized(
-                            Vec2::new(field_width, 38.0),
-                            egui::TextEdit::singleline(&mut self.input_path)
-                                .hint_text("Paste a video file path"),
-                        );
-                        if ui.button("Inspect").clicked() {
-                            self.input_info = json!({"status": "inspecting"});
-                            self.post(
-                                "/api/video/inspect",
-                                json!({"path": self.input_path.trim()}),
-                            );
-                        }
-                        response
-                    })
-                    .inner
-                };
-                if path_response.changed() {
-                    self.input_info = Value::Null;
-                    self.source_preview = None;
-                    self.source_preview_path.clear();
-                    self.source_preview_loading = false;
-                    self.source_preview_error = None;
-                }
-                if compact && ui.button("Inspect video").clicked() {
-                    self.input_info = json!({"status": "inspecting"});
-                    self.post(
-                        "/api/video/inspect",
-                        json!({"path": self.input_path.trim()}),
-                    );
-                }
-            });
-    }
-
-    fn output_configuration_card(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        Self::card(ui, "Output configuration", |ui| {
-            if self.output_to_mpv {
-                components::status_dot(ui, palette.accent, "Send enhanced video to MPV");
-            } else if ui.available_width() < 680.0 {
-                ui.label(RichText::new("Save location").strong());
-                ui.label(
-                    RichText::new("The engine creates the enhanced file here.")
-                        .size(11.0)
-                        .color(palette.secondary),
-                );
-                ui.add_space(theme::space::XS);
-                ui.add_sized(
-                    Vec2::new(ui.available_width().max(1.0), 38.0),
-                    egui::TextEdit::singleline(&mut self.output_folder)
-                        .hint_text("Choose an output folder"),
-                );
-                if ui.button("Browse for output folder").clicked() {
-                    self.get("/api/dialog/select_output");
-                }
-            } else {
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("Save location").strong());
-                        ui.label(
-                            RichText::new("The engine creates the enhanced file here.")
-                                .size(11.0)
-                                .color(palette.secondary),
-                        );
-                    });
-                    ui.add_space(theme::space::MD);
-                    let path_width = (ui.available_width() - 84.0).max(1.0);
-                    ui.add_sized(
-                        Vec2::new(path_width, 38.0),
-                        egui::TextEdit::singleline(&mut self.output_folder)
-                            .hint_text("Choose an output folder"),
-                    );
-                    if ui.button("Browse").clicked() {
-                        self.get("/api/dialog/select_output");
-                    }
-                });
-            }
-        });
-    }
-
-    fn advanced_processing_card(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        let installed_backends = self.bootstrap["system"]["available_backends"].clone();
-        let mut changed = false;
-        let mut preview_enabled = self.saved_settings["advanced"]["preview_enabled"]
-            .as_bool()
-            .unwrap_or(true);
-        Self::card(ui, "Advanced settings", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Processing backend").color(palette.secondary));
-                let selected_backend_ready =
-                    backend_is_installed(&installed_backends, &self.backend);
-                egui::ComboBox::from_id_salt("process-backend")
-                    .selected_text(self.backend.to_uppercase())
-                    .show_ui(ui, |ui| {
-                        for backend in ["pytorch", "ncnn", "tensorrt"] {
-                            let available = backend_is_installed(&installed_backends, backend);
-                            let label = if available {
-                                backend.to_uppercase()
-                            } else {
-                                format!("{} · Install in Runtime", backend.to_uppercase())
-                            };
-                            if ui
-                                .add_enabled_ui(available, |ui| {
-                                    ui.selectable_value(
-                                        &mut self.backend,
-                                        backend.to_owned(),
-                                        label,
-                                    )
-                                })
-                                .inner
-                                .changed()
-                            {
-                                self.get(&format!("/api/models?backend={}", self.backend));
-                                changed = true;
-                            }
-                        }
-                    });
-                components::status_dot(
-                    ui,
-                    if selected_backend_ready {
-                        palette.success
-                    } else {
-                        palette.warning
-                    },
-                    if selected_backend_ready {
-                        "Available"
-                    } else {
-                        "Setup required"
-                    },
-                );
-                if !selected_backend_ready && ui.small_button("Runtime setup").clicked() {
-                    self.page = RUNTIME_PAGE;
-                }
-            });
-
-            ui.add_space(theme::space::SM);
-            ui.horizontal_wrapped(|ui| {
-                egui::ComboBox::from_id_salt("process-precision")
-                    .selected_text(format!("Precision · {}", self.precision))
-                    .show_ui(ui, |ui| {
-                        for option in ["auto", "float16", "float32"] {
-                            changed |= ui
-                                .selectable_value(&mut self.precision, option.to_owned(), option)
-                                .changed();
-                        }
-                    });
-                ui.label(RichText::new("Frame multiplier").color(palette.secondary));
-                changed |= ui
-                    .add(egui::Slider::new(&mut self.interpolate_factor, 2.0..=8.0).suffix("×"))
-                    .changed();
-                ui.label(RichText::new("Scale override").color(palette.secondary));
-                changed |= ui
-                    .add(egui::Slider::new(&mut self.upscale_scale, 0..=4).suffix("×"))
-                    .changed();
-            });
-
-            ui.add_space(theme::space::SM);
-            ui.horizontal_wrapped(|ui| {
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut self.tile_size)
-                            .range(0..=4096)
-                            .prefix("Tile "),
-                    )
-                    .on_hover_text("Use 0 for automatic tile sizing.")
-                    .changed();
-                changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut self.overlap)
-                            .range(0..=256)
-                            .prefix("Overlap "),
-                    )
-                    .changed();
-                if self.backend == "pytorch" {
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut self.pytorch_gpu_id)
-                                .range(0..=64)
-                                .prefix("GPU "),
-                        )
-                        .changed();
-                } else if self.backend == "ncnn" {
-                    changed |= ui
-                        .add(
-                            egui::DragValue::new(&mut self.ncnn_gpu_id)
-                                .range(0..=64)
-                                .prefix("GPU "),
-                        )
-                        .changed();
-                }
-            });
-
-            ui.add_space(theme::space::XS);
-            ui.horizontal_wrapped(|ui| {
-                changed |= ui.checkbox(&mut self.auto_hdr, "Automatic HDR").changed();
-                changed |= ui.checkbox(&mut self.uhd_mode, "UHD mode").changed();
-                changed |= ui.checkbox(&mut self.auto_crop, "Detect borders").changed();
-                changed |= ui.checkbox(&mut self.overwrite, "Replace output").changed();
-                changed |= ui.checkbox(&mut preview_enabled, "Live preview").changed();
-            });
-        });
-        if changed {
-            if !self.saved_settings["advanced"].is_object() {
-                self.saved_settings["advanced"] = json!({});
-            }
-            self.saved_settings["advanced"]["preview_enabled"] = json!(preview_enabled);
-            self.save_render_defaults();
-        }
-    }
-
-    fn enhancement_models_card(&mut self, ui: &mut egui::Ui) {
-        let mut selection_changed = false;
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        let has_model_options = self.models.as_object().is_some_and(|categories| {
-            categories.iter().any(|(key, value)| {
-                key != "model_status" && value.as_array().is_some_and(|models| !models.is_empty())
-            })
-        });
-        Self::card(ui, "Enhancement models", |ui| {
-            ui.label(
-                RichText::new("Choose the improvements for this render.")
-                    .size(12.0)
-                    .color(palette.secondary),
-            );
-            if !self.connected || !has_model_options {
-                ui.add_space(theme::space::XS);
-                ui.label(
-                    RichText::new(if !self.connected {
-                        "Model choices will appear when the local engine connects."
-                    } else {
-                        "No models are available for this backend. Check Downloads."
-                    })
-                    .size(11.0)
-                    .color(palette.warning),
-                );
-            }
-            ui.add_space(theme::space::SM);
-            for (key, label, detail) in [
-                ("upscale", "Upscale", "Increase image resolution"),
-                ("interpolate", "Interpolate", "Create smoother motion"),
-                ("decompress", "Decompress", "Restore compression detail"),
-                ("denoise", "Denoise", "Reduce image noise"),
-                ("deblur", "Deblur", "Recover edge definition"),
-            ] {
-                egui::Frame::new()
-                    .fill(palette.surface)
-                    .stroke(Stroke::new(1.0, palette.border))
-                    .corner_radius(10.0)
-                    .inner_margin(egui::Margin::symmetric(12, 10))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            egui::Frame::new()
-                                .fill(palette.accent.gamma_multiply(if ui.visuals().dark_mode {
-                                    0.14
-                                } else {
-                                    0.10
-                                }))
-                                .corner_radius(8.0)
-                                .inner_margin(egui::Margin::same(7))
-                                .show(ui, |ui| {
-                                    ui.add(icons::styled(key, palette.accent, 19.0));
-                                });
-                            ui.vertical(|ui| {
-                                ui.label(RichText::new(label).strong().color(palette.text));
-                                ui.label(RichText::new(detail).size(11.0).color(palette.secondary));
-                            });
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                let enabled = self.toggles.entry(key.to_owned()).or_insert(false);
-                                selection_changed |= components::toggle(
-                                    ui,
-                                    enabled,
-                                    label,
-                                    self.accent,
-                                    self.reduce_motion,
-                                )
-                                .changed();
-                            });
-                        });
-                        let options = self.model_choices(key);
-                        if self.render_engine == "rve" && !options.is_empty() {
-                            ui.add_space(theme::space::XS);
-                            selection_changed |= self.model_picker(ui, key);
-                            let selected = self
-                                .selected_models
-                                .get(key)
-                                .map(String::as_str)
-                                .unwrap_or_default();
-                            if !selected.is_empty() {
-                                let installed = self.models["model_status"][key][selected]
-                                    .as_bool()
-                                    == Some(true);
-                                let (status, color) = if installed {
-                                    ("Installed", palette.success)
-                                } else {
-                                    ("Download required", palette.warning)
-                                };
-                                components::status_dot(ui, color, status);
-                            }
-                        }
-                    });
-                ui.add_space(theme::space::XS);
-            }
-            if self.render_engine == "animescripter" {
-                ui.label(RichText::new("AnimeScripter supplies and downloads its own AI models when you run a method for the first time.").size(11.0).color(palette.muted));
-            }
-            ui.horizontal(|ui| {
-                ui.add(icons::styled("slomo", palette.secondary, 18.0));
-                ui.label(RichText::new("Slow motion output").color(palette.text));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let enabled = self.toggles.entry("slomo".to_owned()).or_insert(false);
-                    selection_changed |= components::toggle(
-                        ui,
-                        enabled,
-                        "Slow motion output",
-                        self.accent,
-                        self.reduce_motion,
-                    )
-                    .changed();
-                });
-            });
-        });
-        if selection_changed {
-            self.save_render_defaults();
         }
     }
 
@@ -2985,95 +1831,6 @@ impl NativeApp {
         blockers
     }
 
-    fn workflow_steps(&self, ui: &mut egui::Ui) {
-        let source_ready = self.input_info["width"].as_u64().is_some();
-        let has_enhancement = ["upscale", "interpolate", "decompress", "denoise", "deblur"]
-            .iter()
-            .any(|key| self.toggles.get(*key).copied().unwrap_or(false));
-        let output_ready = self.output_to_mpv || !self.output_folder.trim().is_empty();
-        let states = [source_ready, has_enhancement, output_ready];
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        ui.horizontal_wrapped(|ui| {
-            for (index, (label, complete)) in ["Source", "Enhance", "Output"]
-                .into_iter()
-                .zip(states)
-                .enumerate()
-            {
-                let color = if complete {
-                    palette.success
-                } else {
-                    palette.secondary
-                };
-                egui::Frame::new()
-                    .fill(if complete {
-                        palette.success.gamma_multiply(0.10)
-                    } else {
-                        palette.elevated
-                    })
-                    .corner_radius(20.0)
-                    .inner_margin(egui::Margin::symmetric(12, 7))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            if complete {
-                                ui.add(icons::styled("check", color, 14.0));
-                            } else {
-                                ui.label(
-                                    RichText::new((index + 1).to_string()).strong().color(color),
-                                );
-                            }
-                            ui.label(RichText::new(label).strong().color(palette.text));
-                        });
-                    });
-                if index < 2 {
-                    ui.label(RichText::new("›").color(palette.muted));
-                }
-            }
-        });
-    }
-
-    fn render_action_controls(
-        &mut self,
-        ui: &mut egui::Ui,
-        active: bool,
-        preparing: bool,
-        paused: bool,
-        status: &str,
-        can_start: bool,
-    ) {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if active {
-                if !preparing
-                    && status != "stopping"
-                    && self.render["engine"].as_str() != Some("animescripter")
-                {
-                    if ui.button(if paused { "Resume" } else { "Pause" }).clicked() {
-                        self.post("/api/render/pause", json!({"paused": !paused}));
-                    }
-                    if ui.button("Cancel render").clicked() {
-                        self.post("/api/render/stop", json!({}));
-                    }
-                }
-                let label = if preparing {
-                    "Preparing…"
-                } else if status == "stopping" {
-                    "Stopping…"
-                } else {
-                    "Render in progress"
-                };
-                ui.add_enabled(
-                    false,
-                    egui::Button::new(label).min_size(Vec2::new(190.0, 44.0)),
-                );
-            } else {
-                let response =
-                    components::primary_button_enabled(ui, "Start render", can_start, 190.0);
-                if response.clicked() {
-                    self.start_render();
-                }
-            }
-        });
-    }
-
     fn render_blocker_action(&mut self, ui: &mut egui::Ui, blocker: &str) {
         let action = if blocker.contains("input video") || blocker.contains("supported video") {
             Some(("Choose source video", 0))
@@ -3111,230 +1868,21 @@ impl NativeApp {
         }
     }
 
-    fn render_action_bar(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        let status = self.render["status"].as_str().unwrap_or("idle").to_owned();
-        let preparing = status == "preparing";
-        let active = matches!(
-            status.as_str(),
-            "preparing" | "running" | "paused" | "stopping"
-        );
-        let paused = status == "paused";
-        let blockers = self.render_blockers();
-        let can_start = blockers.is_empty() && !active;
-        let title = if preparing {
-            "Preparing render"
-        } else if paused {
-            "Render paused"
-        } else if active {
-            "Rendering video"
-        } else if status == "completed" {
-            "Render complete"
-        } else if status == "error" {
-            "Render needs attention"
-        } else if !blockers.is_empty() {
-            "Setup required"
-        } else {
-            "Ready to render"
-        };
-        let compact = ui.available_width() < 700.0;
-        if compact {
-            ui.horizontal_wrapped(|ui| {
-                components::status_dot(
-                    ui,
-                    if active {
-                        palette.accent
-                    } else if !blockers.is_empty() {
-                        palette.warning
-                    } else {
-                        palette.success
-                    },
-                    title,
-                );
-                self.render_action_controls(ui, active, preparing, paused, &status, can_start);
-            });
-            if active {
-                let frame = self.render["current_frame"].as_u64().unwrap_or(0);
-                let fps = self.render["gen_fps"].as_f64();
-                let eta = self.render["eta"].as_str().unwrap_or("--");
-                let mut details = Vec::new();
-                if frame > 0 {
-                    details.push(format!("Frame {frame}"));
-                }
-                if let Some(fps) = fps {
-                    details.push(format!("{fps:.1} fps"));
-                }
-                if eta != "--" && !eta.is_empty() {
-                    details.push(format!("ETA {eta}"));
-                }
-                ui.label(
-                    RichText::new(if details.is_empty() {
-                        "The renderer is starting…".to_owned()
-                    } else {
-                        details.join("  ·  ")
-                    })
-                    .size(11.0)
-                    .color(palette.secondary),
-                );
-            } else if let Some(blocker) = blockers.first() {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new(blocker).size(11.0).color(palette.warning));
-                    self.render_blocker_action(ui, blocker);
-                });
-            }
-        } else {
-            ui.horizontal_wrapped(|ui| {
-                ui.vertical(|ui| {
-                    components::status_dot(
-                        ui,
-                        if active {
-                            palette.accent
-                        } else if !blockers.is_empty() {
-                            palette.warning
-                        } else {
-                            palette.success
-                        },
-                        title,
-                    );
-                    if active {
-                        let frame = self.render["current_frame"].as_u64().unwrap_or(0);
-                        let fps = self.render["gen_fps"].as_f64();
-                        let eta = self.render["eta"].as_str().unwrap_or("--");
-                        let mut details = Vec::new();
-                        if frame > 0 {
-                            details.push(format!("Frame {frame}"));
-                        }
-                        if let Some(fps) = fps {
-                            details.push(format!("{fps:.1} fps"));
-                        }
-                        if eta != "--" && !eta.is_empty() {
-                            details.push(format!("ETA {eta}"));
-                        }
-                        ui.label(
-                            RichText::new(if details.is_empty() {
-                                "The renderer is starting…".to_owned()
-                            } else {
-                                details.join("  ·  ")
-                            })
-                            .size(11.0)
-                            .color(palette.secondary),
-                        );
-                    } else if let Some(blocker) = blockers.first() {
-                        ui.label(RichText::new(blocker).size(11.0).color(palette.warning));
-                    } else {
-                        ui.label(
-                            RichText::new("Your source, enhancements, and output are set.")
-                                .size(11.0)
-                                .color(palette.secondary),
-                        );
-                    }
-                });
-                if !active && let Some(blocker) = blockers.first() {
-                    self.render_blocker_action(ui, blocker);
-                }
-                self.render_action_controls(ui, active, preparing, paused, &status, can_start);
-            });
-        }
-        if let Some(error) = self.render["error"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-        {
-            ui.colored_label(palette.error, error);
-        }
-    }
-
-    fn process_page(&mut self, ui: &mut egui::Ui) {
-        if self.first_setup {
-            let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-            egui::Frame::new()
-                .fill(palette.warning.gamma_multiply(0.10))
-                .stroke(Stroke::new(1.0, palette.warning.gamma_multiply(0.35)))
-                .corner_radius(10.0)
-                .inner_margin(egui::Margin::symmetric(14, 10))
-                .show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(RichText::new("First setup").strong().color(palette.text));
-                        ui.label(
-                            RichText::new(
-                                "Choose model storage and prepare the runtime before rendering.",
-                            )
-                            .color(palette.secondary),
-                        );
-                        if ui.button("Set up now").clicked() {
-                            self.page = SETTINGS_PAGE;
-                        }
-                    });
-                });
-            ui.add_space(theme::space::MD);
-        }
-        self.processing_engine_card(ui);
-        ui.add_space(theme::space::MD);
-        self.workflow_steps(ui);
-        ui.add_space(theme::space::MD);
-
-        if !process_uses_two_columns(ui.available_width()) {
-            self.source_and_output_card(ui);
-            ui.add_space(theme::space::MD);
-            self.enhancement_models_card(ui);
-            ui.add_space(theme::space::MD);
-            self.output_configuration_card(ui);
-            ui.add_space(theme::space::MD);
-            self.advanced_processing_card(ui);
-        } else {
-            ui.columns(2, |columns| {
-                self.source_and_output_card(&mut columns[0]);
-                self.enhancement_models_card(&mut columns[1]);
-            });
-            ui.add_space(theme::space::MD);
-            ui.columns(2, |columns| {
-                self.output_configuration_card(&mut columns[0]);
-                self.advanced_processing_card(&mut columns[1]);
-            });
-        }
-        ui.add_space(theme::space::MD);
-        self.live_render_preview_card(ui);
-        if let Some(lines) = self.render["log_lines"].as_array() {
-            egui::CollapsingHeader::new("Render activity")
-                .id_salt("render-activity")
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(140.0)
-                        .show(ui, |ui| {
-                            for line in lines.iter().rev().take(8).filter_map(Value::as_str) {
-                                ui.label(RichText::new(line).monospace().size(11.0));
-                            }
-                        });
-                });
-        }
-    }
-
     fn processing_engine_card(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        let palette = theme::palette(!ui.visuals().dark_mode, self.prefs.accent);
         let mut engine_changed = false;
-        Self::card(ui, "Processing engine", |ui| {
+        components::card(ui, "Processing engine", |ui| {
+            let mut engine_index = usize::from(self.render_engine == "animescripter");
+            if components::segmented(
+                ui,
+                "engine",
+                &["REAL Video Enhancer", "AnimeScripter"],
+                &mut engine_index,
+            ) {
+                self.render_engine = ["rve", "animescripter"][engine_index].to_owned();
+                engine_changed = true;
+            }
             ui.horizontal_wrapped(|ui| {
-                egui::ComboBox::from_label("Engine")
-                    .selected_text(if self.render_engine == "animescripter" {
-                        "AnimeScripter"
-                    } else {
-                        "REAL Video Enhancer"
-                    })
-                    .show_ui(ui, |ui| {
-                        engine_changed |= ui
-                            .selectable_value(
-                                &mut self.render_engine,
-                                "rve".to_owned(),
-                                "REAL Video Enhancer",
-                            )
-                            .changed();
-                        engine_changed |= ui
-                            .selectable_value(
-                                &mut self.render_engine,
-                                "animescripter".to_owned(),
-                                "AnimeScripter",
-                            )
-                            .changed();
-                    });
                 if self.render_engine == "animescripter" {
                     let ready = self.anime["ready"].as_bool() == Some(true);
                     components::status_dot(
@@ -3364,14 +1912,12 @@ impl NativeApp {
                     {
                         self.post("/api/animescripter/install", json!({}));
                     }
-                } else {
-                    components::status_dot(ui, palette.success, "REAL Video Enhancer engine");
                 }
             });
             ui.label(RichText::new(if self.render_engine == "animescripter" {
                 "Anime-focused processing with its own RIFE, upscaling and restoration methods. First use may download selected AI weights."
             } else {
-                "Use the built-in RVE pipeline and the models installed from Downloads."
+                "Use the built-in RVE pipeline and the models from the Models page."
             }).size(12.0).color(palette.secondary));
             if self.render_engine == "animescripter"
                 && !self.anime["detail"].as_str().unwrap_or_default().is_empty()
@@ -3388,7 +1934,7 @@ impl NativeApp {
         }
         if self.render_engine == "animescripter" {
             ui.add_space(theme::space::MD);
-            Self::card(ui, "AnimeScripter pipeline", |ui| {
+            components::card(ui, "AnimeScripter pipeline", |ui| {
                 ui.label(RichText::new("Choose AnimeScripter's native methods. These selections are saved on this PC.").size(12.0).color(palette.secondary));
                 let methods = self.anime_options["methods"]
                     .as_object()
@@ -3471,8 +2017,8 @@ impl NativeApp {
             return;
         }
 
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        Self::card(ui, "Live render preview", |ui| {
+        let palette = theme::palette(!ui.visuals().dark_mode, self.prefs.accent);
+        components::card(ui, "Live render preview", |ui| {
             ui.label(
                 RichText::new(if completed_with_preview {
                     "Last processed frame"
@@ -3507,6 +2053,7 @@ impl NativeApp {
                 );
             }
         });
+        ui.add_space(theme::space::MD);
     }
 
     fn render_summary(&self, ui: &mut egui::Ui) {
@@ -3515,7 +2062,7 @@ impl NativeApp {
         let fps = self.render["gen_fps"].as_f64();
         let eta = self.render["eta"].as_str().unwrap_or("--");
         let light = !ui.visuals().dark_mode;
-        let palette = theme::palette(light, self.accent);
+        let palette = theme::palette(light, self.prefs.accent);
         let status_color = match status {
             "preparing" | "running" => palette.accent,
             "paused" => palette.warning,
@@ -3545,308 +2092,15 @@ impl NativeApp {
         });
     }
 
-    fn downloads_page(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        let active = self.download["active"].as_bool().unwrap_or(false);
-        let busy = self.busy || self.benchmarks["status"].as_str() == Some("running");
-        let connected = self.connected;
-        let catalog = self.models.as_object().map_or_else(Vec::new, |categories| {
-            categories
-                .iter()
-                .filter(|(name, value)| value.is_array() && name.as_str() != "model_status")
-                .map(|(name, names)| {
-                    let names = names
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .map(str::to_owned)
-                        .collect::<Vec<_>>();
-                    (name.replace('_', " "), name.clone(), names)
-                })
-                .collect::<Vec<_>>()
-        });
-
-        Self::card(ui, "Download models", |ui| {
-            ui.label(RichText::new("Download only the model weights you need. They are stored in the location selected in Settings.").color(palette.secondary));
-            ui.add_space(theme::space::MD);
-            if !connected {
-                egui::Frame::new()
-                    .fill(palette.warning.gamma_multiply(0.10))
-                    .stroke(Stroke::new(1.0, palette.warning.gamma_multiply(0.35)))
-                    .corner_radius(theme::radius::CONTROL)
-                    .inner_margin(egui::Margin::symmetric(12, 8))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new("Waiting for the local engine. Model downloads unlock when it connects.")
-                                .color(palette.warning),
-                        );
-                    });
-                ui.add_space(theme::space::SM);
-            }
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(format!("Backend · {}", self.backend.to_uppercase())).strong(),
-                );
-                ui.label(
-                    RichText::new(if self.model_storage == "wsl" {
-                        "Storage · WSL Ubuntu"
-                    } else {
-                        "Storage · Windows"
-                    })
-                    .color(palette.secondary),
-                );
-            });
-            ui.add_space(theme::space::MD);
-            ui.horizontal_wrapped(|ui| {
-                for (label, categories) in [
-                    ("Interpolation", vec!["interpolate"]),
-                    (
-                        "Restoration",
-                        vec!["upscale", "decompress", "denoise", "deblur"],
-                    ),
-                    (
-                        "All for this backend",
-                        vec![
-                            "interpolate",
-                            "upscale",
-                            "decompress",
-                            "denoise",
-                            "deblur",
-                            "scene_change",
-                        ],
-                    ),
-                ] {
-                    let enabled = can_start_model_download(connected, active, busy);
-                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                        self.post(
-                            "/api/models/download",
-                            json!({"backend": self.backend, "categories": categories}),
-                        );
-                    }
-                }
-            });
-
-            if active
-                || self.download["status"]
-                    .as_str()
-                    .is_some_and(|status| status != "idle")
-            {
-                ui.add_space(theme::space::MD);
-                ui.horizontal(|ui| {
-                    components::status_dot(
-                        ui,
-                        if active {
-                            palette.accent
-                        } else if self.download["status"] == "error" {
-                            palette.error
-                        } else {
-                            palette.success
-                        },
-                        self.download["stage"]
-                            .as_str()
-                            .unwrap_or_else(|| self.download["status"].as_str().unwrap_or("Ready")),
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "{:.0}%",
-                                self.download["progress"].as_f64().unwrap_or(0.0)
-                            ))
-                            .strong(),
-                        );
-                    });
-                });
-                ui.add(egui::ProgressBar::new(
-                    (self.download["progress"].as_f64().unwrap_or(0.0) as f32 / 100.0)
-                        .clamp(0.0, 1.0),
-                ));
-                if let Some(label) = self.download["label"]
-                    .as_str()
-                    .filter(|label| !label.is_empty())
-                {
-                    ui.label(RichText::new(label).strong());
-                }
-                if let Some(detail) = self.download["detail"]
-                    .as_str()
-                    .filter(|detail| !detail.is_empty())
-                {
-                    ui.label(RichText::new(detail).size(12.0).color(palette.secondary));
-                }
-                if let Some(error) = self.download["error"]
-                    .as_str()
-                    .filter(|error| !error.is_empty())
-                {
-                    ui.colored_label(palette.error, error);
-                }
-                if active && ui.button("Cancel model download").clicked() {
-                    self.post("/api/actions/cancel", json!({}));
-                }
-            }
-        });
-
-        ui.add_space(theme::space::MD);
-        Self::card(ui, "Model catalog", |ui| {
-            ui.label(
-                RichText::new("Installed counts come from the engine’s local model scan.")
-                    .size(12.0)
-                    .color(palette.secondary),
-            );
-            ui.add_space(theme::space::SM);
-            let query = self.model_search.trim().to_lowercase();
-            ui.horizontal(|ui| {
-                ui.add(icons::styled("search", palette.muted, 16.0));
-                ui.add_sized(
-                    Vec2::new(ui.available_width().min(420.0), 38.0),
-                    egui::TextEdit::singleline(&mut self.model_search)
-                        .hint_text("Search model names or categories…")
-                        .margin(Vec2::new(12.0, 9.0)),
-                );
-                let visible = catalog
-                    .iter()
-                    .map(|(display, _, names)| {
-                        if query.is_empty() || display.to_lowercase().contains(&query) {
-                            names.len()
-                        } else {
-                            names
-                                .iter()
-                                .filter(|name| name.to_lowercase().contains(&query))
-                                .count()
-                        }
-                    })
-                    .sum::<usize>();
-                ui.label(
-                    RichText::new(format!("{visible} shown"))
-                        .size(11.0)
-                        .color(palette.muted),
-                );
-            });
-            egui::ScrollArea::vertical()
-                .max_height(420.0)
-                .show(ui, |ui| {
-                    if catalog.is_empty() {
-                        ui.label(if self.connected {
-                            "No model categories are available for this backend."
-                        } else {
-                            "The model catalog appears when the local engine connects."
-                        });
-                    } else if !query.is_empty()
-                        && catalog.iter().all(|(display, _, names)| {
-                            !display.to_lowercase().contains(&query)
-                                && names
-                                    .iter()
-                                    .all(|name| !name.to_lowercase().contains(&query))
-                        })
-                    {
-                        ui.label("No models match this search.");
-                    }
-                    for (display, key, names) in &catalog {
-                        let filtered = names
-                            .iter()
-                            .filter(|name| {
-                                query.is_empty()
-                                    || name.to_lowercase().contains(&query)
-                                    || display.to_lowercase().contains(&query)
-                            })
-                            .collect::<Vec<_>>();
-                        if filtered.is_empty() {
-                            continue;
-                        }
-                        let installed_visible = filtered
-                            .iter()
-                            .filter(|name| {
-                                self.models["model_status"][key][name.as_str()].as_bool()
-                                    == Some(true)
-                            })
-                            .count();
-                        egui::CollapsingHeader::new(format!(
-                            "{display}  ·  {installed_visible}/{} installed",
-                            filtered.len()
-                        ))
-                        .id_salt(("model-category", key))
-                        .show(ui, |ui| {
-                            for name in filtered {
-                                let ready = self.models["model_status"][key][name.as_str()]
-                                    .as_bool()
-                                    == Some(true);
-                                egui::Frame::new()
-                                    .fill(palette.elevated)
-                                    .corner_radius(8.0)
-                                    .inner_margin(egui::Margin::symmetric(10, 6))
-                                    .show(ui, |ui| {
-                                        ui.horizontal(|ui| {
-                                            components::status_dot(
-                                                ui,
-                                                if ready {
-                                                    palette.success
-                                                } else {
-                                                    palette.muted
-                                                },
-                                                if ready { "Installed" } else { "Available" },
-                                            );
-                                            ui.label(RichText::new(name).strong());
-                                            ui.with_layout(
-                                                Layout::right_to_left(Align::Center),
-                                                |ui| {
-                                                    if !ready {
-                                                        let can_download = can_start_model_download(
-                                                            connected, active, busy,
-                                                        );
-                                                        if ui
-                                                            .add_enabled(
-                                                                can_download,
-                                                                egui::Button::new("Download")
-                                                                    .small(),
-                                                            )
-                                                            .clicked()
-                                                        {
-                                                            self.post(
-                                                                "/api/models/download",
-                                                                json!({
-                                                                    "backend": self.backend,
-                                                                    "selections": {key: name}
-                                                                }),
-                                                            );
-                                                        }
-                                                    }
-                                                },
-                                            );
-                                        });
-                                    });
-                            }
-                        });
-                    }
-                });
-        });
-
-        ui.add_space(theme::space::MD);
-        Self::card(ui, "Model location", |ui| {
-            let path = self.storage_status["model_dir"]
-                .as_str()
-                .unwrap_or("Choose a model location in Settings, then run setup.");
-            components::copyable_path(
-                ui,
-                path,
-                "Choose a model location in Settings, then run setup.",
-            );
-            ui.add_space(theme::space::XS);
-            ui.label(RichText::new(if self.model_storage == "wsl" {
-                "Weights are installed in Ubuntu under WSL. The Windows app and Python engine remain on Windows."
-            } else {
-                "Weights are installed on this Windows PC alongside the app’s local data."
-            }).size(12.0).color(palette.secondary));
-        });
-    }
-
     fn model_library_page(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
+        let palette = theme::palette(!ui.visuals().dark_mode, self.prefs.accent);
         if self.library.is_null() && !self.library_loading {
             self.library_loading = true;
             self.get("/api/library/models");
         }
         let mut search_requested = false;
         let mut refresh_requested = false;
-        Self::card(ui, "Explore the model community", |ui| {
+        components::card(ui, "Explore the model community", |ui| {
             ui.horizontal(|ui| {
                 ui.add(icons::styled("sparkles", palette.accent, 24.0));
                 ui.vertical(|ui| {
@@ -3966,7 +2220,7 @@ impl NativeApp {
             .as_array()
             .map(|items| items.iter().take(shown_count).cloned().collect::<Vec<_>>())
             .unwrap_or_default();
-        Self::card(ui, "Community models", |ui| {
+        components::card(ui, "Community models", |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.label(
                     RichText::new(format!("Showing {shown_count} of {total_matches}")).strong(),
@@ -4039,7 +2293,10 @@ impl NativeApp {
                 .iter()
                 .find(|resource| resource["installable"].as_bool() == Some(true))
         });
+        let area =
+            egui::Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 150.0));
         if preview.is_some()
+            && ui.is_rect_visible(area)
             && !model_id.is_empty()
             && !self.library_images.contains_key(model_id)
             && !self.library_image_loading.contains(model_id)
@@ -4201,1727 +2458,27 @@ impl NativeApp {
             });
         ui.add_space(theme::space::XS);
     }
-
-    fn benchmarks_page(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        let categories = [
-            ("upscale", "Upscale"),
-            ("interpolate", "Interpolate"),
-            ("decompress", "Decompress"),
-            ("denoise", "Denoise"),
-            ("deblur", "Deblur"),
-        ];
-        let resolutions = ["480p", "720p", "1080p", "1440p", "4K"];
-        let running = self.benchmarks["status"].as_str() == Some("running");
-        let mut start_payload = None;
-        let available_backends = self.bootstrap["system"]["available_backends"].clone();
-        let installed_count = categories
-            .iter()
-            .map(|(category, _)| {
-                self.models["model_status"][*category]
-                    .as_object()
-                    .map_or(0, |models| {
-                        models
-                            .values()
-                            .filter(|installed| installed.as_bool() == Some(true))
-                            .count()
-                    })
-            })
-            .sum::<usize>();
-        let result_count = self.benchmarks["results"].as_array().map_or(0, |items| {
-            items
-                .iter()
-                .filter(|item| item["status"] == "complete")
-                .count()
-        });
-
-        Self::card(ui, "Run a local benchmark", |ui| {
-            ui.label(RichText::new(
-                "REAL Video Enhancer runs its actual inference pipeline against a repeatable synthetic 24 fps clip. No processed video is saved.",
-            ).color(palette.secondary));
-            ui.add_space(theme::space::MD);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Backend").strong());
-                egui::ComboBox::from_id_salt("benchmark-backend")
-                    .selected_text(self.backend.to_uppercase())
-                    .show_ui(ui, |ui| {
-                        for backend in ["pytorch", "ncnn", "tensorrt"] {
-                            let ready = backend_is_installed(&available_backends, backend);
-                            let label = if ready {
-                                backend.to_uppercase()
-                            } else {
-                                format!("{} · unavailable", backend.to_uppercase())
-                            };
-                            if ui
-                                .add_enabled(
-                                    ready && !running,
-                                    egui::Button::selectable(self.backend == backend, label),
-                                )
-                                .clicked()
-                            {
-                                self.backend = backend.to_owned();
-                                self.save_render_defaults();
-                                self.get(&format!("/api/models?backend={backend}"));
-                            }
-                        }
-                    });
-                ui.label(RichText::new("Category").strong());
-                egui::ComboBox::from_id_salt("benchmark-category")
-                    .selected_text(if self.benchmark_category == "all" {
-                        "All categories"
-                    } else {
-                        categories
-                            .iter()
-                            .find(|(key, _)| *key == self.benchmark_category)
-                            .map_or("All categories", |(_, label)| *label)
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.benchmark_category,
-                            "all".to_owned(),
-                            "All categories",
-                        );
-                        for (key, label) in categories {
-                            ui.selectable_value(
-                                &mut self.benchmark_category,
-                                key.to_owned(),
-                                label,
-                            );
-                        }
-                    });
-                ui.label(RichText::new("Clip length").strong());
-                egui::ComboBox::from_id_salt("benchmark-frames")
-                    .selected_text(format!(
-                        "{} frames · {:.0} sec",
-                        self.benchmark_frames,
-                        self.benchmark_frames as f32 / 24.0
-                    ))
-                    .show_ui(ui, |ui| {
-                        for frames in [24_usize, 48, 96] {
-                            ui.selectable_value(
-                                &mut self.benchmark_frames,
-                                frames,
-                                format!("{} frames · {:.0} sec", frames, frames as f32 / 24.0),
-                            );
-                        }
-                    });
-            });
-
-            ui.add_space(theme::space::MD);
-            ui.label(RichText::new("Input resolution").strong());
-            ui.horizontal_wrapped(|ui| {
-                for resolution in resolutions {
-                    let selected = self
-                        .benchmark_resolutions
-                        .entry(resolution.to_owned())
-                        .or_insert(false);
-                    let response = ui.add_sized(
-                        Vec2::new(82.0, 36.0),
-                        egui::Button::new(resolution)
-                            .fill(if *selected {
-                                palette.accent.gamma_multiply(0.18)
-                            } else {
-                                palette.elevated
-                            })
-                            .stroke(Stroke::new(
-                                if *selected { 1.5 } else { 1.0 },
-                                if *selected {
-                                    palette.accent
-                                } else {
-                                    palette.border
-                                },
-                            )),
-                    );
-                    if response.clicked() && !running {
-                        *selected = !*selected;
-                    }
-                }
-            });
-            ui.add_space(theme::space::SM);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "{installed_count} installed models · {result_count} saved measurements"
-                    ))
-                    .color(palette.secondary),
-                );
-                ui.label(
-                    RichText::new("4K upscale tests use 256 px tiles to limit memory use.")
-                        .size(11.0)
-                        .color(palette.muted),
-                );
-                if self.model_storage == "wsl" && ui.button("Scan Ubuntu library").clicked() {
-                    self.show_toast(
-                        "Scanning WSL models",
-                        "Ubuntu will stay available for the benchmark and other WSL tasks.",
-                        ToastKind::Info,
-                    );
-                    self.get(&format!(
-                        "/api/models?backend={}&refresh_wsl=1",
-                        self.backend
-                    ));
-                }
-                let gpu_id = if self.backend == "ncnn" {
-                    self.ncnn_gpu_id
-                } else {
-                    self.pytorch_gpu_id
-                };
-                ui.label(
-                    RichText::new(format!(
-                        "Profile · {} · GPU {gpu_id} · 256 px tiles",
-                        self.precision
-                    ))
-                    .size(11.0)
-                    .color(palette.muted),
-                );
-            });
-            ui.add_space(theme::space::MD);
-            ui.horizontal_wrapped(|ui| {
-                let selected_resolutions = resolutions
-                    .iter()
-                    .filter(|resolution| {
-                        self.benchmark_resolutions
-                            .get(**resolution)
-                            .copied()
-                            .unwrap_or(false)
-                    })
-                    .map(|resolution| (*resolution).to_owned())
-                    .collect::<Vec<_>>();
-                let selected_categories = categories
-                    .iter()
-                    .filter(|(key, _)| {
-                        self.benchmark_category == "all" || self.benchmark_category == *key
-                    })
-                    .map(|(key, _)| (*key).to_owned())
-                    .collect::<Vec<_>>();
-                let can_start = !running
-                    && !self.busy
-                    && self.connected
-                    && backend_is_installed(&available_backends, &self.backend)
-                    && !selected_resolutions.is_empty()
-                    && installed_count > 0;
-                if ui
-                    .add_enabled(
-                        can_start,
-                        egui::Button::new("Run selected benchmarks")
-                            .fill(palette.accent)
-                            .stroke(Stroke::NONE),
-                    )
-                    .clicked()
-                {
-                    start_payload = Some(json!({
-                        "backend": self.backend,
-                        "categories": selected_categories,
-                        "resolutions": selected_resolutions,
-                        "frames": self.benchmark_frames,
-                        "precision": self.precision,
-                        "pytorch_gpu_id": self.pytorch_gpu_id,
-                        "ncnn_gpu_id": self.ncnn_gpu_id,
-                    }));
-                }
-                if running && ui.button("Cancel benchmark").clicked() {
-                    self.post("/api/benchmarks/cancel", json!({}));
-                }
-                if !self.connected {
-                    ui.label(RichText::new("Waiting for the local engine.").color(palette.warning));
-                } else if !backend_is_installed(&available_backends, &self.backend) {
-                    let detail = if self.backend == "tensorrt" {
-                        "TensorRT needs a CUDA-capable NVIDIA GPU and the complete TensorRT runtime. Open Runtime to install it; otherwise choose PyTorch or NCNN."
-                    } else {
-                        "This backend is not installed. Open Runtime to install it or choose an available backend."
-                    };
-                    ui.label(RichText::new(detail).color(palette.warning));
-                } else if installed_count == 0 {
-                    ui.label(
-                        RichText::new("Install models from Downloads before benchmarking.")
-                            .color(palette.warning),
-                    );
-                } else if selected_resolutions.is_empty() {
-                    ui.label(
-                        RichText::new("Select at least one input resolution.")
-                            .color(palette.warning),
-                    );
-                }
-            });
-
-            if running
-                || self.benchmarks["status"]
-                    .as_str()
-                    .is_some_and(|status| matches!(status, "completed" | "cancelled" | "error"))
-            {
-                ui.add_space(theme::space::MD);
-                let stage = self.benchmarks["stage"]
-                    .as_str()
-                    .unwrap_or("Benchmark status");
-                ui.horizontal(|ui| {
-                    components::status_dot(
-                        ui,
-                        if self.benchmarks["status"] == "error" {
-                            palette.error
-                        } else if running {
-                            palette.accent
-                        } else {
-                            palette.success
-                        },
-                        stage,
-                    );
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if self.benchmarks["total"].as_u64().unwrap_or(0) > 0 {
-                            ui.label(format!(
-                                "{} / {}",
-                                self.benchmarks["completed"].as_u64().unwrap_or(0),
-                                self.benchmarks["total"].as_u64().unwrap_or(0)
-                            ));
-                        }
-                    });
-                });
-                if running {
-                    ui.add(
-                        egui::ProgressBar::new(
-                            self.benchmarks["progress"].as_f64().unwrap_or(0.0) as f32 / 100.0,
-                        )
-                        .show_percentage(),
-                    );
-                }
-                ui.label(
-                    RichText::new(self.benchmarks["detail"].as_str().unwrap_or_default())
-                        .size(12.0)
-                        .color(palette.secondary),
-                );
-                if let Some(current) = self.benchmarks["current"].as_object() {
-                    let model = current
-                        .get("model")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Model");
-                    let resolution = current
-                        .get("resolution")
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    if let Some(fps) = current.get("engine_reported_fps").and_then(Value::as_f64) {
-                        ui.label(
-                            RichText::new(format!("{model} · {resolution} · {fps:.1} live fps"))
-                                .strong()
-                                .color(palette.accent),
-                        );
-                    }
-                }
-                if let Some(error) = self.benchmarks["error"]
-                    .as_str()
-                    .filter(|error| !error.is_empty())
-                {
-                    ui.colored_label(palette.error, error);
-                }
-            }
-        });
-        if let Some(payload) = start_payload {
-            self.post("/api/benchmarks/start", payload);
-        }
-
-        ui.add_space(theme::space::MD);
-        Self::card(ui, "Model performance by category", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Every catalog model is listed. Results are local measurements, saved on this PC.").color(palette.secondary));
-                ui.add_space(theme::space::MD);
-                ui.add(icons::styled("search", palette.muted, 16.0));
-                ui.add_sized(Vec2::new(ui.available_width().min(280.0), 36.0),
-                    egui::TextEdit::singleline(&mut self.benchmark_search).hint_text("Filter model names…"));
-            });
-            let failures = self.benchmarks["results"]
-                .as_array()
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter(|item| {
-                            item["backend"].as_str() == Some(self.backend.as_str())
-                                && item["status"] == "error"
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if !failures.is_empty() {
-                ui.add_space(theme::space::SM);
-                egui::CollapsingHeader::new(format!(
-                    "Benchmark errors · {} details",
-                    failures.len()
-                ))
-                .id_salt("benchmark-error-details")
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(190.0)
-                        .show(ui, |ui| {
-                            for result in failures.iter().rev().take(40) {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} · {} · {}",
-                                        result["category"].as_str().unwrap_or("model"),
-                                        result["model"].as_str().unwrap_or("Unknown model"),
-                                        result["resolution"].as_str().unwrap_or("resolution")
-                                    ))
-                                    .strong(),
-                                );
-                                ui.label(
-                                    RichText::new(result["error"].as_str().unwrap_or(
-                                        "The benchmark failed without an error message.",
-                                    ))
-                                    .size(11.0)
-                                    .color(palette.error),
-                                );
-                                ui.add_space(theme::space::XS);
-                            }
-                            if failures.len() > 40 {
-                                ui.label(
-                                    RichText::new("Showing the latest 40 errors.")
-                                        .size(11.0)
-                                        .color(palette.muted),
-                                );
-                            }
-                        });
-                });
-            }
-            ui.add_space(theme::space::SM);
-            egui::ScrollArea::vertical().max_height(650.0).show(ui, |ui| {
-                for (category, title) in categories {
-                    if self.benchmark_category != "all" && self.benchmark_category != category { continue; }
-                    let Some(names) = self.models[category].as_array() else { continue; };
-                    let matching = names.iter().filter_map(Value::as_str)
-                        .filter(|name| self.benchmark_search.trim().is_empty() || name.to_lowercase().contains(&self.benchmark_search.trim().to_lowercase()))
-                        .collect::<Vec<_>>();
-                    if matching.is_empty() { continue; }
-                    let ready_count = matching.iter().filter(|name| self.models["model_status"][category][**name].as_bool() == Some(true)).count();
-                    egui::CollapsingHeader::new(format!("{title} · {ready_count}/{} installed", matching.len()))
-                        .id_salt(("benchmark-category", category)).default_open(self.benchmark_category != "all")
-                        .show(ui, |ui| {
-                            egui::ScrollArea::horizontal().id_salt(("benchmark-table", category)).show(ui, |ui| {
-                                ui.set_min_width(790.0_f32.max(ui.available_width()));
-                                egui::Grid::new(("benchmark-grid", category)).num_columns(7).striped(true)
-                                    .min_col_width(76.0).show(ui, |ui| {
-                                        ui.add_sized(Vec2::new(260.0, 28.0), egui::Label::new(RichText::new("Model").strong()));
-                                        ui.label(RichText::new("Status").strong());
-                                        for resolution in resolutions { ui.label(RichText::new(resolution).strong()); }
-                                        ui.end_row();
-                                        for name in &matching {
-                                            let name = *name;
-                                            let installed = self.models["model_status"][category][name].as_bool() == Some(true);
-                                            ui.add_sized(Vec2::new(260.0, 32.0), egui::Label::new(RichText::new(name).size(12.0)).truncate()).on_hover_text(name);
-                                            components::status_dot(ui, if installed { palette.success } else { palette.muted }, if installed { "Installed" } else { "Not installed" });
-                                            for resolution in resolutions {
-                                                let result = self.benchmarks["results"].as_array().and_then(|items| items.iter().rev().find(|item| {
-                                                    item["backend"].as_str() == Some(self.backend.as_str())
-                                                        && item["category"].as_str() == Some(category)
-                                                        && item["model"].as_str() == Some(name)
-                                                        && item["resolution"].as_str() == Some(resolution)
-                                                }));
-                                                if let Some(result) = result.filter(|_| installed) {
-                                                    if result["status"] == "complete" {
-                                                        let fps = result["measured_fps"].as_f64().unwrap_or(0.0);
-                                                        let seconds = result["seconds"].as_f64().unwrap_or(0.0);
-                                                        ui.label(RichText::new(format!("{fps:.1} fps")).color(palette.success)).on_hover_text(format!("{seconds:.2} sec for {} frames · {} precision · GPU {} · {} px tiles · end-to-end", result["frames"].as_u64().unwrap_or(0), result["precision"].as_str().unwrap_or("auto"), result["gpu_id"].as_u64().unwrap_or(0), result["tile_size"].as_u64().unwrap_or(256)));
-                                                    } else if result["status"] == "error" {
-                                                        ui.colored_label(palette.error, "Failed").on_hover_text(result["error"].as_str().unwrap_or("Benchmark failed."));
-                                                    } else {
-                                                        ui.label(RichText::new("—").color(palette.muted));
-                                                    }
-                                                } else if installed {
-                                                    ui.label(RichText::new("—").color(palette.muted)).on_hover_text("Not measured on this PC yet.");
-                                                } else {
-                                                    ui.label(RichText::new("—").color(palette.muted));
-                                                }
-                                            }
-                                            ui.end_row();
-                                        }
-                                    });
-                            });
-                        });
-                    ui.add_space(theme::space::XS);
-                }
-                ui.label(RichText::new("Scene-change detectors are evaluated automatically during interpolation and are not standalone render models.").size(11.0).color(palette.muted));
-            });
-        });
-
-        ui.add_space(theme::space::SM);
-        ui.horizontal_wrapped(|ui| {
-            ui.label(
-                RichText::new(format!(
-                    "Hardware · {}",
-                    self.bootstrap["system"]["gpu_name"]
-                        .as_str()
-                        .unwrap_or("GPU not detected")
-                ))
-                .strong(),
-            );
-            ui.label(
-                RichText::new(format!(
-                    "{} · {} RAM",
-                    self.bootstrap["system"]["cpu"]
-                        .as_str()
-                        .unwrap_or("CPU unavailable"),
-                    self.bootstrap["system"]["ram"]
-                        .as_str()
-                        .unwrap_or("RAM unavailable")
-                ))
-                .size(11.0)
-                .color(palette.secondary),
-            );
-        });
-    }
-
-    fn runtime_page(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        let status = self.install["status"]
-            .as_str()
-            .unwrap_or("not_started")
-            .to_owned();
-        let progress = self.install["progress"]
-            .as_f64()
-            .unwrap_or(0.0)
-            .clamp(0.0, 100.0) as f32;
-        let installing = matches!(status.as_str(), "running" | "installing" | "downloading")
-            || (progress > 0.0
-                && progress < 100.0
-                && !matches!(status.as_str(), "cancelled" | "error" | "completed"));
-        let failed = status == "error";
-        let cancelled = status == "cancelled";
-        let system = self.bootstrap["system"].clone();
-        let available = system["available_backends"]
-            .as_array()
-            .map(|items| {
-                items
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(" · ")
-            })
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "No inference backend detected".to_owned());
-        let managed_python = self.python["python_managed"].as_bool() == Some(true);
-        let runtime_ready = !available.starts_with("No ") && managed_python;
-
-        Self::card(ui, "Inference runtime", |ui| {
-            ui.horizontal(|ui| {
-                components::status_dot(
-                    ui,
-                    if installing {
-                        palette.accent
-                    } else if failed || cancelled || available.starts_with("No ") {
-                        palette.warning
-                    } else {
-                        palette.success
-                    },
-                    if installing {
-                        "Installing"
-                    } else if failed {
-                        "Setup failed"
-                    } else if cancelled {
-                        "Setup cancelled"
-                    } else if !runtime_ready {
-                        "Setup required"
-                    } else {
-                        "Ready"
-                    },
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(status.replace('_', " "))
-                            .size(12.0)
-                            .color(palette.secondary),
-                    );
-                });
-            });
-            ui.label(
-                self.install["detail"]
-                    .as_str()
-                    .unwrap_or("Install a rendering backend to enable video enhancement."),
-            );
-            if let Some(issue) = self.bootstrap["system"]["backend_probe_output"]
-                .as_str()
-                .filter(|issue| issue.starts_with("TensorRT package versions do not match:"))
-            {
-                ui.label(RichText::new(issue).size(11.0).color(palette.warning));
-                ui.label(RichText::new("Run the recommended runtime setup to restore PyTorch 2.8, then install TensorRT again if it is still unavailable.")
-                    .size(11.0).color(palette.secondary));
-            }
-            if installing {
-                ui.add(
-                    egui::ProgressBar::new(progress / 100.0).text(
-                        self.install["stage"]
-                            .as_str()
-                            .unwrap_or("Preparing runtime"),
-                    ),
-                );
-            }
-            if installing
-                || self.install["output"]
-                    .as_array()
-                    .is_some_and(|lines| !lines.is_empty())
-            {
-                ui.add_space(theme::space::SM);
-                egui::Frame::new()
-                    .fill(Color32::from_rgb(9, 12, 17))
-                    .stroke(Stroke::new(1.0, palette.border))
-                    .corner_radius(theme::radius::CONTROL)
-                    .inner_margin(egui::Margin::symmetric(12, 9))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new("Live setup output")
-                                    .strong()
-                                    .color(Color32::from_rgb(228, 234, 241)),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if installing {
-                                    components::status_dot(ui, palette.success, "LIVE");
-                                } else if failed {
-                                    components::status_dot(
-                                        ui,
-                                        palette.error,
-                                        "Finished with errors",
-                                    );
-                                } else if cancelled {
-                                    components::status_dot(ui, palette.warning, "Cancelled");
-                                } else {
-                                    components::status_dot(ui, palette.muted, "Last run");
-                                }
-                            });
-                        });
-                        ui.separator();
-                        egui::ScrollArea::vertical()
-                            .id_salt("runtime-live-output-terminal")
-                            .max_height(if installing { 250.0 } else { 180.0 })
-                            .stick_to_bottom(true)
-                            .show(ui, |ui| {
-                                if let Some(lines) = self.install["output"].as_array() {
-                                    for line in
-                                        lines.iter().rev().take(120).rev().filter_map(Value::as_str)
-                                    {
-                                        let lower = line.to_ascii_lowercase();
-                                        let color = if lower.contains("error")
-                                            || lower.contains("failed")
-                                        {
-                                            Color32::from_rgb(255, 123, 133)
-                                        } else if lower.starts_with("$")
-                                            || lower.contains("installing")
-                                        {
-                                            Color32::from_rgb(137, 199, 255)
-                                        } else {
-                                            Color32::from_rgb(188, 198, 210)
-                                        };
-                                        ui.add(
-                                            egui::Label::new(
-                                                RichText::new(line)
-                                                    .monospace()
-                                                    .size(10.5)
-                                                    .color(color),
-                                            )
-                                            .wrap(),
-                                        );
-                                    }
-                                } else {
-                                    ui.label(
-                                        RichText::new("Waiting for setup output…")
-                                            .monospace()
-                                            .size(10.5)
-                                            .color(Color32::from_rgb(145, 157, 172)),
-                                    );
-                                }
-                            });
-                    });
-            }
-            if failed || cancelled {
-                ui.add_space(theme::space::SM);
-                egui::Frame::new()
-                    .fill(palette.error.gamma_multiply(0.10))
-                    .stroke(Stroke::new(1.0, palette.error.gamma_multiply(0.35)))
-                    .corner_radius(theme::radius::CONTROL)
-                    .inner_margin(egui::Margin::symmetric(12, 9))
-                    .show(ui, |ui| {
-                        ui.label(
-                            RichText::new(if failed {
-                                "Setup needs attention"
-                            } else {
-                                "Setup was cancelled"
-                            })
-                            .strong()
-                            .color(if failed {
-                                palette.error
-                            } else {
-                                palette.warning
-                            }),
-                        );
-                    });
-            }
-            ui.add_space(theme::space::MD);
-            ui.horizontal_wrapped(|ui| {
-                let enabled = !installing && !self.busy;
-                let enabled = enabled && self.benchmarks["status"].as_str() != Some("running");
-                if ui
-                    .add_enabled(enabled, egui::Button::new("Install recommended runtime"))
-                    .clicked()
-                {
-                    self.start_recommended_runtime_setup();
-                }
-                for backend in ["ncnn", "pytorch", "tensorrt"] {
-                    let label = format!("Install {}", backend.to_uppercase());
-                    if ui.add_enabled(enabled, egui::Button::new(label)).clicked() {
-                        self.post(
-                            "/api/actions/manage_backend",
-                            json!({"action": "install", "backend": backend}),
-                        );
-                    }
-                }
-                if installing && ui.button("Cancel setup").clicked() {
-                    self.post("/api/actions/cancel", json!({}));
-                }
-            });
-        });
-
-        ui.add_space(theme::space::MD);
-        Self::card(ui, "Hardware and compatibility", |ui| {
-            let metrics = [
-                (
-                    "Operating system",
-                    system["os"].as_str().unwrap_or("Not detected").to_owned(),
-                ),
-                (
-                    "Graphics device",
-                    system["gpu_name"]
-                        .as_str()
-                        .unwrap_or("Not detected")
-                        .to_owned(),
-                ),
-                (
-                    "CUDA version",
-                    system["cuda_version"]
-                        .as_str()
-                        .unwrap_or("Not detected")
-                        .to_owned(),
-                ),
-                ("Available backends", available.clone()),
-            ];
-            let draw_metric = |ui: &mut egui::Ui, label: &str, value: &str| {
-                egui::Frame::new()
-                    .fill(palette.elevated)
-                    .corner_radius(8.0)
-                    .inner_margin(egui::Margin::symmetric(12, 9))
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ui.label(RichText::new(label).size(11.0).color(palette.muted));
-                        ui.label(RichText::new(value).strong().color(palette.text));
-                    });
-            };
-            if runtime_metrics_use_two_columns(ui.available_width()) {
-                for row in metrics.chunks_exact(2) {
-                    ui.columns(2, |columns| {
-                        for (column, (label, value)) in columns.iter_mut().zip(row.iter()) {
-                            draw_metric(column, label, value);
-                        }
-                    });
-                    ui.add_space(theme::space::SM);
-                }
-            } else {
-                for (label, value) in &metrics {
-                    draw_metric(ui, label, value);
-                }
-            }
-            if ui.button("Refresh system detection").clicked() {
-                self.post("/api/actions/refresh_backends", json!({}));
-                self.get("/api/bootstrap");
-            }
-        });
-
-        ui.add_space(theme::space::MD);
-        Self::card(ui, "AnimeScripter engine", |ui| {
-            let ready = self.anime["ready"].as_bool() == Some(true);
-            ui.horizontal_wrapped(|ui| {
-                components::status_dot(
-                    ui,
-                    if ready {
-                        palette.success
-                    } else if self.install["status"] == "error" {
-                        palette.error
-                    } else {
-                        palette.warning
-                    },
-                    if ready {
-                        "Installed and verified"
-                    } else {
-                        "Optional · not installed"
-                    },
-                );
-                let installing = self.install["status"].as_str() == Some("running");
-                if ui
-                    .add_enabled(
-                        self.connected && !installing && self.active_task().is_none(),
-                        egui::Button::new(if ready {
-                            "Repair AnimeScripter"
-                        } else {
-                            "Install AnimeScripter CLI"
-                        }),
-                    )
-                    .clicked()
-                {
-                    self.post("/api/animescripter/install", json!({}));
-                }
-                if installing && ui.button("Cancel setup").clicked() {
-                    self.post("/api/actions/cancel", json!({}));
-                }
-                if ui
-                    .hyperlink_to(
-                        "Official AnimeScripter project ↗",
-                        "https://github.com/NevermindNilas/TheAnimeScripter",
-                    )
-                    .clicked()
-                {}
-            });
-            ui.label("Select AnimeScripter in the Process page to use its anime-focused upscale, RIFE interpolation, and restoration pipeline. Its optional model weights download on first use.");
-            if let Some(detail) = self.anime["detail"]
-                .as_str()
-                .filter(|detail| !detail.is_empty())
-            {
-                ui.label(RichText::new(detail).size(11.0).color(palette.secondary));
-            }
-            if let Some(path) = self.anime["executable"].as_str() {
-                components::copyable_path(ui, path, "AnimeScripter CLI path");
-            }
-            if self.install["status"] == "error" {
-                if let Some(error) = self.install["error"].as_str() {
-                    ui.colored_label(palette.error, error);
-                }
-            }
-            if let Some(lines) = self.install["output"].as_array() {
-                egui::CollapsingHeader::new("Setup log")
-                    .id_salt("animescripter-setup-log")
-                    .show(ui, |ui| {
-                        for line in lines.iter().rev().take(12).filter_map(Value::as_str) {
-                            ui.label(RichText::new(line).monospace().size(10.0));
-                        }
-                    });
-            }
-        });
-    }
-
-    fn python_page(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        let python_info_pending = self.connected && self.python.is_null();
-        let python_installing = self.install["status"].as_str() == Some("running");
-        let interpreter_available = self.python["python_available"].as_bool().unwrap_or(false);
-        let interpreter_present = self.python["python_present"].as_bool().unwrap_or(false);
-        let available = self.python["python_managed"].as_bool() == Some(true);
-        let benchmark_running = self.benchmarks["status"].as_str() == Some("running");
-        let install_failed = self.install["status"].as_str() == Some("error");
-        let python_path = self.python["python_path"].as_str().unwrap_or("").to_owned();
-        Self::card(ui, "Managed Python", |ui| {
-            ui.horizontal(|ui| {
-                components::status_dot(
-                    ui,
-                    if available {
-                        palette.success
-                    } else if interpreter_present || install_failed {
-                        palette.error
-                    } else {
-                        palette.warning
-                    },
-                    if available {
-                        "Interpreter ready"
-                    } else if interpreter_present {
-                        "Found, but could not start"
-                    } else if install_failed {
-                        "Setup failed"
-                    } else {
-                        "Not installed"
-                    },
-                );
-                if ui.button("Refresh environment").clicked() {
-                    self.get("/api/python/info");
-                }
-            });
-            ui.label(if python_info_pending {
-                "Checking the app-managed Python environment…"
-            } else if python_installing {
-                "Setting up the app-managed Python runtime…"
-            } else {
-                self.python["python_detail"]
-                    .as_str()
-                    .unwrap_or("The Runtime page prepares the local Python engine.")
-            });
-            if !available {
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .button(if install_failed {
-                            "Retry runtime setup"
-                        } else if interpreter_present {
-                            "Repair Python runtime"
-                        } else {
-                            "Set up Python runtime"
-                        })
-                        .clicked()
-                    {
-                        self.page = RUNTIME_PAGE;
-                        self.start_recommended_runtime_setup();
-                    }
-                    if install_failed {
-                        ui.label(
-                            RichText::new(
-                                self.install["detail"]
-                                    .as_str()
-                                    .unwrap_or("Runtime setup failed."),
-                            )
-                            .color(palette.error),
-                        );
-                    } else if interpreter_available {
-                        ui.label(
-                            RichText::new(
-                                "A system Python was detected; setup will create the app-managed runtime.",
-                            )
-                            .color(palette.secondary),
-                        );
-                    }
-                });
-            }
-            ui.add_space(theme::space::SM);
-            ui.label(
-                RichText::new("Interpreter path")
-                    .size(11.0)
-                    .color(palette.muted),
-            );
-            components::copyable_path(
-                ui,
-                &python_path,
-                if python_info_pending {
-                    "Checking interpreter…"
-                } else if python_installing {
-                    "Installing Python…"
-                } else if interpreter_present {
-                    "The interpreter was found, but Windows could not start it. Repair the runtime from this page."
-                } else if self.connected {
-                    "App-managed Python is not installed"
-                } else if self.engine_error.is_some() {
-                    "Engine unavailable"
-                } else {
-                    "Waiting for engine…"
-                },
-            );
-            ui.add_space(theme::space::MD);
-            ui.horizontal_wrapped(|ui| {
-                for (command, label) in [
-                    ("--version", "Python version"),
-                    ("list", "Installed packages"),
-                    ("freeze", "Full package list"),
-                ] {
-                    if ui
-                        .add_enabled(
-                            available && !self.busy && !benchmark_running,
-                            egui::Button::new(label),
-                        )
-                        .clicked()
-                    {
-                        self.post("/api/python/pip", json!({"command": command}));
-                    }
-                }
-            });
-        });
-        ui.add_space(theme::space::MD);
-        Self::card(ui, "Recent activity", |ui| {
-            if self.logs.is_empty() {
-                ui.label(
-                    RichText::new("Python and setup command output will appear here.")
-                        .color(palette.secondary),
-                );
-            } else {
-                egui::ScrollArea::vertical()
-                    .max_height(360.0)
-                    .show(ui, |ui| {
-                        for line in self.logs.iter().rev().take(20).rev() {
-                            ui.label(RichText::new(line).monospace().size(12.0));
-                        }
-                    });
-            }
-        });
-    }
-
-    fn appearance_settings(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        Self::card(ui, "Appearance", |ui| {
-            ui.label(
-                RichText::new("Choose a comfortable look for long editing sessions.")
-                    .size(12.0)
-                    .color(palette.secondary),
-            );
-            ui.add_space(theme::space::SM);
-            ui.label(
-                RichText::new("Theme")
-                    .size(11.0)
-                    .strong()
-                    .color(palette.muted),
-            );
-            ui.horizontal(|ui| {
-                for (label, value) in [("Light", "light"), ("Dark", "dark")] {
-                    let selected = self.appearance == value;
-                    let response = ui.add_sized(
-                        Vec2::new(90.0, 38.0),
-                        egui::Button::new(label)
-                            .fill(if selected {
-                                palette.accent.gamma_multiply(0.16)
-                            } else {
-                                palette.elevated
-                            })
-                            .stroke(Stroke::new(
-                                if selected { 1.4 } else { 1.0 },
-                                if selected {
-                                    palette.accent
-                                } else {
-                                    palette.border
-                                },
-                            )),
-                    );
-                    if response.clicked() {
-                        self.appearance = value.to_owned();
-                        update_ui_setting("appearance", json!(self.appearance));
-                        apply_theme(ui.ctx(), self.accent, &self.appearance, self.reduce_motion);
-                    }
-                }
-            });
-            ui.add_space(theme::space::MD);
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.label(RichText::new("Reduce motion").strong());
-                    ui.label(
-                        RichText::new("Shorten transitions and loading animation.")
-                            .size(11.0)
-                            .color(palette.secondary),
-                    );
-                });
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if components::toggle(
-                        ui,
-                        &mut self.reduce_motion,
-                        "Reduce motion",
-                        self.accent,
-                        true,
-                    )
-                    .changed()
-                    {
-                        update_ui_setting("reduce_motion", json!(self.reduce_motion));
-                        apply_theme(ui.ctx(), self.accent, &self.appearance, self.reduce_motion);
-                    }
-                });
-            });
-            ui.add_space(theme::space::MD);
-            ui.label(
-                RichText::new("Accent color")
-                    .size(11.0)
-                    .strong()
-                    .color(palette.muted),
-            );
-            ui.horizontal_wrapped(|ui| {
-                for (label, rgb) in theme::ACCENTS {
-                    let color = color_from_array(rgb);
-                    let selected = self.accent == color;
-                    let response = ui.add_sized(
-                        Vec2::new(88.0, 38.0),
-                        egui::Button::new(label)
-                            .fill(palette.elevated)
-                            .stroke(Stroke::new(
-                                if selected { 1.6 } else { 1.0 },
-                                if selected { color } else { palette.border },
-                            )),
-                    );
-                    ui.painter().circle_filled(
-                        egui::pos2(response.rect.left() + 11.0, response.rect.center().y),
-                        4.0,
-                        color,
-                    );
-                    if response.clicked() {
-                        self.accent = color;
-                        save_accent(color);
-                        apply_theme(ui.ctx(), color, &self.appearance, self.reduce_motion);
-                    }
-                    response.on_hover_text(format!("Use the {label} accent"));
-                }
-            });
-            ui.add_space(theme::space::SM);
-            egui::Frame::new()
-                .fill(palette.elevated)
-                .stroke(Stroke::new(1.0, palette.border))
-                .corner_radius(theme::radius::CONTROL)
-                .inner_margin(egui::Margin::symmetric(10, 6))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui.color_edit_button_srgba(&mut self.accent).changed() {
-                            save_accent(self.accent);
-                            apply_theme(
-                                ui.ctx(),
-                                self.accent,
-                                &self.appearance,
-                                self.reduce_motion,
-                            );
-                        }
-                        ui.label(
-                            RichText::new("Custom accent")
-                                .size(11.0)
-                                .color(palette.secondary),
-                        );
-                    });
-                });
-            if self.reduce_motion {
-                ui.add_space(theme::space::SM);
-                ui.label(
-                    RichText::new("Reduced motion is on.")
-                        .size(11.0)
-                        .color(palette.secondary),
-                );
-            }
-            ui.label(
-                RichText::new("Your accent color is saved on this device.")
-                    .size(11.0)
-                    .color(palette.secondary),
-            );
-        });
-    }
-
-    fn model_storage_settings(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        Self::card(ui, "Model storage", |ui| {
-            ui.label("Choose where model weights are installed and read from.");
-            egui::ComboBox::from_label("Storage location")
-                .selected_text(if self.model_storage == "wsl" {
-                    "WSL Ubuntu"
-                } else {
-                    "This PC · Windows"
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.model_storage, "wsl".to_owned(), "WSL Ubuntu");
-                    ui.selectable_value(
-                        &mut self.model_storage,
-                        "windows".to_owned(),
-                        "This PC · Windows",
-                    );
-                });
-            if ui
-                .add_enabled(
-                    self.benchmarks["status"].as_str() != Some("running"),
-                    egui::Button::new("Apply and install or verify all models"),
-                )
-                .clicked()
-            {
-                update_ui_setting("model_storage", json!(self.model_storage));
-                self.first_setup = false;
-                self.post(
-                    "/api/storage/configure",
-                    json!({"storage": self.model_storage}),
-                );
-            }
-            if self.first_setup {
-                ui.label("First launch: choose where to keep the models, then start setup. WSL starts automatically if selected.");
-            }
-            let status = self.storage_status["status"]
-                .as_str()
-                .unwrap_or("waiting")
-                .to_owned();
-            if matches!(status.as_str(), "starting" | "installing")
-                && ui.button("Cancel model setup").clicked()
-            {
-                self.post("/api/actions/cancel", json!({}));
-            }
-            let stage = self.storage_status["stage"]
-                .as_str()
-                .unwrap_or("Waiting for engine status")
-                .to_owned();
-            let detail = self.storage_status["detail"]
-                .as_str()
-                .unwrap_or("")
-                .to_owned();
-            ui.add_space(6.0);
-            if status == "ready" {
-                let location = if self.model_storage == "wsl" {
-                    "WSL Ubuntu"
-                } else {
-                    "Windows"
-                };
-                components::status_dot(ui, palette.success, &format!("Ready · {location}"));
-            } else {
-                ui.label(format!("{stage} · {status}"));
-            }
-            if status != "ready" && !detail.is_empty() {
-                ui.label(
-                    RichText::new(detail)
-                        .size(11.0)
-                        .color(secondary_text_color(!ui.visuals().dark_mode)),
-                );
-            }
-            if let Some(progress) = self.storage_status["progress"].as_f64() {
-                ui.add(
-                    egui::ProgressBar::new((progress as f32 / 100.0).clamp(0.0, 1.0))
-                        .show_percentage(),
-                );
-            }
-            if let Some(error) = self.storage_status["error"]
-                .as_str()
-                .filter(|value| !value.is_empty())
-            {
-                ui.colored_label(
-                    theme::palette(!ui.visuals().dark_mode, self.accent).error,
-                    error,
-                );
-            }
-            components::copyable_path(
-                ui,
-                self.storage_status["model_dir"]
-                    .as_str()
-                    .unwrap_or_default(),
-                "Storage path will be shown after setup",
-            );
-        });
-    }
-
-    fn update_settings(&mut self, ui: &mut egui::Ui) {
-        Self::card(ui, "Updates", |ui| {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("Installed").color(secondary_text_color(!ui.visuals().dark_mode)),
-                );
-                ui.label(RichText::new(format!("v{APP_VERSION}")).strong());
-                if let Some(version) = self.update["latest_version"].as_str() {
-                    ui.separator();
-                    ui.label(
-                        RichText::new("Latest")
-                            .color(secondary_text_color(!ui.visuals().dark_mode)),
-                    );
-                    ui.label(RichText::new(format!("v{version}")).strong());
-                }
-            });
-            ui.label(
-                self.update["detail"]
-                    .as_str()
-                    .unwrap_or("Check B1progame on GitHub for the latest Windows release."),
-            );
-            ui.hyperlink_to(
-                "Release channel · B1progame/REAL-Video-Enhancer",
-                "https://github.com/B1progame/REAL-Video-Enhancer/releases",
-            );
-            ui.add_space(theme::space::SM);
-            ui.label(RichText::new("Private repository access · optional").strong());
-            ui.label(RichText::new("The app uses a saved token or your existing GitHub CLI login for private releases. Public releases need no sign-in. Saved tokens are encrypted for this Windows account.").size(11.0).color(secondary_text_color(!ui.visuals().dark_mode)));
-            ui.horizontal_wrapped(|ui| {
-                ui.add_sized(
-                    Vec2::new(ui.available_width().min(360.0), 36.0),
-                    egui::TextEdit::singleline(&mut self.update_token_input)
-                        .password(true)
-                        .hint_text("github_pat_… · read-only Contents access"),
-                );
-                if ui
-                    .add_enabled(
-                        !self.update_token_input.trim().is_empty(),
-                        egui::Button::new("Save token securely"),
-                    )
-                    .clicked()
-                {
-                    let token = std::mem::take(&mut self.update_token_input);
-                    self.post("/api/app/update/auth", json!({"token": token}));
-                }
-                if self.update["has_github_token"].as_bool() == Some(true)
-                    && ui.button("Remove token").clicked()
-                {
-                    self.post("/api/app/update/auth", json!({"token": ""}));
-                }
-                ui.hyperlink_to(
-                    "Create read-only token ↗",
-                    "https://github.com/settings/personal-access-tokens/new",
-                );
-            });
-            if !self.update_auth_message.is_empty() {
-                ui.label(RichText::new(&self.update_auth_message).size(11.0).color(
-                    if self.update_auth_message.contains("could not") {
-                        theme::palette(!ui.visuals().dark_mode, self.accent).error
-                    } else {
-                        theme::palette(!ui.visuals().dark_mode, self.accent).success
-                    },
-                ));
-            }
-            if self.update["status"] == "error" {
-                ui.colored_label(
-                    theme::palette(!ui.visuals().dark_mode, self.accent).error,
-                    "Update check needs attention",
-                );
-            }
-            if self.update["status"] == "downloaded" {
-                ui.colored_label(
-                    theme::palette(!ui.visuals().dark_mode, self.accent).success,
-                    "Update downloaded · starting installation…",
-                );
-            }
-            if self.update["status"] == "installing" {
-                ui.label("Installing quietly and reopening REAL Video Enhancer…");
-            }
-            if let Some(url) = self.update["release_url"].as_str() {
-                ui.hyperlink_to("View release notes on GitHub", url);
-            }
-            if let Some(progress) = self.update["progress"].as_f64()
-                && (self.update["status"] == "downloading" || self.update["status"] == "downloaded")
-            {
-                ui.add(
-                    egui::ProgressBar::new((progress as f32 / 100.0).clamp(0.0, 1.0))
-                        .show_percentage(),
-                );
-            }
-            ui.horizontal_wrapped(|ui| {
-                let checking = self.update["status"] == "checking";
-                let downloading = self.update["status"] == "downloading";
-                let check_label = if checking {
-                    "Checking for updates…"
-                } else {
-                    "Check for updates"
-                };
-                if ui
-                    .add_enabled(!checking, egui::Button::new(check_label))
-                    .clicked()
-                {
-                    self.update = json!({
-                        "status": "checking",
-                        "current_version": APP_VERSION,
-                        "detail": "Checking the B1progame GitHub releases…"
-                    });
-                    self.get("/api/app/update/check");
-                }
-                if self.update["update_available"].as_bool() == Some(true)
-                    && self.update["status"] != "downloading"
-                    && self.update["status"] != "downloaded"
-                    && self.update["status"] != "installing"
-                    && ui
-                        .add_enabled(
-                            !self.other_task_active(),
-                            egui::Button::new("Download & install"),
-                        )
-                        .clicked()
-                {
-                    self.post("/api/app/update/download", json!({}));
-                }
-                if downloading && ui.button("Cancel download").clicked() {
-                    self.post("/api/actions/cancel", json!({}));
-                }
-            });
-        });
-    }
-
-    fn data_management_settings(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        let cache_bytes = self.footprint["components"]
-            .as_array()
-            .and_then(|components| components.iter().find(|item| item["id"] == "uv_cache"))
-            .and_then(|item| item["bytes"].as_u64())
-            .unwrap_or(0);
-        Self::card(ui, "Managed downloads", |ui| {
-            ui.label("Remove app-managed Python packages or model weights to reclaim disk space. Your videos and the app itself stay in place.");
-            ui.add_space(theme::space::SM);
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(
-                        self.active_task().is_none() && !self.managed_data_pending,
-                        egui::Button::new("Delete Python and packages"),
-                    )
-                    .clicked()
-                {
-                    self.managed_data_message = None;
-                    self.destructive_confirmation = Some("python".to_owned());
-                }
-                if ui
-                    .add_enabled(
-                        self.active_task().is_none() && !self.managed_data_pending,
-                        egui::Button::new("Delete models"),
-                    )
-                    .clicked()
-                {
-                    self.managed_data_message = None;
-                    self.destructive_confirmation = Some("models".to_owned());
-                }
-                if ui
-                    .add_enabled(
-                        cache_bytes > 0
-                            && self.active_task().is_none()
-                            && !self.managed_data_pending,
-                        egui::Button::new("Prune unused package cache"),
-                    )
-                    .on_hover_text(
-                        "Keep the installed runtime and remove cache entries uv considers unused.",
-                    )
-                    .clicked()
-                {
-                    self.destructive_confirmation = Some("uv_cache".to_owned());
-                }
-            });
-            ui.label(
-                RichText::new(format!(
-                    "uv download cache · {} · pruned packages may need downloading again later",
-                    format_bytes(cache_bytes)
-                ))
-                .size(11.0)
-                .color(palette.secondary),
-            );
-            if let Some(message) = self.managed_data_message.as_deref() {
-                ui.add_space(theme::space::XS);
-                ui.horizontal(|ui| {
-                    if self.managed_data_pending {
-                        ui.spinner();
-                    }
-                    ui.label(RichText::new(message).color(if self.managed_data_failed {
-                        palette.error
-                    } else if self.managed_data_pending {
-                        palette.accent
-                    } else {
-                        palette.success
-                    }));
-                });
-            }
-            ui.label(RichText::new("Python can be installed again from Runtime. Models can be downloaded again from Downloads.").size(11.0).color(palette.secondary));
-        });
-    }
-
-    fn storage_footprint_settings(&mut self, ui: &mut egui::Ui) {
-        let palette = theme::palette(!ui.visuals().dark_mode, self.accent);
-        if self.footprint.is_null() && self.connected && !self.footprint_loading {
-            self.footprint_loading = true;
-            self.get("/api/storage/footprint");
-        }
-        Self::card(ui, "App storage footprint", |ui| {
-            ui.label(RichText::new("Windows runs the desktop app and inference runtime. The model library stays in WSL and selected weights are copied to Windows only for a video render.").size(12.0).color(palette.secondary));
-            ui.add_space(theme::space::SM);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "Measured managed storage · {}",
-                        format_bytes(self.footprint["total_bytes"].as_u64().unwrap_or(0))
-                    ))
-                    .strong()
-                    .size(16.0),
-                );
-                if let Some(free) = self.footprint["free_bytes"].as_u64() {
-                    ui.label(
-                        RichText::new(format!("Windows disk free · {}", format_bytes(free)))
-                            .color(palette.secondary),
-                    );
-                }
-                if self.footprint_loading {
-                    ui.spinner();
-                }
-                if ui
-                    .add_enabled(!self.footprint_loading, egui::Button::new("Refresh sizes"))
-                    .clicked()
-                {
-                    self.footprint_loading = true;
-                    self.get("/api/storage/footprint");
-                }
-            });
-            ui.add_space(theme::space::XS);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "WINDOWS · {}",
-                        format_bytes(self.footprint["windows_bytes"].as_u64().unwrap_or(0))
-                    ))
-                    .strong()
-                    .color(palette.text),
-                );
-                ui.label(
-                    RichText::new(if self.footprint["free_bytes"].as_u64().is_some() {
-                        format!(
-                            "{} free",
-                            format_bytes(self.footprint["free_bytes"].as_u64().unwrap_or(0))
-                        )
-                    } else {
-                        "Windows free space unavailable".to_owned()
-                    })
-                    .size(11.0)
-                    .color(palette.secondary),
-                );
-            });
-            if let Some(items) = self.footprint["components"].as_array() {
-                for component in items {
-                    if component["storage"].as_str().unwrap_or("windows") != "windows" {
-                        continue;
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(component["label"].as_str().unwrap_or("Managed data"));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(
-                                RichText::new(format_bytes(
-                                    component["bytes"].as_u64().unwrap_or(0),
-                                ))
-                                .strong()
-                                .color(palette.text),
-                            );
-                        });
-                    });
-                }
-            }
-            ui.add_space(theme::space::SM);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "WSL UBUNTU · {}",
-                        if self.model_storage != "wsl" {
-                            "not selected".to_owned()
-                        } else if self.footprint["wsl_size_known"].as_bool().unwrap_or(false) {
-                            format_bytes(self.footprint["wsl_bytes"].as_u64().unwrap_or(0))
-                        } else {
-                            "model size not measured".to_owned()
-                        }
-                    ))
-                    .strong()
-                    .color(palette.text),
-                );
-                ui.label(
-                    RichText::new(if self.model_storage != "wsl" {
-                        "Not selected"
-                    } else if self.footprint["wsl_running"].as_bool().unwrap_or(false) {
-                        "Running"
-                    } else {
-                        "Ubuntu stopped"
-                    })
-                    .size(11.0)
-                    .color(palette.secondary),
-                );
-                if let Some(free) = self.footprint["wsl_free_bytes"].as_u64() {
-                    ui.label(
-                        RichText::new(format!("{} free", format_bytes(free)))
-                            .size(11.0)
-                            .color(palette.secondary),
-                    );
-                }
-            });
-            if let Some(items) = self.footprint["components"].as_array() {
-                for component in items {
-                    if component["storage"].as_str().unwrap_or_default() != "wsl" {
-                        continue;
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(component["label"].as_str().unwrap_or("Managed WSL data"));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            ui.label(
-                                RichText::new(format_bytes(
-                                    component["bytes"].as_u64().unwrap_or(0),
-                                ))
-                                .strong()
-                                .color(palette.text),
-                            );
-                        });
-                    });
-                }
-            }
-            if !self.footprint["error"]
-                .as_str()
-                .unwrap_or_default()
-                .is_empty()
-            {
-                ui.colored_label(
-                    palette.warning,
-                    self.footprint["error"].as_str().unwrap_or_default(),
-                );
-            }
-            ui.label(RichText::new(if self.model_storage != "wsl" {
-                "Model storage is set to Windows. The managed model library stays on the Windows drive."
-            } else if !self.footprint["wsl_size_known"].as_bool().unwrap_or(false) {
-                "Ubuntu is stopped and its model size has not been measured yet. Storage checks do not start WSL. A video render stages only selected models temporarily, stops Ubuntu before inference, and removes the copy afterward."
-            } else if self.footprint["wsl_measurement_cached"].as_bool().unwrap_or(false) {
-                "Ubuntu is stopped; its model size is the last saved measurement. A render stages only selected models temporarily, then removes them when finished."
-            } else {
-                "Starting or downloading models can use WSL. Real video renders stage only selected weights in Windows, stop Ubuntu before inference, and remove the temporary copy when finished. Benchmarks keep their normal WSL behavior."
-            }).size(11.0).color(palette.muted));
-        });
-    }
-
-    fn render_default_settings(&mut self, ui: &mut egui::Ui) -> bool {
-        let mut render_defaults_changed = false;
-        let mut preview_enabled = self.saved_settings["advanced"]["preview_enabled"]
-            .as_bool()
-            .unwrap_or(true);
-        Self::card(ui, "Render defaults", |ui| {
-            egui::ComboBox::from_label("Precision")
-                .selected_text(&self.precision)
-                .show_ui(ui, |ui| {
-                    for option in ["auto", "float16", "float32"] {
-                        render_defaults_changed |= ui
-                            .selectable_value(&mut self.precision, option.to_owned(), option)
-                            .changed();
-                    }
-                });
-            ui.horizontal(|ui| {
-                render_defaults_changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut self.tile_size)
-                            .range(0..=4096)
-                            .prefix("Tile size "),
-                    )
-                    .changed();
-                render_defaults_changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut self.overlap)
-                            .range(0..=256)
-                            .prefix("Overlap "),
-                    )
-                    .changed();
-                render_defaults_changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut self.pytorch_gpu_id)
-                            .range(0..=64)
-                            .prefix("PyTorch GPU "),
-                    )
-                    .changed();
-                render_defaults_changed |= ui
-                    .add(
-                        egui::DragValue::new(&mut self.ncnn_gpu_id)
-                            .range(0..=64)
-                            .prefix("NCNN GPU "),
-                    )
-                    .changed();
-            });
-            ui.horizontal_wrapped(|ui| {
-                render_defaults_changed |= ui
-                    .checkbox(&mut self.output_to_mpv, "Send output to MPV")
-                    .changed();
-                render_defaults_changed |=
-                    ui.checkbox(&mut self.auto_hdr, "Automatic HDR").changed();
-                render_defaults_changed |= ui.checkbox(&mut self.uhd_mode, "UHD mode").changed();
-                render_defaults_changed |= ui
-                    .checkbox(&mut self.auto_crop, "Detect black borders")
-                    .changed();
-                render_defaults_changed |= ui
-                    .checkbox(&mut self.overwrite, "Replace existing output")
-                    .changed();
-                render_defaults_changed |= ui
-                    .checkbox(&mut preview_enabled, "Live render preview")
-                    .on_hover_text(
-                        "Show a small, real frame from the RVE renderer while it is working.",
-                    )
-                    .changed();
-            });
-        });
-        if render_defaults_changed {
-            if !self.saved_settings["advanced"].is_object() {
-                self.saved_settings["advanced"] = json!({});
-            }
-            self.saved_settings["advanced"]["preview_enabled"] = json!(preview_enabled);
-        }
-        render_defaults_changed
-    }
-
-    fn settings_page(&mut self, ui: &mut egui::Ui) {
-        let mut render_defaults_changed = false;
-        if !settings_uses_two_columns(ui.available_width()) {
-            if self.first_setup {
-                self.model_storage_settings(ui);
-                ui.add_space(theme::space::MD);
-                self.appearance_settings(ui);
-            } else {
-                self.appearance_settings(ui);
-                ui.add_space(theme::space::MD);
-                self.model_storage_settings(ui);
-            }
-            ui.add_space(theme::space::MD);
-            self.update_settings(ui);
-            ui.add_space(theme::space::MD);
-            render_defaults_changed = self.render_default_settings(ui);
-            ui.add_space(theme::space::MD);
-            self.data_management_settings(ui);
-            ui.add_space(theme::space::MD);
-            self.storage_footprint_settings(ui);
-        } else {
-            ui.columns(2, |columns| {
-                if self.first_setup {
-                    self.model_storage_settings(&mut columns[0]);
-                    columns[0].add_space(theme::space::MD);
-                    render_defaults_changed = self.render_default_settings(&mut columns[0]);
-                    self.appearance_settings(&mut columns[1]);
-                } else {
-                    self.appearance_settings(&mut columns[0]);
-                    columns[0].add_space(theme::space::MD);
-                    render_defaults_changed = self.render_default_settings(&mut columns[0]);
-                    self.model_storage_settings(&mut columns[1]);
-                }
-                columns[1].add_space(theme::space::MD);
-                self.update_settings(&mut columns[1]);
-                columns[1].add_space(theme::space::MD);
-                self.data_management_settings(&mut columns[1]);
-                columns[1].add_space(theme::space::MD);
-                self.storage_footprint_settings(&mut columns[1]);
-            });
-        }
-        if render_defaults_changed {
-            self.save_render_defaults();
-        }
-    }
-
-    fn draw_startup_animation(&self, ctx: &egui::Context) {
-        if self.reduce_motion {
-            return;
-        }
-        let elapsed = self.launch_time.elapsed().as_secs_f32();
-        if elapsed >= 1.9 {
-            return;
-        }
-        let fade_in = (elapsed / 0.32).clamp(0.0, 1.0);
-        let fade_out = ((1.9 - elapsed) / 0.45).clamp(0.0, 1.0);
-        let opacity = fade_in.min(fade_out);
-        let light = self.appearance == "light";
-        let palette = theme::palette(light, self.accent);
-        let screen = ctx.content_rect();
-        let center = screen.center();
-        let painter = ctx.layer_painter(egui::LayerId::new(
-            egui::Order::Foreground,
-            egui::Id::unique("rve-startup"),
-        ));
-        painter.rect_filled(
-            screen,
-            0.0,
-            Color32::from_black_alpha((92.0 * opacity) as u8),
-        );
-        let card = egui::Rect::from_center_size(center, Vec2::new(330.0, 174.0));
-        painter.rect_filled(
-            card.translate(Vec2::new(0.0, 7.0)),
-            18.0,
-            Color32::from_black_alpha((115.0 * opacity) as u8),
-        );
-        painter.rect_filled(card, 18.0, palette.surface.gamma_multiply(opacity));
-        painter.rect_stroke(
-            card,
-            18.0,
-            Stroke::new(1.0, border_color(light).gamma_multiply(opacity)),
-            egui::StrokeKind::Inside,
-        );
-        let orbit = center + Vec2::new(0.0, -35.0);
-        let phase = elapsed * 4.3;
-        for index in 0..3 {
-            let angle = phase + index as f32 * std::f32::consts::TAU / 3.0;
-            let point = orbit + Vec2::angled(angle) * 15.0;
-            let pulse = 0.65 + 0.35 * (phase + index as f32).sin().abs();
-            painter.circle_filled(
-                point,
-                4.0,
-                accent_for_theme(self.accent, light).gamma_multiply(opacity * pulse),
-            );
-        }
-        painter.text(
-            center + Vec2::new(0.0, 13.0),
-            egui::Align2::CENTER_CENTER,
-            "REAL VIDEO ENHANCER",
-            egui::FontId::proportional(16.0),
-            palette.text.gamma_multiply(opacity),
-        );
-        painter.text(
-            center + Vec2::new(0.0, 40.0),
-            egui::Align2::CENTER_CENTER,
-            "Starting your local engine…",
-            egui::FontId::proportional(12.0),
-            palette.secondary.gamma_multiply(opacity),
-        );
-        ctx.request_repaint_after(Duration::from_millis(33));
-    }
 }
 
 impl eframe::App for NativeApp {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        // Fully clear lets the Windows material through; otherwise stay solid.
+        if self.material_active {
+            [0.0; 4]
+        } else if visuals.dark_mode {
+            [0.043, 0.051, 0.075, 1.0]
+        } else {
+            [0.945, 0.953, 0.973, 1.0]
+        }
+    }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        let Some(engine) = self._engine.as_mut() else {
+        let Ok(mut slot) = self.api.engine.lock() else {
             return;
         };
-
+        let Some(engine) = slot.as_mut() else {
+            return;
+        };
         // A failed second instance must never shut down the first instance's
         // loopback service. Only the child that is still running is ours.
         if engine.try_wait().ok().flatten().is_some() {
@@ -5946,8 +2503,6 @@ impl eframe::App for NativeApp {
 
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
-        #[cfg(windows)]
-        self.custom_titlebar(root_ui, &ctx);
         self.process_tray_commands(&ctx);
         if ctx.input(|input| input.viewport().close_requested())
             && self.active_task().is_some()
@@ -5958,23 +2513,14 @@ impl eframe::App for NativeApp {
         }
         self.consume_events(&ctx);
         self.check_task_toast();
-        if self.update["status"] == "downloaded" && !self.update_install_started {
+        if self.update["status"] == "downloaded"
+            && !self.update_install_started
+            && self.update["installer_path"].as_str() != self.failed_update.as_deref()
+            && self.render["status"] != "running"
+        {
             self.install_downloaded_update(&ctx);
         }
-        if let Some(path) = ctx.input(|input| {
-            input
-                .raw
-                .dropped_files
-                .first()
-                .map(|file| file.path().to_path_buf())
-        }) {
-            self.input_path = path.to_string_lossy().into_owned();
-            if let Some(parent) = path.parent() {
-                self.output_folder = parent.to_string_lossy().into_owned();
-            }
-            self.input_info = json!({"status": "inspecting"});
-            self.post("/api/video/inspect", json!({"path": self.input_path}));
-        }
+        self.receive_dropped_files(&ctx);
         let shortcut = ctx.input(|input| {
             if input.modifiers.ctrl {
                 [
@@ -5996,358 +2542,78 @@ impl eframe::App for NativeApp {
         if let Some(page) = shortcut {
             self.page = page;
         }
-        let light = self.appearance == "light";
-        let theme_accent = accent_for_theme(self.accent, light);
-        let compact_sidebar = root_ui.available_width() < 820.0;
-        let sidebar_width = if compact_sidebar { 76.0 } else { 220.0 };
-        egui::Panel::left("navigation")
-            .resizable(false)
-            .default_size(sidebar_width)
-            .min_size(sidebar_width)
-            .max_size(sidebar_width)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::palette(light, self.accent).sidebar)
-                    .stroke(Stroke::new(1.0, border_color(light)))
-                    .inner_margin(if compact_sidebar { 10 } else { 18 }),
-            )
-            .show(root_ui, |ui| {
-                ui.add_space(4.0);
-                if compact_sidebar {
-                    ui.with_layout(Layout::top_down(Align::Center), |ui| {
-                        Self::brand_mark(ui, 44.0);
-                    });
-                } else {
-                    ui.horizontal(|ui| {
-                        Self::brand_mark(ui, 46.0);
-                        ui.vertical(|ui| {
-                            ui.label(
-                                RichText::new("REAL VIDEO")
-                                    .size(12.0)
-                                    .strong()
-                                    .color(theme::palette(light, self.accent).text),
-                            );
-                            ui.label(
-                                RichText::new(format!("ENHANCER · v{APP_VERSION}"))
-                                    .size(9.0)
-                                    .color(theme::palette(light, self.accent).muted),
-                            );
-                        });
-                    });
-                }
-                ui.add_space(if compact_sidebar { 16.0 } else { 28.0 });
-                if !compact_sidebar {
-                    ui.label(
-                        RichText::new("WORKSPACE")
-                            .size(9.0)
-                            .strong()
-                            .color(theme::palette(light, self.accent).muted),
-                    );
-                    ui.add_space(7.0);
-                }
-                for (index, (label, icon)) in PAGES.iter().enumerate() {
-                    let group = match index {
-                        2 => Some("DISCOVER"),
-                        5 => Some("ENGINE"),
-                        7 => Some("PREFERENCES"),
-                        _ => None,
-                    };
-                    if let Some(group) = group
-                        && !compact_sidebar
-                    {
-                        ui.add_space(if index == 7 { 16.0 } else { 12.0 });
-                        ui.label(
-                            RichText::new(group)
-                                .size(9.0)
-                                .strong()
-                                .color(theme::palette(light, self.accent).muted),
-                        );
-                        ui.add_space(6.0);
-                    }
-                    let selected = self.page == index;
-                    let (rect, response) = ui.allocate_exact_size(
-                        Vec2::new(
-                            if compact_sidebar {
-                                52.0
-                            } else {
-                                sidebar_width - 36.0
-                            },
-                            44.0,
-                        ),
-                        egui::Sense::click(),
-                    );
-                    let hover = ctx.animate_bool_with_time(
-                        egui::Id::unique(("navigation-hover", index)),
-                        response.hovered(),
-                        if self.reduce_motion {
-                            0.0
-                        } else {
-                            theme::motion::HOVER_SECONDS
-                        },
-                    );
-                    let fill = if selected {
-                        theme_accent.gamma_multiply(if light { 0.13 } else { 0.12 })
-                    } else if response.hovered() {
-                        theme::palette(light, self.accent)
-                            .elevated
-                            .gamma_multiply(hover)
-                    } else {
-                        Color32::TRANSPARENT
-                    };
-                    let painter = ui.painter().clone();
-                    painter.rect_filled(rect, 10.0, fill);
-                    if selected {
-                        painter.rect_filled(
-                            egui::Rect::from_center_size(
-                                egui::pos2(rect.left() + 3.0, rect.center().y),
-                                Vec2::new(3.0, 23.0),
-                            ),
-                            1.5,
-                            theme_accent,
-                        );
-                    }
-                    let icon_color = if selected {
-                        theme::palette(light, self.accent).accent
-                    } else {
-                        secondary_text_color(light)
-                    };
-                    let icon_center = if compact_sidebar {
-                        rect.center()
-                    } else {
-                        egui::pos2(rect.left() + 22.0, rect.center().y)
-                    };
-                    ui.place(
-                        egui::Rect::from_center_size(icon_center, Vec2::splat(22.0)),
-                        icons::styled(icon, icon_color, if compact_sidebar { 22.0 } else { 20.0 }),
-                    );
-                    if !compact_sidebar {
-                        painter.text(
-                            egui::pos2(rect.left() + 45.0, rect.center().y),
-                            egui::Align2::LEFT_CENTER,
-                            *label,
-                            egui::FontId::proportional(13.5),
-                            if selected {
-                                ui.visuals().text_color()
-                            } else {
-                                secondary_text_color(light)
-                            },
-                        );
-                    }
-                    if response.has_focus() {
-                        painter.rect_stroke(
-                            rect,
-                            8.0,
-                            Stroke::new(1.0, theme_accent),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
-                    let response = response.on_hover_text(format!("{label} · Ctrl+{}", index + 1));
-                    if response.clicked() {
-                        self.page = index;
-                    }
-                    response.widget_info(|| {
-                        egui::WidgetInfo::selected(
-                            egui::Role::Button,
-                            true,
-                            self.page == index,
-                            *label,
-                        )
-                    });
-                    ui.add_space(2.0);
-                }
-                ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                    let palette = theme::palette(light, self.accent);
-                    let (state, color) = if self.connected {
-                        ("Engine ready", palette.success)
-                    } else if self.engine_error.is_some() {
-                        ("Engine unavailable", palette.error)
-                    } else {
-                        ("Starting engine", palette.warning)
-                    };
-                    if compact_sidebar {
-                        let (rect, response) =
-                            ui.allocate_exact_size(Vec2::new(48.0, 24.0), egui::Sense::hover());
-                        ui.painter().circle_filled(rect.center(), 4.0, color);
-                        let _ = response.on_hover_text(state);
-                    } else {
-                        components::status_dot(ui, color, state);
-                    }
-                });
-            });
-
-        let compact_content = root_ui.available_width() < 1120.0;
-        if self.page == PROCESS_PAGE {
-            let palette = theme::palette(light, self.accent);
-            let footer_height = if root_ui.available_width() < 1200.0 {
-                112.0
-            } else {
-                82.0
-            };
-            egui::Panel::bottom("process-render-bar")
-                .resizable(false)
-                .default_size(footer_height)
-                .min_size(footer_height)
-                .max_size(footer_height)
-                .frame(
-                    egui::Frame::new()
-                        .fill(palette.sidebar)
-                        .stroke(Stroke::new(1.0, palette.border))
-                        .inner_margin(egui::Margin::symmetric(24, 10)),
-                )
-                .show(root_ui, |ui| self.render_action_bar(ui));
-        }
-
-        egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::palette(light, self.accent).canvas)
-                    .inner_margin(egui::Margin::symmetric(
-                        if compact_content { 22 } else { 32 },
-                        22,
-                    )),
-            )
-            .show(root_ui, |ui| {
-                ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                    if self.quit_when_idle {
-                        let palette = theme::palette(light, self.accent);
-                        egui::Frame::new()
-                            .fill(palette.elevated)
-                            .corner_radius(theme::radius::CONTROL)
-                            .inner_margin(egui::Margin::symmetric(12, 8))
-                            .show(ui, |ui| {
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.label(
-                                        RichText::new("Will quit after current work finishes.")
-                                            .color(palette.warning),
-                                    );
-                                    if ui.small_button("Cancel exit").clicked() {
-                                        self.quit_when_idle = false;
-                                    }
-                                });
-                            });
-                        ui.add_space(theme::space::SM);
-                    }
-                    self.header(ui);
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| match self.page {
-                            0 => self.home_page(ui),
-                            1 => self.process_page(ui),
-                            2 => self.downloads_page(ui),
-                            3 => self.model_library_page(ui),
-                            4 => self.benchmarks_page(ui),
-                            5 => self.runtime_page(ui),
-                            6 => self.python_page(ui),
-                            7 => self.settings_page(ui),
-                            _ => self.home_page(ui),
-                        });
-                });
-            });
-
-        if self.close_confirmation {
-            let active_task = self.active_task().unwrap_or("A background task");
-            egui::Window::new("Work is still running")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(&ctx, |ui| {
-                    ui.set_min_width(360.0);
-                    ui.label(RichText::new(format!("{active_task} is still in progress.")).strong());
-                    ui.add_space(theme::space::SM);
-                    ui.label("Keep REAL Video Enhancer running in the system tray? You can reopen it there while the work continues.");
-                    if let Some(error) = &self.tray_error {
-                        ui.add_space(theme::space::SM);
-                        ui.colored_label(theme::palette(light, self.accent).error, error);
-                    }
-                    ui.add_space(theme::space::MD);
-                    ui.horizontal(|ui| {
-                        if ui.add_enabled(self.tray_available(), egui::Button::new("Keep working in tray")).clicked() {
-                            self.close_confirmation = false;
-                            self.quit_when_idle = false;
-                            self.hide_to_tray(&ctx);
-                        }
-                        if ui.button("Keep app open").clicked() {
-                            self.close_confirmation = false;
-                            self.quit_when_idle = false;
-                        }
-                        if ui.button("Cancel work and quit").clicked() {
-                            self.close_confirmation = false;
-                            self.quit_when_idle = true;
-                            self.post("/api/actions/cancel", json!({}));
-                        }
-                    });
-                });
-        }
-
-        if let Some(kind) = self.destructive_confirmation.clone() {
-            let title = if kind == "python" {
-                "Delete managed Python?"
-            } else if kind == "uv_cache" {
-                "Prune unused package cache?"
-            } else {
-                "Delete all managed models?"
-            };
-            let detail = if kind == "python" {
-                "This removes the app-managed Python runtime and its installed packages. Runtime setup can install them again."
-            } else if kind == "uv_cache" {
-                "uv will prune package cache entries it considers unused. Your installed Python runtime and packages stay in place. Packages removed from the cache may need to be downloaded again during a future setup."
-            } else {
-                "This removes downloaded model weights, including custom models, from the selected Windows or WSL storage location. You can download them again later."
-            };
-            egui::Window::new(title)
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-                .show(&ctx, |ui| {
-                    ui.set_min_width(390.0);
-                    ui.label(detail);
-                    ui.add_space(theme::space::MD);
-                    ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() {
-                            self.destructive_confirmation = None;
-                        }
-                        if ui
-                            .add_enabled(
-                                self.active_task().is_none() && !self.managed_data_pending,
-                                egui::Button::new(if kind == "uv_cache" {
-                                    "Prune cache"
-                                } else {
-                                    "Delete files"
-                                }),
-                            )
-                            .clicked()
-                        {
-                            self.destructive_confirmation = None;
-                            if kind == "uv_cache" {
-                                self.install = json!({
-                                    "status": "running",
-                                    "progress": 1,
-                                    "stage": "Pruning unused package cache",
-                                    "detail": "Removing package downloads uv marks unused.",
-                                    "output": []
-                                });
-                                self.post("/api/storage/prune-cache", json!({}));
-                            } else {
-                                self.managed_data_kind = Some(kind.clone());
-                                self.managed_data_message = Some(if kind == "python" {
-                                    "Removing the managed Python environment, downloaded Python runtimes, and package cache…".to_owned()
-                                } else if self.model_storage == "wsl" {
-                                    "Removing the managed model library from WSL Ubuntu…".to_owned()
-                                } else {
-                                    "Removing the managed model library from this PC…".to_owned()
-                                });
-                                self.managed_data_failed = false;
-                                self.managed_data_pending = true;
-                                self.post("/api/data/delete", json!({"kind": kind.clone()}));
-                            }
-                        }
-                    });
-                });
-        }
-
-        self.draw_startup_animation(&ctx);
-        self.draw_toast(&ctx);
+        self.drive_queue();
+        self.track_jobs(&ctx);
+        self.draw_shell(root_ui);
     }
+}
+
+impl NativeApp {
+    fn receive_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .map(|file| file.path().to_path_buf())
+                .collect::<Vec<_>>()
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        let mut videos = dropped
+            .iter()
+            .filter(|path| prefs::is_video_path(path))
+            .map(|path| path.to_string_lossy().into_owned());
+        let Some(first) = videos.next() else {
+            self.show_toast(
+                "Not a video",
+                "Drop video files such as MP4, MKV, MOV or WebM.",
+                ToastKind::Error,
+            );
+            return;
+        };
+        let rest = videos.collect::<Vec<_>>();
+        if self.queue.running() {
+            self.queue.add(&first);
+        } else {
+            self.load_source(&first);
+            if !rest.is_empty() {
+                self.queue.add(&first);
+            }
+        }
+        for path in &rest {
+            self.queue.add(path);
+        }
+        self.page = PROCESS_PAGE;
+    }
+}
+
+/// The engine answers with a resolved path, which may differ only in spelling.
+fn same_file(left: &str, right: &str) -> bool {
+    let tidy = |path: &str| path.trim().replace('/', "\\").to_lowercase();
+    tidy(left) == tidy(right)
+        || matches!(
+            (
+                std::fs::canonicalize(left.trim()),
+                std::fs::canonicalize(right.trim())
+            ),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
+#[cfg(windows)]
+fn window_handle(ctx: &eframe::CreationContext<'_>) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match ctx.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+        _ => None,
+    }
+}
+
+#[cfg(not(windows))]
+fn window_handle(_: &eframe::CreationContext<'_>) -> Option<isize> {
+    None
 }
 
 fn main() -> eframe::Result<()> {
@@ -6356,9 +2622,10 @@ fn main() -> eframe::Result<()> {
         .unwrap_or_default();
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("REAL Video Enhancer")
-        .with_inner_size([1440.0, 920.0])
-        .with_min_inner_size([860.0, 640.0])
+        .with_inner_size([1360.0, 880.0])
+        .with_min_inner_size([860.0, 620.0])
         .with_resizable(true)
+        .with_transparent(true)
         .with_icon(icon);
     #[cfg(windows)]
     {

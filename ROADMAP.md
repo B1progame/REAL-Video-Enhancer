@@ -4,12 +4,12 @@ This roadmap describes the direction of the B1progame fork. The upstream Python 
 
 ## Available now
 
-- Native Rust desktop shell with Home, Process, Downloads, Runtime, Python, and Settings pages.
+- Native Rust desktop shell with Home, Studio, Models, Community, Benchmarks, Runtime, Python, and Settings pages.
 - Existing Python rendering engine and runtime setup connected through a local-only service.
 - Windows or WSL Ubuntu model storage selection and guided model preparation.
-- Appearance selection, locally persisted accent color, and reduced-motion preference.
+- Windows acrylic and Mica materials, accent gradients, adjustable shape and size, and reduced-motion preference.
 - Shared native design tokens, Lucide navigation, responsive screen layouts, and theme-matched Windows title bar.
-- Source-frame previews and metadata in Process, plus searchable local model catalog in Downloads.
+- Source-frame previews and metadata in Studio, a render queue, and a multi-select model downloader in Models.
 - GitHub release check plus a verified in-app download, silent install, and automatic restart that keeps app data. Private release access uses the signed-in GitHub CLI.
 - Inno Setup 7 Windows installer and an uninstaller choice to remove managed models and runtime data.
 
@@ -24,7 +24,7 @@ This roadmap describes the direction of the B1progame fork. The upstream Python 
 
 - Finish and validate the preserved AnimeScripter integration as a separate effort. It is unfinished and is not part of the supported enhancement flow yet.
 - Continue reducing startup and idle resource use while keeping the existing Python engine behavior.
-- Expand keyboard navigation and screen-reader review across the six pages.
+- Expand keyboard navigation and screen-reader review across the eight pages.
 - Improve recovery and retry controls for model and runtime operations where the engine supports them.
 
 ## Not planned for this roadmap

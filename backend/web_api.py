@@ -89,7 +89,7 @@ PYTHON_VERSION = "3.12.9"
 UPDATE_REPOSITORY = "B1progame/REAL-Video-Enhancer"
 UPDATE_API = f"https://api.github.com/repos/{UPDATE_REPOSITORY}/releases/latest"
 UPDATE_DOWNLOAD_PREFIX = f"https://github.com/{UPDATE_REPOSITORY}/releases/download/"
-APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.4.80")
+APP_VERSION = os.environ.get("RVE_APP_VERSION", "2.5.0")
 update_lock = threading.RLock()
 github_token_lock = threading.RLock()
 github_token_value = None
@@ -779,6 +779,11 @@ def download_openmodel_worker(job_id, model, choice):
 
 
 def _directory_size(path, exclude_top_level=()):
+    """Total file size without following links.
+
+    ``os.scandir`` returns sizes with the directory listing on Windows, which is
+    several times faster than a separate ``stat`` call per file.
+    """
     root = Path(path)
     if not root.exists():
         return 0
@@ -788,22 +793,113 @@ def _directory_size(path, exclude_top_level=()):
         except OSError:
             return 0
     total = 0
-    try:
-        for current, directories, files in os.walk(root, followlinks=False):
-            current_path = Path(current)
-            if current_path == root:
-                directories[:] = [name for name in directories if name not in exclude_top_level]
-            directories[:] = [name for name in directories if not (current_path / name).is_symlink()]
-            for name in files:
-                target = current_path / name
-                try:
-                    if not target.is_symlink():
-                        total += target.stat().st_size
-                except OSError:
-                    continue
-    except OSError:
-        pass
+    pending = [(str(root), True)]
+    while pending:
+        current, top_level = pending.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if not (top_level and entry.name in exclude_top_level):
+                                pending.append((entry.path, False))
+                        else:
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
     return total
+
+
+# Files that only matter when compiling C++ extensions against PyTorch. The
+# renderer loads the DLLs; it never links against these.
+TORCH_BUILD_ONLY_PATTERNS = ("lib/*.lib", "include", "test")
+
+
+def runtime_site_packages(python_root=None):
+    root = Path(python_root or LOCAL_DATA / "python")
+    if not root.is_dir():
+        return []
+    found = []
+    for pattern in ("*/Lib/site-packages", "*/*/Lib/site-packages",
+                    "*/lib/python*/site-packages", "*/*/lib/python*/site-packages"):
+        found.extend(path for path in root.glob(pattern) if path.is_dir())
+    return list(dict.fromkeys(found))
+
+
+def slim_targets(python_root=None):
+    """Build-only PyTorch files inside the app-managed runtime."""
+    targets = []
+    for site_packages in runtime_site_packages(python_root):
+        torch_dir = site_packages / "torch"
+        for pattern in TORCH_BUILD_ONLY_PATTERNS:
+            targets.extend(path for path in torch_dir.glob(pattern) if not path.is_symlink())
+    return targets
+
+
+def reclaimable_runtime_bytes(python_root=None):
+    return sum(_directory_size(path) for path in slim_targets(python_root))
+
+
+def slim_runtime(python_root=None):
+    """Delete build-only files and return (bytes_freed, failures)."""
+    freed, failures = 0, []
+    for target in slim_targets(python_root):
+        size = _directory_size(target)
+        try:
+            shutil.rmtree(target) if target.is_dir() else target.unlink()
+            freed += size
+        except OSError as exc:
+            failures.append(f"{target.name}: {exc}")
+    return freed, failures
+
+
+def model_inventory(backend="pytorch"):
+    """Every downloadable weight for a backend with its installed state and size."""
+    backend, catalog = model_catalog(backend)
+    status = catalog_model_status(catalog)
+    # Measuring file sizes would boot a stopped WSL distro, so skip it then.
+    wsl_asleep = (os.name == "nt" and os.environ.get("RVE_MODEL_STORAGE", "wsl").lower() == "wsl"
+                  and not wsl_distro_is_running())
+    models = []
+    for category, entries in catalog.items():
+        for label, spec in entries.items():
+            installed = bool(status.get(category, {}).get(label))
+            custom = len(spec) > 3 and str(spec[3]) == "custom"
+            size = 0
+            if installed and not wsl_asleep:
+                found = find_model_file(spec[0])
+                size = _directory_size(found) if found else 0
+            models.append({"category": category, "label": label, "file": str(spec[0]),
+                           "scale": spec[2] if len(spec) > 2 else 1,
+                           "arch": str(spec[3]) if len(spec) > 3 else "",
+                           "installed": installed, "custom": custom, "bytes": size})
+    return {"backend": backend, "models": models, "sizes_known": not wsl_asleep}
+
+
+def delete_catalog_model(backend, category, label):
+    """Remove one downloaded catalog weight. Custom imports are managed elsewhere."""
+    with download_lock:
+        if download_job.get("active"):
+            raise ValueError("Wait for the active model download to finish before deleting.")
+    if render.get("status") in ("preparing", "running", "paused", "stopping") or benchmark_job.get("status") == "running":
+        raise ValueError("Wait for the active render or benchmark to finish before deleting.")
+    activate_wsl_model_dir()
+    backend, catalog = model_catalog(backend)
+    spec = catalog.get(str(category), {}).get(str(label))
+    if not spec or (len(spec) > 3 and str(spec[3]) == "custom"):
+        raise ValueError("That model is not a downloadable catalog model.")
+    filename = str(spec[0])
+    if filename in ("", ".", "..") or Path(filename).name != filename:
+        raise ValueError("Invalid model filename.")
+    found = find_model_file(filename)
+    if not found:
+        return {"ok": True, "detail": f"{label} is already removed."}
+    shutil.rmtree(found) if found.is_dir() else found.unlink()
+    return {"ok": True, "detail": f"Removed {label}."}
 
 
 def storage_footprint():
@@ -878,12 +974,13 @@ def storage_footprint():
                        "bytes": model_bytes, "location": str(MODEL_DIR),
                        "storage": "wsl" if os.name == "nt" and os.environ.get("RVE_MODEL_STORAGE", "wsl").lower() == "wsl" else "windows"})
     windows_total = sum(item["bytes"] for item in components if item["storage"] == "windows")
+    reclaimable = reclaimable_runtime_bytes(python_root)
     wsl_total = sum(item["bytes"] for item in components if item["storage"] == "wsl")
     try:
         free_bytes = shutil.disk_usage(LOCAL_DATA).free
     except OSError:
         free_bytes = None
-    return {"components": components, "total_bytes": windows_total + wsl_total,
+    return {"reclaimable_bytes": reclaimable, "components": components, "total_bytes": windows_total + wsl_total,
             "windows_bytes": windows_total, "wsl_bytes": wsl_total, "wsl_running": wsl_running,
             "wsl_measurement_cached": not wsl_running and wsl_total > 0,
             "wsl_size_known": wsl_size_known,
@@ -1304,7 +1401,7 @@ def download_one_model(label, spec, index=1, count=1):
     return {"label": label, "status": "downloaded", "path": str(installed)}
 
 
-def run_model_download(job_id, backend, selections=None, categories=None):
+def run_model_download(job_id, backend, selections=None, categories=None, items=None):
     try:
         activate_wsl_model_dir()
         if backend == "all":
@@ -1312,7 +1409,15 @@ def run_model_download(job_id, backend, selections=None, categories=None):
         else:
             catalogs = {backend: model_catalog(backend)[1]}
         requested = []
-        if selections:
+        if items:
+            for item in items:
+                category, label = str(item.get("category") or ""), str(item.get("label") or "")
+                spec = next((entries.get(category, {}).get(label) for entries in catalogs.values()
+                             if entries.get(category, {}).get(label) is not None), None)
+                if spec is None:
+                    raise ValueError(f"Unknown {category} model: {label}")
+                requested.append((label, spec))
+        elif selections:
             for category, label in selections.items():
                 if not label:
                     continue
@@ -1337,12 +1442,16 @@ def run_model_download(job_id, backend, selections=None, categories=None):
         requested = list(deduplicated.values())
         total = len(requested)
         results, errors = [], []
+        with download_lock:
+            download_job.update(items=[label for label, _ in requested], done=[])
         for index, (label, spec) in enumerate(requested, 1):
             with download_lock:
                 download_job.update(active=True, status="downloading", progress=round((index - 1) * 100 / max(total, 1), 1), label=label,
                                     detail=f"Model {index} of {total} · preparing download", bytes_received=0, bytes_total=0, stage="Downloading")
             try:
                 result = download_one_model(label, spec, index, total)
+                with download_lock:
+                    download_job.setdefault("done", []).append(label)
                 results.append(result)
             except Exception as exc:
                 if isinstance(exc, InterruptedError):
@@ -1363,7 +1472,7 @@ def run_model_download(job_id, backend, selections=None, categories=None):
             download_job.update(active=False, status="error", error=str(exc), detail=str(exc), progress=0)
 
 
-def start_model_download(backend, selections=None, categories=None):
+def start_model_download(backend, selections=None, categories=None, items=None):
     with download_lock:
         if download_job.get("active"):
             raise ValueError("A model download is already in progress.")
@@ -1373,8 +1482,8 @@ def start_model_download(backend, selections=None, categories=None):
             raise ValueError("Wait for runtime or storage setup to finish before downloading models.")
         cancel_event.clear()
         job_id = uuid.uuid4().hex
-        download_job.update(id=job_id, active=True, status="queued", progress=0, label="", detail="Preparing model download…", error="", results=[])
-    threading.Thread(target=run_model_download, args=(job_id, backend, selections, categories), daemon=True).start()
+        download_job.update(id=job_id, active=True, status="queued", progress=0, label="", detail="Preparing model download…", error="", results=[], items=[], done=[])
+    threading.Thread(target=run_model_download, args=(job_id, backend, selections, categories, items), daemon=True).start()
     return {key: value for key, value in download_job.items() if key != "results"}
 
 
@@ -1733,6 +1842,56 @@ def selected_backend_is_available(capabilities, backend):
     return bool(capabilities.get("opencv_available")) and selected in capabilities.get("available_backends", [])
 
 
+def operating_system_label():
+    release = platform.release()
+    # Windows 11 still reports release "10" to Python 3.11.
+    if os.name == "nt" and release == "10" and sys.getwindowsversion().build >= 22000:
+        release = "11"
+    return f"{platform.system()} {release} {platform.machine()}"
+
+
+def runtime_signature(interpreter, probe_code):
+    """Changes whenever the interpreter, its packages, or the probe change."""
+    path = Path(shutil.which(interpreter) or interpreter)
+    parts = [str(path), hashlib.sha256(probe_code.encode("utf-8")).hexdigest()]
+    try:
+        parts.append(str(path.stat().st_mtime_ns))
+    except OSError:
+        return None
+    packages = []
+    for root in (path.parent, path.parent.parent):
+        for site_packages in (root / "Lib" / "site-packages", *root.glob("lib/python*/site-packages")):
+            if site_packages.is_dir():
+                packages.extend(sorted(item.name for item in site_packages.glob("*.dist-info")))
+    if not packages:
+        return None
+    parts.extend(packages)
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def run_capability_probe(interpreter, probe_code, refresh=False):
+    """Importing PyTorch takes several seconds, so reuse the last good answer."""
+    cache_file = APP_DATA / "capability-probe.json"
+    signature = runtime_signature(interpreter, probe_code)
+    if signature and not refresh:
+        try:
+            cached = json.loads(cache_file.read_text(encoding="utf-8"))
+            if cached.get("signature") == signature:
+                return subprocess.CompletedProcess([interpreter], 0, cached["stdout"], "")
+        except (OSError, ValueError, KeyError, AttributeError):
+            pass
+    probe = run_hidden_process([interpreter, "-c", probe_code], capture_output=True, text=True, timeout=120)
+    # Only a runtime that actually works is worth remembering; a broken one
+    # may be repaired in ways the signature cannot see.
+    if signature and probe.returncode == 0 and "installed_pytorch=True" in probe.stdout:
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text(json.dumps({"signature": signature, "stdout": probe.stdout}), encoding="utf-8")
+        except OSError:
+            pass
+    return probe
+
+
 def python_capabilities(refresh=False):
     """Probe the managed runtime once and reuse the result for render requests.
 
@@ -1750,7 +1909,7 @@ def python_capabilities(refresh=False):
               "ffmpeg_available": bool(Path(ffmpeg_path).is_file()),
               "available_backends": [], "runtime_root": str(APP_DATA), "working_directory": str(APP_DATA),
               "backend_script_path": str(BACKEND), "python_runtime": PYTHON, "python_target_path": PYTHON,
-              "temp_directory": str(APP_DATA / "temp"), "version": APP_VERSION, "os": f"{platform.system()} {platform.release()} {platform.machine()}",
+              "temp_directory": str(APP_DATA / "temp"), "version": APP_VERSION, "os": operating_system_label(),
               "gpu_name": "Not detected", "cuda_version": "Not detected",
               "cpu": platform.processor() or platform.machine(), "ram": "Unavailable", "available_disk_gb": None,
               "recommended_backend_label": "Install the project runtime dependencies", "recommended_backend_reason": "The API is connected; render support depends on PyTorch/OpenCV and model weights."}
@@ -1818,7 +1977,7 @@ print('installed_ncnn=' + str(installed_ncnn))
 print('installed_tensorrt=' + str(installed_tensorrt))
 print('tensorrt_error=' + tensorrt_error.replace('\\n', ' '))
 """
-        probe = run_hidden_process([PYTHON, "-c", probe_code], capture_output=True, text=True, timeout=120)
+        probe = run_capability_probe(PYTHON, probe_code, refresh)
         result["opencv_available"] = probe.returncode == 0 and "opencv=True" in probe.stdout
         if probe.returncode == 0:
             lines = dict(line.split("=", 1) for line in probe.stdout.splitlines() if "=" in line)
@@ -2289,6 +2448,14 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
                                 env=managed_uv_environment())
             set_install_state(status="completed", progress=100, stage="Cache cleanup complete",
                               detail="Unused uv cache entries were pruned. The installed Python runtime and packages remain in place.")
+        elif action == "slim":
+            set_install_state(status="running", progress=20, stage="Slimming runtime",
+                              detail="Removing build-only PyTorch files. Rendering is not affected.", output=[])
+            freed, failures = slim_runtime()
+            if failures:
+                raise RuntimeError("Some files could not be removed: " + "; ".join(failures[:5]))
+            set_install_state(status="completed", progress=100, stage="Runtime slimmed",
+                              detail=f"Freed {freed / 1024 ** 3:.2f} GB of build-only files.")
         elif action == "recommended":
             ensure_managed_python()
             uv = ensure_uv()
@@ -2316,6 +2483,7 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
                 else: asset = "ffmpeg" if platform.machine() in ("AMD64", "x86_64") else "ffmpeg-linux-arm64"
                 set_install_state(stage="Downloading FFmpeg", progress=92)
                 download_runtime_file("https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/" + asset, ffmpeg)
+            slim_runtime()
             tas_ready = bool(find_animescripter())
             detail = f"Recommended runtime and {backend} backend installed. "
             detail += "AnimeScripter CLI is already available." if tas_ready else "AnimeScripter remains optional and is not installed with the Windows runtime."
@@ -2362,6 +2530,8 @@ def setup_runtime_worker(action="recommended", backend="pytorch", payload=None):
                 if tv_version:
                     torchvision_command = uv_pip_install_command(uv, PYTHON, pytorch_indexes=True, no_deps=True)
                     run_runtime_command(torchvision_command + [f"torchvision=={tv_version}{suffix}"], "Installing compatible torchvision", 80, env=managed_uv_environment())
+            if action == "install":
+                slim_runtime()
             set_install_state(status="completed", progress=100, stage="Backend operation complete", detail=f"{backend} {action} completed. Refresh backend status to see the result.")
     except Exception as exc:
         message = str(exc).strip()
@@ -3193,6 +3363,9 @@ class Handler(BaseHTTPRequestHandler):
             respond_json(self, models); return
         if path == "/api/benchmarks/status":
             respond_json(self, benchmark_snapshot()); return
+        if path == "/api/models/inventory":
+            backend = urllib.parse.parse_qs(url.query).get("backend", ["pytorch"])[0]
+            respond_json(self, model_inventory(backend)); return
         if path == "/api/models/download_status":
             with download_lock:
                 snapshot = dict(download_job)
@@ -3282,11 +3455,20 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     selections = None
                     categories = payload.get("categories") or []
-                result = start_model_download(backend, selections=selections, categories=categories)
+                items = payload.get("items")
+                if items is not None:
+                    if not isinstance(items, list) or not items or not all(isinstance(item, dict) for item in items):
+                        raise ValueError("Choose at least one model to download.")
+                result = start_model_download(backend, selections=selections, categories=categories, items=items)
                 respond_json(self, result, 202); return
             if path == "/api/startup/install":
                 result = begin_runtime_operation("recommended", "pytorch", payload)
                 respond_json(self, result, 202); return
+            if path == "/api/models/delete":
+                respond_json(self, delete_catalog_model(payload.get("backend"), payload.get("category"), payload.get("label"))); return
+            if path == "/api/storage/slim":
+                result = begin_runtime_operation("slim", "torch", payload)
+                respond_json(self, {"ok": True, "state": result}, 202); return
             if path == "/api/storage/prune-cache":
                 result = begin_runtime_operation("prune-cache", "uv", payload)
                 respond_json(self, {"ok": True, "state": result}, 202); return

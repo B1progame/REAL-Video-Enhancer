@@ -1,6 +1,6 @@
 [package]
 name = "rve-native"
-version = "2.4.80"
+version = "2.5.0"
 edition = "2024"
 publish = false
 license = "AGPL-3.0-only"
@@ -21,7 +21,8 @@ tray-icon = { version = "0.26.1", default-features = false }
 winres = "0.1.12"
 
 [profile.release]
-lto = "thin"
+lto = true
+opt-level = "s"
 codegen-units = 1
 strip = true
 panic = "abort"

@@ -1,5 +1,21 @@
 # Changelog
 
+## 2.5.0 — 2026-11-27
+
+- Rebuild the interface on Windows acrylic, Mica, or Mica Alt with adjustable see-through strength, ten accent gradients plus a custom colour, corner roundness, interface size, ambient light, and animated navigation and page transitions.
+- Add a multi-select model downloader with per-category icons, filters, installed sizes, and per-model delete.
+- Add a render queue, recent videos, finished-render history, a Ctrl+K command palette, and a taskbar flash when a render finishes.
+- Add “Slim runtime” to remove build-only PyTorch files, and do so automatically after runtime installs.
+- Ship a smaller engine (no Tcl/Tk, tests, or bytecode) and a smaller app binary.
+- Fix file dialogs timing out after 25 seconds, dropped files being lost while the engine was busy, thumbnails staying failed after eviction, a failed update installer being relaunched repeatedly, the window not being resizable by its edges, and two layout breakpoints.
+- Cap preview and thumbnail memory, stop repainting while nothing changes, and start the engine off the interface thread.
+- Redraw the app icon edge to edge so it is no longer undersized in Start and the taskbar.
+- Redesign Settings into Appearance, Rendering, Storage, Updates, and About tabs, and rebuild Runtime, Python, Benchmarks, and the Studio options with icons and drawn illustrations.
+- Show every long job with the same progress bar, elapsed time, ETA or speed, and Cancel button, on whichever page is open.
+- Add a disk-usage chart and a chart of the fastest benchmarked models.
+- Cache the PyTorch capability check until installed packages change, so the engine connects in a fraction of a second after the first launch.
+- Measure folder sizes many times faster.
+
 ## 2.4.80 — 2026-11-25
 
 - Add a confirmed “Prune unused package cache” action to Settings, using uv’s safe cache pruning so installed Python packages remain available while unused cached downloads can be reclaimed.

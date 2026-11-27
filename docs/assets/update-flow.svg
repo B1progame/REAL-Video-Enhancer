@@ -27,7 +27,7 @@
   <g>
     <rect x="872" y="45" width="296" height="185" rx="18" fill="#15323a" stroke="#15323a"/>
     <circle cx="905" cy="81" r="17" fill="url(#accent)"/><text x="905" y="86" text-anchor="middle" font-size="14" font-weight="700" fill="#0e3032">4</text>
-    <text x="932" y="86" class="n" fill="#93dcd7">BACK IN RVE</text><text x="894" y="133" class="h" fill="#f5fbfa">Keep working</text><text x="894" y="165" class="p" fill="#b2c8c9">Settings and models stay</text><text x="894" y="187" class="p" fill="#b2c8c9">in their existing locations.</text>
+    <text x="932" y="86" class="n" style="fill:#93dcd7">BACK IN RVE</text><text x="894" y="133" class="h" style="fill:#f5fbfa">Keep working</text><text x="894" y="165" class="p" style="fill:#b2c8c9">Settings and models stay</text><text x="894" y="187" class="p" style="fill:#b2c8c9">in their existing locations.</text>
   </g>
   <rect x="32" y="258" width="1136" height="4" rx="2" fill="#d2e1e2"/><rect x="32" y="258" width="1136" height="4" rx="2" fill="url(#accent)"/>
 </svg>
