@@ -1,6 +1,6 @@
 #define MyAppName "REAL Video Enhancer"
 #ifndef MyAppVersion
-#define MyAppVersion "2.5.0"
+#define MyAppVersion "2.5.1"
 #endif
 #define MyAppPublisher "B1progame"
 #define MyAppURL "https://github.com/B1progame/REAL-Video-Enhancer"
@@ -65,9 +65,11 @@ Name: "{group}\Uninstall {#MyAppName}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; WorkingDir: "{app}"; IconFilename: "{app}\logo-v3.ico"; IconIndex: 0; AppUserModelID: "B1progame.REALVideoEnhancer"
 
 [Run]
-; Keep Setup's RedirectionGuard in place, but don't pass it to the application.
-; This preserves automatic startup without adding a Finish-page checkbox.
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch REAL Video Enhancer"; Flags: nowait runasoriginaluser
+; Setup runs with RedirectionGuard, and a process it starts inherits it. The app
+; would then be unable to follow the folder links uv creates ("os error 448").
+; Handing the launch to the running Explorer shell starts it without the guard,
+; and keeps automatic startup without a Finish-page checkbox.
+Filename: "{win}\explorer.exe"; Parameters: """{app}\{#MyAppExeName}"""; Description: "Launch REAL Video Enhancer"; Flags: nowait runasoriginaluser
 
 [Code]
 var

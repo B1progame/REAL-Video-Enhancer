@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.5.1 — 2026-11-27
+
+- Fix runtime setup failing with “os error 448” when the app was opened by the installer. The installer now opens the app through Windows Explorer so it does not inherit Setup's RedirectionGuard.
+
 ## 2.5.0 — 2026-11-27
 
 - Rebuild the interface on Windows acrylic, Mica, or Mica Alt with adjustable see-through strength, ten accent gradients plus a custom colour, corner roundness, interface size, ambient light, and animated navigation and page transitions.

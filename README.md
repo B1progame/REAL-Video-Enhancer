@@ -4,7 +4,7 @@
 
 <br />
 
-[![Latest release](https://img.shields.io/badge/release-2.5.0-00bebe?style=for-the-badge)](https://github.com/B1progame/REAL-Video-Enhancer/releases/latest)
+[![Latest release](https://img.shields.io/badge/release-2.5.1-00bebe?style=for-the-badge)](https://github.com/B1progame/REAL-Video-Enhancer/releases/latest)
 ![Windows 11](https://img.shields.io/badge/Windows-11-5c78f6?style=for-the-badge)
 ![Rust and egui](https://img.shields.io/badge/UI-Rust%20%2B%20egui-966cf4?style=for-the-badge)
 ![Python engine](https://img.shields.io/badge/engine-Python-2cbe86?style=for-the-badge)
