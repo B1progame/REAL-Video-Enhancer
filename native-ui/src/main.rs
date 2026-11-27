@@ -645,6 +645,7 @@ struct NativeApp {
     library_search: String,
     library_category: String,
     benchmark_search: String,
+    benchmark_installed_only: bool,
     benchmark_category: String,
     benchmark_resolutions: HashMap<String, bool>,
     benchmark_frames: usize,
@@ -764,6 +765,7 @@ impl NativeApp {
             library_search: String::new(),
             library_category: "all".to_owned(),
             benchmark_search: String::new(),
+            benchmark_installed_only: false,
             benchmark_category: "all".to_owned(),
             benchmark_resolutions: ["720p", "1080p", "4K"]
                 .into_iter()

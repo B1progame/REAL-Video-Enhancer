@@ -1842,6 +1842,19 @@ def selected_backend_is_available(capabilities, backend):
     return bool(capabilities.get("opencv_available")) and selected in capabilities.get("available_backends", [])
 
 
+def processor_name():
+    if os.name == "nt":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+                name = str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+            if name:
+                return name
+        except OSError:
+            pass
+    return platform.processor() or platform.machine()
+
+
 def operating_system_label():
     release = platform.release()
     # Windows 11 still reports release "10" to Python 3.11.
@@ -1911,7 +1924,7 @@ def python_capabilities(refresh=False):
               "backend_script_path": str(BACKEND), "python_runtime": PYTHON, "python_target_path": PYTHON,
               "temp_directory": str(APP_DATA / "temp"), "version": APP_VERSION, "os": operating_system_label(),
               "gpu_name": "Not detected", "cuda_version": "Not detected",
-              "cpu": platform.processor() or platform.machine(), "ram": "Unavailable", "available_disk_gb": None,
+              "cpu": processor_name(), "ram": "Unavailable", "available_disk_gb": None,
               "recommended_backend_label": "Install the project runtime dependencies", "recommended_backend_reason": "The API is connected; render support depends on PyTorch/OpenCV and model weights."}
     try:
         if not PYTHON:

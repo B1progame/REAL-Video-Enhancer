@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Redesign the bottom of the Benchmarks page: collapsible category cards, a result pill per resolution, an installed-only filter, and hardware tiles. Fixes the results list being squeezed and cut off.
+- Show the processor's real name instead of its CPUID family string.
+
 ## 2.5.1 — 2026-11-27
 
 - Fix runtime setup failing with “os error 448” when the app was opened by the installer. The installer now opens the app through Windows Explorer so it does not inherit Setup's RedirectionGuard.

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::{
     NativeApp, ToastKind, backend_is_installed,
-    ui::{components, icons, theme},
+    ui::{components, theme},
 };
 
 const CATEGORIES: [(&str, &str); 5] = [
@@ -37,6 +37,187 @@ fn fastest<'a>(results: &'a Value, backend: &str, count: usize) -> Vec<(&'a str,
     best.sort_by(|a, b| b.2.total_cmp(&a.2));
     best.truncate(count);
     best
+}
+
+#[derive(Debug, PartialEq)]
+enum Cell<'a> {
+    Unmeasured,
+    Done(f64),
+    Failed(&'a str),
+}
+
+/// The newest result for one model at one resolution.
+fn cell<'a>(
+    results: &'a Value,
+    backend: &str,
+    category: &str,
+    model: &str,
+    resolution: &str,
+) -> Cell<'a> {
+    let latest = results.as_array().and_then(|items| {
+        items.iter().rev().find(|item| {
+            item["backend"] == backend
+                && item["category"] == category
+                && item["model"] == model
+                && item["resolution"] == resolution
+        })
+    });
+    match latest {
+        Some(item) if item["status"] == "complete" => {
+            Cell::Done(item["measured_fps"].as_f64().unwrap_or(0.0))
+        }
+        Some(item) if item["status"] == "error" => {
+            Cell::Failed(item["error"].as_str().unwrap_or("Benchmark failed."))
+        }
+        _ => Cell::Unmeasured,
+    }
+}
+
+/// A card that opens to show the models of one purpose.
+fn category_group(
+    ui: &mut egui::Ui,
+    category: &str,
+    title: &str,
+    ready: usize,
+    total: usize,
+    forced_open: bool,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    let palette = components::palette_of(ui);
+    let id = ui.make_persistent_id(("benchmark-group", category));
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    let open = state.is_open() || forced_open;
+    egui::Frame::new()
+        .fill(palette.elevated.gamma_multiply(0.55))
+        .stroke(egui::Stroke::new(1.0, palette.border))
+        .corner_radius(theme::control_radius() + 3)
+        .inner_margin(egui::Margin::same(10))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            let header = ui
+                .horizontal(|ui| {
+                    components::icon_tile(ui, category, palette.accent, 34.0);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 1.0;
+                        ui.label(
+                            RichText::new(title)
+                                .font(theme::title_font(14.0))
+                                .color(palette.text),
+                        );
+                        ui.label(
+                            RichText::new(format!("{ready} of {total} installed"))
+                                .size(11.5)
+                                .color(if ready > 0 {
+                                    palette.success
+                                } else {
+                                    palette.muted
+                                }),
+                        );
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (arrow, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                        let center = arrow.center();
+                        let tip = if open { -3.0 } else { 3.0 };
+                        ui.painter().add(egui::Shape::line(
+                            vec![
+                                center + Vec2::new(-5.0, -tip),
+                                center + Vec2::new(0.0, tip),
+                                center + Vec2::new(5.0, -tip),
+                            ],
+                            egui::Stroke::new(1.8, palette.secondary),
+                        ));
+                    });
+                })
+                .response;
+            let click = ui
+                .interact(header.rect, id.with("header"), Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            click.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, open, title));
+            if click.clicked() && !forced_open {
+                state.toggle(ui);
+            }
+            if forced_open {
+                ui.add_space(theme::space::XS);
+                body(ui);
+                state.store(ui.ctx());
+            } else {
+                state.show_body_unindented(ui, |ui| {
+                    ui.add_space(theme::space::XS);
+                    body(ui);
+                });
+            }
+        });
+}
+
+/// One model: its name and a pill per input resolution.
+fn model_row(ui: &mut egui::Ui, name: &str, installed: bool, cells: &[(&str, Cell)]) {
+    let palette = components::palette_of(ui);
+    egui::Frame::new()
+        .fill(palette.surface)
+        .corner_radius(theme::control_radius() + 1)
+        .inner_margin(egui::Margin::symmetric(11, 8))
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let dot = if installed {
+                    palette.success
+                } else {
+                    palette.muted
+                };
+                let (mark, response) = ui.allocate_exact_size(Vec2::splat(9.0), Sense::hover());
+                ui.painter().circle_filled(mark.center(), 4.0, dot);
+                response.on_hover_text(if installed {
+                    "Installed"
+                } else {
+                    "Not installed"
+                });
+                ui.add(
+                    egui::Label::new(RichText::new(name).size(12.5).color(if installed {
+                        palette.text
+                    } else {
+                        palette.secondary
+                    }))
+                    .truncate(),
+                )
+                .on_hover_text(name);
+            });
+            if !installed {
+                return;
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                for (resolution, state) in cells {
+                    let (value, tone, hint) = match state {
+                        Cell::Unmeasured => ("—".to_owned(), palette.muted, "Not measured yet"),
+                        Cell::Done(fps) => (
+                            format!("{fps:.1} fps"),
+                            palette.success,
+                            "Measured end to end",
+                        ),
+                        Cell::Failed(error) => ("failed".to_owned(), palette.error, *error),
+                    };
+                    egui::Frame::new()
+                        .fill(tone.gamma_multiply(0.13))
+                        .corner_radius(theme::control_radius())
+                        .inner_margin(egui::Margin::symmetric(9, 4))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(*resolution).size(11.0).color(palette.muted),
+                                );
+                                ui.label(
+                                    RichText::new(value)
+                                        .font(theme::title_font(11.5))
+                                        .color(tone),
+                                );
+                            });
+                        })
+                        .response
+                        .on_hover_text(hint);
+                }
+            });
+        });
 }
 
 impl NativeApp {
@@ -227,9 +408,7 @@ impl NativeApp {
     }
 
     pub(crate) fn benchmarks_page(&mut self, ui: &mut egui::Ui) {
-        let palette = self.palette();
         let categories = CATEGORIES;
-        let resolutions = RESOLUTIONS;
         let installed_count = categories
             .iter()
             .map(|(category, _)| {
@@ -246,147 +425,214 @@ impl NativeApp {
         self.benchmark_setup(ui, installed_count);
         ui.add_space(theme::space::MD);
         self.benchmark_chart(ui);
-
         ui.add_space(theme::space::MD);
-        components::card(ui, "All results", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Every catalog model is listed. Results are local measurements, saved on this PC.").color(palette.secondary));
-                ui.add_space(theme::space::MD);
-                ui.add(icons::styled("search", palette.muted, 16.0));
-                ui.add_sized(Vec2::new(ui.available_width().min(280.0), 36.0),
-                    egui::TextEdit::singleline(&mut self.benchmark_search).hint_text("Filter model names…"));
-            });
-            let failures = self.benchmarks["results"]
-                .as_array()
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter(|item| {
-                            item["backend"].as_str() == Some(self.backend.as_str())
-                                && item["status"] == "error"
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if !failures.is_empty() {
-                ui.add_space(theme::space::SM);
-                egui::CollapsingHeader::new(format!(
-                    "Benchmark errors · {} details",
-                    failures.len()
-                ))
-                .id_salt("benchmark-error-details")
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(190.0)
-                        .show(ui, |ui| {
-                            for result in failures.iter().rev().take(40) {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} · {} · {}",
-                                        result["category"].as_str().unwrap_or("model"),
-                                        result["model"].as_str().unwrap_or("Unknown model"),
-                                        result["resolution"].as_str().unwrap_or("resolution")
-                                    ))
-                                    .strong(),
-                                );
-                                ui.label(
-                                    RichText::new(result["error"].as_str().unwrap_or(
-                                        "The benchmark failed without an error message.",
-                                    ))
-                                    .size(11.0)
-                                    .color(palette.error),
-                                );
-                                ui.add_space(theme::space::XS);
-                            }
-                            if failures.len() > 40 {
-                                ui.label(
-                                    RichText::new("Showing the latest 40 errors.")
-                                        .size(11.0)
-                                        .color(palette.muted),
-                                );
-                            }
-                        });
-                });
-            }
-            ui.add_space(theme::space::SM);
-            egui::ScrollArea::vertical().max_height(650.0).show(ui, |ui| {
-                for (category, title) in categories {
-                    if self.benchmark_category != "all" && self.benchmark_category != category { continue; }
-                    let Some(names) = self.models[category].as_array() else { continue; };
-                    let matching = names.iter().filter_map(Value::as_str)
-                        .filter(|name| self.benchmark_search.trim().is_empty() || name.to_lowercase().contains(&self.benchmark_search.trim().to_lowercase()))
-                        .collect::<Vec<_>>();
-                    if matching.is_empty() { continue; }
-                    let ready_count = matching.iter().filter(|name| self.models["model_status"][category][**name].as_bool() == Some(true)).count();
-                    egui::CollapsingHeader::new(format!("{title} · {ready_count}/{} installed", matching.len()))
-                        .id_salt(("benchmark-category", category)).default_open(self.benchmark_category != "all")
-                        .show(ui, |ui| {
-                            egui::ScrollArea::horizontal().id_salt(("benchmark-table", category)).show(ui, |ui| {
-                                ui.set_min_width(790.0_f32.max(ui.available_width()));
-                                egui::Grid::new(("benchmark-grid", category)).num_columns(7).striped(true)
-                                    .min_col_width(76.0).show(ui, |ui| {
-                                        ui.add_sized(Vec2::new(260.0, 28.0), egui::Label::new(RichText::new("Model").strong()));
-                                        ui.label(RichText::new("Status").strong());
-                                        for resolution in resolutions { ui.label(RichText::new(resolution).strong()); }
-                                        ui.end_row();
-                                        for name in &matching {
-                                            let name = *name;
-                                            let installed = self.models["model_status"][category][name].as_bool() == Some(true);
-                                            ui.add_sized(Vec2::new(260.0, 32.0), egui::Label::new(RichText::new(name).size(12.0)).truncate()).on_hover_text(name);
-                                            components::status_dot(ui, if installed { palette.success } else { palette.muted }, if installed { "Installed" } else { "Not installed" });
-                                            for resolution in resolutions {
-                                                let result = self.benchmarks["results"].as_array().and_then(|items| items.iter().rev().find(|item| {
-                                                    item["backend"].as_str() == Some(self.backend.as_str())
-                                                        && item["category"].as_str() == Some(category)
-                                                        && item["model"].as_str() == Some(name)
-                                                        && item["resolution"].as_str() == Some(resolution)
-                                                }));
-                                                if let Some(result) = result.filter(|_| installed) {
-                                                    if result["status"] == "complete" {
-                                                        let fps = result["measured_fps"].as_f64().unwrap_or(0.0);
-                                                        let seconds = result["seconds"].as_f64().unwrap_or(0.0);
-                                                        ui.label(RichText::new(format!("{fps:.1} fps")).color(palette.success)).on_hover_text(format!("{seconds:.2} sec for {} frames · {} precision · GPU {} · {} px tiles · end-to-end", result["frames"].as_u64().unwrap_or(0), result["precision"].as_str().unwrap_or("auto"), result["gpu_id"].as_u64().unwrap_or(0), result["tile_size"].as_u64().unwrap_or(256)));
-                                                    } else if result["status"] == "error" {
-                                                        ui.colored_label(palette.error, "Failed").on_hover_text(result["error"].as_str().unwrap_or("Benchmark failed."));
-                                                    } else {
-                                                        ui.label(RichText::new("—").color(palette.muted));
-                                                    }
-                                                } else if installed {
-                                                    ui.label(RichText::new("—").color(palette.muted)).on_hover_text("Not measured on this PC yet.");
-                                                } else {
-                                                    ui.label(RichText::new("—").color(palette.muted));
-                                                }
-                                            }
-                                            ui.end_row();
-                                        }
-                                    });
-                            });
-                        });
-                    ui.add_space(theme::space::XS);
-                }
-                ui.label(RichText::new("Scene-change detectors are evaluated automatically during interpolation and are not standalone render models.").size(11.0).color(palette.muted));
-            });
-        });
+        self.benchmark_results(ui);
+        ui.add_space(theme::space::MD);
+        self.benchmark_hardware(ui, installed_count);
+    }
 
-        ui.add_space(theme::space::SM);
-        let system = &self.bootstrap["system"];
-        ui.label(
-            RichText::new(format!(
-                "{} · {} · {} RAM · {installed_count} installed models",
-                system["gpu_name"].as_str().unwrap_or("GPU not detected"),
-                system["cpu"].as_str().unwrap_or("CPU unavailable"),
-                system["ram"].as_str().unwrap_or("unknown"),
-            ))
-            .size(11.0)
-            .color(palette.secondary),
+    /// Every catalogue model, grouped by purpose. It grows with the page; a
+    /// second scroll box here would be squeezed to whatever height was left.
+    fn benchmark_results(&mut self, ui: &mut egui::Ui) {
+        let palette = self.palette();
+        components::section(
+            ui,
+            "database",
+            "All results",
+            "Every catalogue model. Measurements are taken and saved on this PC.",
+            |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add_sized(
+                        Vec2::new(ui.available_width().min(340.0), 36.0),
+                        egui::TextEdit::singleline(&mut self.benchmark_search)
+                            .margin(Vec2::new(12.0, 9.0))
+                            .hint_text("Filter model names…"),
+                    );
+                    if components::chip(
+                        ui,
+                        Some("check"),
+                        "Installed only",
+                        self.benchmark_installed_only,
+                    )
+                    .clicked()
+                    {
+                        self.benchmark_installed_only = !self.benchmark_installed_only;
+                    }
+                });
+                self.benchmark_failures(ui);
+
+                let query = self.benchmark_search.trim().to_lowercase();
+                let mut shown = 0;
+                for (category, title) in CATEGORIES {
+                    if self.benchmark_category != "all" && self.benchmark_category != category {
+                        continue;
+                    }
+                    let installed = |name: &str| {
+                        self.models["model_status"][category][name].as_bool() == Some(true)
+                    };
+                    let all = self.models[category]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>();
+                    let rows = all
+                        .iter()
+                        .copied()
+                        .filter(|name| query.is_empty() || name.to_lowercase().contains(&query))
+                        .filter(|name| !self.benchmark_installed_only || installed(name))
+                        .collect::<Vec<_>>();
+                    if rows.is_empty() {
+                        continue;
+                    }
+                    shown += 1;
+                    let ready = all.iter().filter(|name| installed(name)).count();
+                    // Searching or narrowing to one purpose opens the group.
+                    let forced = !query.is_empty() || self.benchmark_category != "all";
+                    category_group(ui, category, title, ready, all.len(), forced, |ui| {
+                        for name in &rows {
+                            model_row(
+                                ui,
+                                name,
+                                installed(name),
+                                &RESOLUTIONS.map(|resolution| {
+                                    (
+                                        resolution,
+                                        cell(
+                                            &self.benchmarks["results"],
+                                            &self.backend,
+                                            category,
+                                            name,
+                                            resolution,
+                                        ),
+                                    )
+                                }),
+                            );
+                        }
+                    });
+                }
+                if shown == 0 {
+                    components::empty_state(
+                        ui,
+                        "denoise",
+                        "No models to show",
+                        if !self.connected {
+                            "The list appears when the local engine connects."
+                        } else if self.benchmark_installed_only {
+                            "Nothing installed matches. Turn off “Installed only”."
+                        } else {
+                            "Try a different name or purpose."
+                        },
+                    );
+                }
+                ui.label(
+                    RichText::new(
+                        "Scene-change detectors run automatically during interpolation, so they are not measured on their own.",
+                    )
+                    .size(11.0)
+                    .color(palette.muted),
+                );
+            },
         );
+    }
+
+    fn benchmark_failures(&mut self, ui: &mut egui::Ui) {
+        let palette = self.palette();
+        let failures = self.benchmarks["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|item| item["backend"] == self.backend.as_str() && item["status"] == "error")
+            .collect::<Vec<_>>();
+        if failures.is_empty() {
+            return;
+        }
+        components::notice(
+            ui,
+            "warning",
+            palette.error,
+            &format!("{} benchmark(s) failed on this backend.", failures.len()),
+        );
+        egui::CollapsingHeader::new("Show error details")
+            .id_salt("benchmark-error-details")
+            .show(ui, |ui| {
+                for result in failures.iter().rev().take(20) {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {}",
+                            result["model"].as_str().unwrap_or("Unknown model"),
+                            result["resolution"].as_str().unwrap_or("")
+                        ))
+                        .font(theme::title_font(12.5)),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                result["error"]
+                                    .as_str()
+                                    .unwrap_or("The benchmark failed without a message."),
+                            )
+                            .size(11.0)
+                            .color(palette.error),
+                        )
+                        .wrap(),
+                    );
+                }
+            });
+    }
+
+    fn benchmark_hardware(&mut self, ui: &mut egui::Ui, installed_count: usize) {
+        let palette = self.palette();
+        let system = &self.bootstrap["system"];
+        let text = |key: &str| system[key].as_str().unwrap_or("Not detected").to_owned();
+        let tiles = [
+            ("gpu", "Graphics", text("gpu_name"), palette.success),
+            ("chip", "Processor", text("cpu"), palette.accent),
+            ("memory", "Memory", text("ram"), palette.accent_alt),
+            (
+                "package",
+                "Installed models",
+                installed_count.to_string(),
+                palette.warning,
+            ),
+        ];
+        let columns = if ui.available_width() >= 760.0 { 2 } else { 1 };
+        for row in tiles.chunks(columns) {
+            ui.columns(columns, |cells| {
+                for (cell, (icon, label, value, tone)) in cells.iter_mut().zip(row) {
+                    components::stat(cell, icon, *tone, label, value);
+                }
+            });
+            ui.add_space(theme::space::XS);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fastest;
+    use super::{Cell, cell, fastest};
     use serde_json::json;
+
+    #[test]
+    fn cell_uses_the_newest_matching_result() {
+        let entry = |status: &str, resolution: &str, fps: f64| {
+            json!({"backend": "pytorch", "category": "upscale", "model": "m",
+                   "resolution": resolution, "status": status, "measured_fps": fps, "error": "boom"})
+        };
+        let results = json!([
+            entry("complete", "720p", 5.0),
+            entry("complete", "720p", 9.0),
+            entry("error", "4K", 0.0)
+        ]);
+        let at = |resolution| cell(&results, "pytorch", "upscale", "m", resolution);
+        assert_eq!(at("720p"), Cell::Done(9.0));
+        assert_eq!(at("4K"), Cell::Failed("boom"));
+        assert_eq!(at("1080p"), Cell::Unmeasured);
+        assert_eq!(
+            cell(&results, "ncnn", "upscale", "m", "720p"),
+            Cell::Unmeasured
+        );
+    }
 
     #[test]
     fn fastest_keeps_only_completed_results_of_one_backend_in_order() {
