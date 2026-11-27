@@ -52,6 +52,8 @@ set "RVE_OUTPUT_FOLDER=release-stage-%RVE_VERSION%"
 if errorlevel 1 goto :build_failed
 
 echo [2/3] Compiling the Rust desktop interface...
+rem Keep the build account's folder names out of the released program.
+set "RUSTFLAGS=--remap-path-prefix=%USERPROFILE%=user"
 cargo build --release --manifest-path "native-ui\Cargo.toml"
 if errorlevel 1 goto :build_failed
 

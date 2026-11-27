@@ -89,7 +89,7 @@ For WSL details and manual model installation, see [WSL-UBUNTU.md](WSL-UBUNTU.md
 
 Open **Settings → Updates** and press **Check for updates**, then **Download and install**. The installer is verified against the checksum GitHub publishes, runs quietly, and reopens the app. Settings and models are kept.
 
-This repository is private, so the app needs access to read releases: either sign in once with GitHub CLI (`gh auth login`), or paste a read-only token under **Private repository access**. Saved tokens are encrypted for your Windows account.
+Checking and downloading updates needs no sign-in. The optional **Private repository access** field is only for people running their own private fork.
 
 Uninstalling asks whether to also remove the managed runtime, models and app data.
 

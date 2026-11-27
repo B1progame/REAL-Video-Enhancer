@@ -350,20 +350,33 @@ fn api_post(client: &ureq::Agent, endpoint: &str, payload: &Value) -> Result<Val
         .map_err(|error| error.to_string())
 }
 
+/// The folder that holds the engine: beside the installed app, or the source
+/// checkout above a development build. Found at run time so that no path from
+/// the build machine is compiled into the program.
 fn app_directory() -> PathBuf {
-    let executable_dir = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(Path::to_path_buf));
-    if let Some(dir) = executable_dir
-        && (dir.join("backend").is_dir()
-            || dir.join("RVE-Engine.exe").is_file()
-            || dir.join("RVE-Engine").join("RVE-Engine.exe").is_file())
-    {
-        return dir;
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .to_path_buf()
+    let executable = std::env::current_exe().ok();
+    let working = std::env::current_dir().ok();
+    find_engine_root(
+        executable
+            .as_deref()
+            .and_then(Path::parent)
+            .into_iter()
+            .chain(working.as_deref()),
+    )
+    .or(working)
+    .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// First starting folder, or ancestor of one, that contains an engine.
+fn find_engine_root<'a>(starts: impl Iterator<Item = &'a Path>) -> Option<PathBuf> {
+    starts
+        .flat_map(Path::ancestors)
+        .find(|dir| {
+            dir.join("backend").join("web_api.py").is_file()
+                || dir.join("RVE-Engine.exe").is_file()
+                || dir.join("RVE-Engine").join("RVE-Engine.exe").is_file()
+        })
+        .map(Path::to_path_buf)
 }
 
 fn start_engine(model_storage: &str) -> Result<Option<Child>, String> {
@@ -2674,6 +2687,18 @@ mod tests {
         pending_post_after_event, process_uses_two_columns, render_preview_is_available,
         runtime_metrics_use_two_columns, settings_uses_two_columns,
     };
+
+    #[test]
+    fn engine_is_found_from_a_nested_development_build() {
+        let root = std::env::temp_dir().join(format!("rve-root-{}", std::process::id()));
+        let build = root.join("native-ui").join("target").join("release");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::create_dir_all(root.join("backend")).unwrap();
+        std::fs::write(root.join("backend").join("web_api.py"), "").unwrap();
+        let found = super::find_engine_root(std::iter::once(build.as_path()));
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(found, Some(root));
+    }
 
     #[test]
     fn preview_query_encodes_windows_paths_safely() {
